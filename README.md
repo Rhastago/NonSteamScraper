@@ -8,10 +8,10 @@ Built for Steam Deck and Windows. No fuss, no subscriptions — just bring your 
 
 ## Download
 
-Go to [Releases](https://github.com/Rhastago/NonSteamScraperPOC/releases) and download the binary for your platform:
+Go to [Releases](https://github.com/Rhastago/NonSteamScraper/releases) and download the binary for your platform:
 
-- **Linux / Steam Deck** — `NonSteamScraper`
-- **Windows** — `NonSteamScraper.exe`
+- **Linux / Steam Deck** — `NonSteamScraper-linux`
+- **Windows** — `NonSteamScraper-windows.exe`
 
 No Python installation required. Just download and run.
 
@@ -47,7 +47,7 @@ Add every shortcut you want artwork for before opening this app.
 
 ### 3. Run the app and add your key
 
-Open NonSteamScraper, click ⚙ Settings, paste your key, and hit **Save**. The app verifies the key against SteamGridDB before saving it — you'll see a green ✓ confirmation.
+Open NonSteamScraper, click ⚙ Settings, paste your key, and hit **Save**. The app verifies the key against SteamGridDB before saving — you'll see a green ✓ confirmation.
 
 ### 4. Fetch artwork
 
@@ -68,17 +68,56 @@ Art changes take effect after Steam restarts. The app will remind you.
 | Feature | Details |
 |---|---|
 | Art types | Cover, Hero, Logo, Icon |
-| Alternatives | Up to 5 per art type, fetched on demand |
+| Alternatives | Up to 5 per art type, swappable after fetch |
 | Icon support | Written into `shortcuts.vdf` so Steam actually reads it |
 | Undo | Restores the previous fetch's artwork in one click |
 | Re-fetch | Reset a single game's art and fetch fresh results |
-| Rename | Override a game's search name if SteamGridDB can't find it |
-| Skip list | Games not found are hidden; reset them any time |
+| SGDB Search | Live search dialog with autocomplete — find the right match if auto-search misses it |
+| Art Style Preferences | Per-type filters for animated art, NSFW, humor, style variants, and more |
+| Skip list | Games not found on SGDB are hidden; reset individually or all at once |
+| Multi-account | Detects multiple Steam accounts and lets you switch between them |
 | Refresh | Reload the library mid-session after adding new shortcuts |
 | Cache | Thumbnails cached locally; auto-cleared after 30 days |
 | Themes | Dark mode (default) and light mode |
+| Window persistence | Remembers window position between sessions |
 | Resizable | All windows resize and scroll |
-| Cross-platform | Linux, Windows (macOS path support included, untested) |
+| Factory reset | One-click option to wipe all settings and start fresh |
+| Cross-platform | Linux (Steam Deck), Windows (macOS path support included, untested) |
+
+---
+
+## Art Style Preferences
+
+Click the 🎨 button to open Art Style Preferences. Each option has three states:
+
+| State | Meaning |
+|---|---|
+| **Always** | Only fetch artwork matching this filter |
+| **OK** | Include this type if other results are scarce |
+| **Never** | Exclude this type entirely |
+
+Available filters:
+
+- **Animated** — GIF/WebP animated artwork (note: files are larger and previews take longer to load)
+- **NSFW** — explicit adult content (confirmation required on first enable per session)
+- **Humor / Memes** — meme-style artwork
+- **Cover:** No logo overlay, Alternate style, Blurred, Material design
+- **Hero:** Alternate art, Blurred
+
+---
+
+## Settings
+
+| Setting | What it does |
+|---|---|
+| API Key | Paste and verify your SteamGridDB key |
+| Art Style Preferences | Fine-tune what kinds of artwork are fetched |
+| Appearance | Toggle dark / light mode |
+| Steam Account | Switch between accounts if you have more than one |
+| Cache | View cache size and clear thumbnails |
+| Steam | See if Steam is running; restart it from the app |
+| Clear All Artwork | Remove only art added by this app — manual art is untouched |
+| Factory Reset | Wipe everything (key, art, prefs, cache) and restart as first launch |
 
 ---
 
@@ -92,19 +131,6 @@ A backup of your original `shortcuts.vdf` is saved to `~/.steamart_backup/shortc
 
 ---
 
-## Settings
-
-| Setting | What it does |
-|---|---|
-| API Key | Paste and verify your SteamGridDB key |
-| Appearance | Toggle dark / light mode |
-| Steam Account | Switch between accounts if you have more than one |
-| Cache | View cache size and clear thumbnails |
-| Steam | See if Steam is running; restart it from the app |
-| Clear All Artwork | Remove only art added by this app — manual art is untouched |
-
----
-
 ## Data stored locally
 
 All state is stored in your home directory:
@@ -112,9 +138,11 @@ All state is stored in your home directory:
 | File | Purpose |
 |---|---|
 | `~/.steamart_apikey` | Your SteamGridDB API key |
+| `~/.steamart_prefs` | Art style preferences |
 | `~/.steamart_theme` | Dark or light mode preference |
+| `~/.steamart_geometry` | Saved window position |
 | `~/.steamart_skip` | Games permanently skipped (not found on SGDB) |
-| `~/.steamart_names` | Your corrected search names per game |
+| `~/.steamart_names` | Custom search name overrides per game |
 | `~/.steamart_managed` | Tracks which files this app created (for safe cleanup) |
 | `~/.steamart_cache/` | Thumbnail cache |
 | `~/.steamart_backup/` | Backup of previous artwork and shortcuts.vdf |
@@ -126,19 +154,18 @@ All state is stored in your home directory:
 Requires Python 3.10+ and pip.
 
 ```bash
-git clone https://github.com/Rhastago/NonSteamScraperPOC.git
-cd NonSteamScraperPOC
+git clone https://github.com/Rhastago/NonSteamScraper.git
+cd NonSteamScraper
 python3 -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install requests vdf Pillow psutil
+pip install -r requirements.txt
 python3 app.py
 ```
 
 ### Building a standalone executable
 
-**Linux:**
+**Linux (run from a native terminal — not the VSCode integrated terminal):**
 ```bash
-pip install pyinstaller
 pyinstaller --onefile --windowed --name NonSteamScraper \
   --add-data "icon.png:." \
   --hidden-import PIL._tkinter_finder \
@@ -147,15 +174,14 @@ pyinstaller --onefile --windowed --name NonSteamScraper \
   --hidden-import PIL.IcoImagePlugin --collect-all pillow app.py
 ```
 
-**Windows** (run in PowerShell):
-```powershell
-pip install pyinstaller
-pyinstaller --onefile --windowed --name NonSteamScraper --icon icon.ico `
-  --add-data "icon.png;." `
-  --hidden-import PIL._tkinter_finder `
-  --hidden-import PIL.PngImagePlugin --hidden-import PIL.JpegImagePlugin `
-  --hidden-import PIL.WebPImagePlugin --hidden-import PIL.GifImagePlugin `
-  --hidden-import PIL.IcoImagePlugin --hidden-import requests `
+**Windows (run in Git Bash or PowerShell):**
+```bash
+pyinstaller --onefile --windowed --name NonSteamScraper --icon icon.ico \
+  --add-data "icon.png;." \
+  --hidden-import PIL._tkinter_finder \
+  --hidden-import PIL.PngImagePlugin --hidden-import PIL.JpegImagePlugin \
+  --hidden-import PIL.WebPImagePlugin --hidden-import PIL.GifImagePlugin \
+  --hidden-import PIL.IcoImagePlugin --hidden-import requests \
   --hidden-import vdf --hidden-import psutil --collect-all pillow app.py
 ```
 
@@ -165,7 +191,7 @@ The executable will be in the `dist/` folder.
 
 ## License
 
-No license yet. Planning MIT for v1.0.
+MIT
 
 ---
 
