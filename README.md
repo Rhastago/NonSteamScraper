@@ -15,6 +15,8 @@ Go to [Releases](https://github.com/Rhastago/NonSteamScraper/releases) and downl
 
 No Python installation required. Just download and run.
 
+> **Windows note:** On first launch Windows may show a SmartScreen warning ("Windows protected your PC"). This is expected for unsigned freeware — click **More info → Run anyway** to proceed.
+
 ---
 
 ## What it does
@@ -182,7 +184,9 @@ pyinstaller --onefile --windowed --name NonSteamScraper --icon icon.ico \
   --hidden-import PIL.PngImagePlugin --hidden-import PIL.JpegImagePlugin \
   --hidden-import PIL.WebPImagePlugin --hidden-import PIL.GifImagePlugin \
   --hidden-import PIL.IcoImagePlugin --hidden-import requests \
-  --hidden-import vdf --hidden-import psutil --collect-all pillow app.py
+  --hidden-import vdf --hidden-import psutil \
+  --hidden-import _socket --hidden-import socket \
+  --collect-all pillow --collect-all multiprocessing app.py
 ```
 
 The executable will be in the `dist/` folder.
