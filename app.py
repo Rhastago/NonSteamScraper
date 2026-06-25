@@ -92,6 +92,7 @@ class SteamArtApp:
         self.selected_btn = None
         self.selected_rename_btn = None
         self.last_fetch_files = []
+        self._icon_cache = {}
         self.build_ui()
         clean_old_cache()
         self.load_games()
@@ -109,6 +110,36 @@ class SteamArtApp:
             self.window.iconphoto(True, self._icon_image)
         except Exception:
             pass
+
+    def _icon(self, name, size=18):
+        """Return a cached PhotoImage for assets/icons/{name}.png scaled to `size` px,
+        or None if it can't be loaded — callers fall back to their emoji/text so the UI
+        never breaks if an icon is missing or unbundled. Tk can't render color emoji,
+        so these bundled images are how the app shows colorful icons consistently."""
+        key = (name, size)
+        if key in self._icon_cache:
+            return self._icon_cache[key]
+        photo = None
+        try:
+            img = Image.open(resource_path(os.path.join("assets", "icons", f"{name}.png")))
+            img = img.convert("RGBA").resize((size, size), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+        except Exception:
+            photo = None
+        self._icon_cache[key] = photo
+        return photo
+
+    def _iconify(self, button, name, size=18, compound=None):
+        """Swap a button/label's emoji text for a bundled color icon. With `compound`
+        set (e.g. 'left') the icon sits beside the existing text; otherwise it replaces
+        the text. No-op if the icon can't load, leaving the original glyph in place."""
+        ic = self._icon(name, size)
+        if not ic:
+            return
+        if compound:
+            button.config(image=ic, compound=compound)
+        else:
+            button.config(image=ic, text="")
 
     def _autosize_window(self):
         """Size the window to fit all its content so nothing is clipped on open.
@@ -216,7 +247,13 @@ class SteamArtApp:
         except Exception:
             pass
         if getattr(sys, "frozen", False):
-            os.execv(sys.executable, [sys.executable])
+            # A PyInstaller onefile bundle unpacks to a temp dir tracked via _MEI*/_PYI*
+            # env vars. If the relaunched process inherits them it reuses the OLD temp
+            # dir, which the exiting process then deletes — breaking compiled imports
+            # like PIL._imaging on restart. Strip them so the new process re-extracts.
+            env = {k: v for k, v in os.environ.items()
+                   if not (k.startswith("_MEI") or k.startswith("_PYI"))}
+            os.execve(sys.executable, [sys.executable], env)
         else:
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
@@ -240,15 +277,19 @@ class SteamArtApp:
         header_frame.pack(fill="x", padx=20, pady=10)
         self._label(header_frame, "NonSteamScraper", font=("Arial", 20, "bold")).pack(side="left")
         reload_btn = self._flat_btn(header_frame, "🔄", self.refresh_library, font=("Arial", 12))
+        self._iconify(reload_btn, "refresh", 22)
         reload_btn.pack(side="left", padx=6)
         self._add_tooltip(reload_btn, "Reload")
         art_btn = self._flat_btn(header_frame, "🎨", self.open_art_prefs, font=("Arial", 12))
+        self._iconify(art_btn, "palette", 22)
         art_btn.pack(side="left", padx=2)
         self._add_tooltip(art_btn, "Art Style Preferences")
         settings_btn = self._flat_btn(header_frame, "⚙", self.open_settings, font=("Arial", 14))
+        self._iconify(settings_btn, "settings", 22)
         settings_btn.pack(side="right")
         self._add_tooltip(settings_btn, "Settings")
         info_btn = self._flat_btn(header_frame, "ℹ", self.show_info, font=("Arial", 14))
+        self._iconify(info_btn, "info", 22)
         info_btn.pack(side="right", padx=4)
         self._add_tooltip(info_btn, "Information")
 

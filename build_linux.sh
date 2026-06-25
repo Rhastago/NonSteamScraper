@@ -19,6 +19,7 @@ rm -rf build dist
 
 pyinstaller --onefile --windowed --name NonSteamScraper \
     --add-data "icon.png:." \
+    --add-data "assets:assets" \
     --hidden-import PIL._tkinter_finder \
     --hidden-import PIL.PngImagePlugin \
     --hidden-import PIL.JpegImagePlugin \

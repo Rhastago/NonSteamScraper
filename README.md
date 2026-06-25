@@ -171,6 +171,7 @@ python3 app.py
 ```bash
 pyinstaller --onefile --windowed --name NonSteamScraper \
   --add-data "icon.png:." \
+  --add-data "assets:assets" \
   --hidden-import PIL._tkinter_finder \
   --hidden-import PIL.PngImagePlugin --hidden-import PIL.JpegImagePlugin \
   --hidden-import PIL.WebPImagePlugin --hidden-import PIL.GifImagePlugin \
@@ -181,6 +182,7 @@ pyinstaller --onefile --windowed --name NonSteamScraper \
 ```bash
 pyinstaller --onefile --windowed --name NonSteamScraper --icon icon.ico \
   --add-data "icon.png;." \
+  --add-data "assets;assets" \
   --hidden-import PIL._tkinter_finder \
   --hidden-import PIL.PngImagePlugin --hidden-import PIL.JpegImagePlugin \
   --hidden-import PIL.WebPImagePlugin --hidden-import PIL.GifImagePlugin \
@@ -212,6 +214,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.1.0** — wid
 ## License
 
 MIT
+
+UI icons are from [Microsoft Fluent Emoji](https://github.com/microsoft/fluentui-emoji), also MIT licensed.
 
 ---
 
