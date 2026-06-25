@@ -2,7 +2,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 import requests
-import io
 import os
 import sys
 import glob
@@ -12,14 +11,14 @@ from find_games import (
     get_non_steam_games, search_game, download_all_artwork,
     GRID_FOLDER, load_api_key, save_api_key, verify_api_key,
     add_to_skip_list, SKIP_FILE, save_name_override, get_cache_size,
-    clear_cache, clean_old_cache, restore_backup, clear_backup,
+    clear_cache, clean_old_cache,
     is_steam_running, restart_steam, get_all_steam_users,
     clear_managed_artwork, register_managed_file, set_shortcut_icon,
     load_prefs, save_prefs, DEFAULT_PREFS, STEAM_NOT_FOUND, full_reset,
-    search_sgdb_autocomplete
+    search_sgdb_autocomplete, clear_slot_files, download_apng
 )
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 FIRST_RUN_FILE  = os.path.expanduser("~/.steamart_firstrun")
 THEME_FILE      = os.path.expanduser("~/.steamart_theme")
@@ -1037,13 +1036,20 @@ class SteamArtApp:
         new_y   = max(20, self.window.winfo_y() + self.window.winfo_height() // 2 - win_h // 2)
         settings.geometry(f"480x{win_h}+{x}+{new_y}")
 
+    def _ui(self, fn):
+        """Schedule fn to run on the main (UI) thread. Safe to call from workers."""
+        self.window.after(0, fn)
+
     def log(self, message):
-        """Append a message to the activity log."""
-        self.log_box.config(state="normal")
-        self.log_box.insert("end", message + "\n")
-        self.log_box.see("end")
-        self.log_box.config(state="disabled")
-        self.window.update()
+        """Append a message to the activity log. Thread-safe: the text-box mutation
+        is marshaled onto the main thread, so this may be called from worker threads."""
+        def append():
+            self.log_box.config(state="normal")
+            self.log_box.insert("end", message + "\n")
+            self.log_box.see("end")
+            self.log_box.config(state="disabled")
+            self.window.update_idletasks()
+        self.window.after(0, append)
 
     def start_fetch(self):
         """Disable the fetch button, show progress UI, and start the fetch thread."""
@@ -1074,9 +1080,9 @@ class SteamArtApp:
         needs_art = [g for g in self.games if not g["has_art"]]
         if not needs_art:
             self.log("✅ All games already have artwork!")
-            self.fetch_button.config(state="disabled", text="Nothing to fetch")
-            self.progress_label.pack_forget()
-            self.progress_bar.pack_forget()
+            self._ui(lambda: self.fetch_button.config(state="disabled", text="Nothing to fetch"))
+            self._ui(lambda: self.progress_label.pack_forget())
+            self._ui(lambda: self.progress_bar.pack_forget())
             return
 
         total = len(needs_art)
@@ -1090,22 +1096,23 @@ class SteamArtApp:
             game_end   = (i + 1) / total * 100
 
             self.log(f"\n🎮 Processing: {name}")
-            self.status_bar.config(text=f"Searching: {name}")
-            self.progress_var.set(game_start)
-            self.progress_label.config(text=f"[{i+1}/{total}] {short} — Searching SteamGridDB...")
+            self._ui(lambda name=name: self.status_bar.config(text=f"Searching: {name}"))
+            self._ui(lambda game_start=game_start: self.progress_var.set(game_start))
+            self._ui(lambda i=i, total=total, short=short:
+                     self.progress_label.config(text=f"[{i+1}/{total}] {short} — Searching SteamGridDB..."))
 
             sgdb_id = search_game(name, app_id)
             if sgdb_id is False:
-                self.log(f"  ❌ Network error — will retry on next fetch")
+                self.log("  ❌ Network error — will retry on next fetch")
                 continue
             if sgdb_id:
                 def make_cb(_short, _start, _end, _i, _tot):
                     def cb(label, step, total_steps):
                         pct = _start + (step / total_steps) * (_end - _start)
-                        self.progress_var.set(pct)
-                        self.progress_label.config(
+                        self._ui(lambda pct=pct: self.progress_var.set(pct))
+                        self._ui(lambda label=label: self.progress_label.config(
                             text=f"[{_i+1}/{_tot}] {_short} — {label}"
-                        )
+                        ))
                     return cb
 
                 results = download_all_artwork(
@@ -1115,25 +1122,27 @@ class SteamArtApp:
                 self.log(f"  ✅ Artwork saved for {name}")
                 fetch_results.append({"name": name, "app_id": app_id, "results": results})
                 for art_data in results.values():
-                    if art_data and art_data.get("applied_path"):
+                    # applied_index is None for animated slots nothing was auto-applied to.
+                    if art_data and art_data.get("applied_index") is not None and art_data.get("applied_path"):
                         self.last_fetch_files.append(art_data["applied_path"])
             else:
-                self.log(f"  ⚠️ Not found on SteamGridDB — skipping permanently")
+                self.log("  ⚠️ Not found on SteamGridDB — skipping permanently")
                 add_to_skip_list(app_id)
 
-        self.progress_var.set(100)
-        self.progress_label.config(text=f"Done! Fetched artwork for {len(fetch_results)} of {total} game(s).")
+        self._ui(lambda: self.progress_var.set(100))
+        self._ui(lambda n=len(fetch_results), total=total:
+                 self.progress_label.config(text=f"Done! Fetched artwork for {n} of {total} game(s)."))
 
         if fetch_results:
             self.log("\n✅ Done! Opening results screen...")
-            self.undo_button.config(state="normal")
+            self._ui(lambda: self.undo_button.config(state="normal"))
         else:
             self.log("\n✅ Done! No new artwork was fetched.")
 
-        self.status_bar.config(text="Done!")
-        self.fetch_button.config(state="normal", text="Fetch Missing Artwork")
-        self.load_games()
-        self.check_steam_running()
+        self._ui(lambda: self.status_bar.config(text="Done!"))
+        self._ui(lambda: self.fetch_button.config(state="normal", text="Fetch Missing Artwork"))
+        self._ui(lambda: self.load_games())
+        self._ui(lambda: self.check_steam_running())
 
         if fetch_results:
             self.window.after(0, lambda: self.show_results(fetch_results))
@@ -1151,6 +1160,13 @@ class SteamArtApp:
         results_window.geometry(f"{win_w}x{win_h}+{x}+{y}")
         results_window.minsize(560, 480)
         results_window.resizable(True, True)
+        # Tie the results window to the main window (and later the popup to the results
+        # window) so the three form one transient chain — main behind, results in the
+        # middle, popup in front — that the window manager raises together when focus
+        # returns to the app.
+        results_window.transient(self.window)
+        # Remembered so the animated-conversion popup can sit directly on top of it.
+        self.results_window = results_window
 
         tk.Label(results_window, text="Review Applied Artwork",
                   font=("Arial", 16, "bold"), bg=t["bg"], fg=t["fg"]).pack(pady=10)
@@ -1221,8 +1237,8 @@ class SteamArtApp:
                                padx=10, pady=10, bg=t["bg"], fg=t["fg"])
         frame.pack(fill="x", padx=10, pady=8)
 
-        art_labels = {"grids": "Cover", "heroes": "Hero/Background",
-                      "logos": "Logo", "icons": "Icon"}
+        art_labels = {"grids": "Cover", "grids_wide": "Wide Cover",
+                      "heroes": "Hero/Background", "logos": "Logo", "icons": "Icon"}
         for art_type, label in art_labels.items():
             art_data = results.get(art_type)
             if not art_data:
@@ -1239,7 +1255,8 @@ class SteamArtApp:
                 "option_urls": art_data["option_urls"],
                 "option_meta": art_data.get("option_meta", [{}] * len(art_data["option_urls"])),
                 "applied_path": art_data["applied_path"],
-                "applied_index": 0,
+                # None when nothing was auto-applied (animated-only slot).
+                "applied_index": art_data.get("applied_index"),
                 "art_type": art_type,
                 "app_id": app_id,
             }
@@ -1270,8 +1287,11 @@ class SteamArtApp:
             _update_badge(badge_label, state["option_meta"][0] if state["option_meta"] else {})
             load_thumb(art_data["thumb_paths"][0])
 
-            # Option 1 is applied on arrival, so its button starts as "Applied!"
-            apply_btn = self._btn(row, "✅ Applied!", lambda: None)
+            # The auto-applied static option (if any) is index 0 on arrival; animated
+            # slots auto-apply nothing, so their button starts as "Apply this one".
+            apply_btn = self._btn(
+                row, "✅ Applied!" if state["applied_index"] == 0 else "Apply this one",
+                lambda: None)
             apply_btn.pack(side="right", padx=6)
 
             # Clicking the image or badge opens the full-size version in the browser
@@ -1291,12 +1311,23 @@ class SteamArtApp:
                         update_view(s, il, cl)
                         ab.config(text="✅ Applied!" if s["index"] == s["applied_index"] else "Apply this one")
                 def apply():
-                    url = s["option_urls"][s["index"]]
-                    ext = url.split(".")[-1].split("?")[0]
-                    new_path = f"{s['applied_path'].rsplit('.', 1)[0]}.{ext}"
+                    idx = s["index"]
+                    url = s["option_urls"][idx]
+                    meta = s["option_meta"][idx] if idx < len(s["option_meta"]) else {}
+                    base_noext = s["applied_path"].rsplit(".", 1)[0]
+                    # Animated picks need APNG conversion (Steam ignores webp/gif), which
+                    # is slow — run it with a progress popup instead of blocking the UI.
+                    if meta.get("animated"):
+                        self.apply_animated_art(s, ab, url, base_noext + ".png", idx)
+                        return
+                    new_path = f"{base_noext}.{url.split('.')[-1].split('?')[0]}"
                     try:
                         r = requests.get(url, stream=True, timeout=10)
                         if r.status_code == 200:
+                            # Remove the previously-applied file in this slot first, so
+                            # an extension change (e.g. animated .png -> static .jpg)
+                            # doesn't leave a duplicate that Steam keeps showing.
+                            clear_slot_files(new_path)
                             with open(new_path, "wb") as f:
                                 for chunk in r.iter_content(1024):
                                     f.write(chunk)
@@ -1304,7 +1335,7 @@ class SteamArtApp:
                             # Icons must also be registered in shortcuts.vdf to apply.
                             if s["art_type"] == "icons":
                                 set_shortcut_icon(s["app_id"], new_path)
-                            s["applied_index"] = s["index"]
+                            s["applied_index"] = idx
                             ab.config(text="✅ Applied!")
                     except Exception:
                         ab.config(text="Failed — retry")
@@ -1314,6 +1345,88 @@ class SteamArtApp:
             apply_btn.config(command=apply_fn)
             self._btn(row, "◀", prev_fn).pack(side="left")
             self._btn(row, "▶", next_fn).pack(side="left")
+
+    def apply_animated_art(self, state, apply_btn, url, out_path, index):
+        """Apply an animated artwork pick by converting it to APNG (the only animated
+        format Steam renders), shown with a modal progress popup. The conversion is
+        slow, so it runs on a worker thread and reports progress back to the popup."""
+        t = self.theme
+        apply_btn.config(text="Converting…", state="disabled")
+
+        # Sit the popup on top of the results window (it's launched from there). Being
+        # transient to the results window keeps that window as its master, so the WM
+        # raises the results window with the popup instead of pushing it behind the
+        # main game-list window.
+        parent = getattr(self, "results_window", None)
+        if parent is None or not parent.winfo_exists():
+            parent = self.window
+
+        popup = tk.Toplevel(parent)
+        popup.title("Applying animated artwork")
+        popup.config(bg=t["bg"])
+        popup.resizable(False, False)
+        # transient(parent) keeps the popup above the results window within the app's
+        # own window stack (background: main window, mid: results, front: popup) without
+        # forcing it above other applications when focus moves elsewhere.
+        popup.transient(parent)
+        # Block closing while the conversion is in flight.
+        popup.protocol("WM_DELETE_WINDOW", lambda: None)
+        px = parent.winfo_rootx() + 60
+        py = parent.winfo_rooty() + 60
+        popup.geometry(f"360x120+{px}+{py}")
+        tk.Label(popup, text="Converting to APNG so Steam can animate it…",
+                 font=("Arial", 10), bg=t["bg"], fg=t["fg"], wraplength=320).pack(pady=(16, 6))
+        status = tk.Label(popup, text="Starting…", font=("Arial", 9),
+                          bg=t["bg"], fg=t["muted2"])
+        status.pack()
+        # Real per-frame progress comes from find_games.download_apng (it counts the
+        # APNG frame chunks Pillow writes), so this is an accurate determinate bar.
+        bar = ttk.Progressbar(popup, mode="determinate", maximum=100, length=300)
+        bar.pack(pady=10)
+        try:
+            popup.grab_set()
+        except tk.TclError:
+            pass
+        popup.lift()
+
+        last_pct = {"v": -1}
+
+        def on_progress(done, total):
+            pct = int(done / total * 100) if total else 0
+            if pct == last_pct["v"]:
+                return
+            last_pct["v"] = pct
+            def paint():
+                if bar.winfo_exists():
+                    bar["value"] = pct
+                    status.config(text=f"Converting frame {done} / {total}")
+            self.window.after(0, paint)
+
+        def on_status(msg):
+            self.window.after(0, lambda m=msg: status.config(text=m)
+                              if status.winfo_exists() else None)
+
+        def finish(ok):
+            if popup.winfo_exists():
+                popup.grab_release()
+                popup.destroy()
+            if ok:
+                state["applied_index"] = index
+                apply_btn.config(text="✅ Applied!", state="normal")
+            else:
+                apply_btn.config(text="Failed — retry", state="normal")
+
+        def worker():
+            try:
+                # Drop any existing file in this slot first so the new APNG is the only
+                # one Steam sees, then write the converted .png.
+                clear_slot_files(out_path)
+                ok = download_apng(url, out_path, progress_cb=on_progress, status_cb=on_status)
+            except Exception:
+                ok = False
+            self.window.after(0, lambda: finish(ok))
+
+        threading.Thread(target=worker, daemon=True).start()
 
 
 def _run_animation(lbl, img, frame):

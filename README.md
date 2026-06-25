@@ -25,6 +25,7 @@ No Python installation required. Just download and run.
 - Searches SteamGridDB for matching artwork
 - Downloads and applies:
   - **Cover** (portrait grid image)
+  - **Wide Cover** (landscape grid image, used in Big Picture and the old grid view)
   - **Hero** (wide background banner)
   - **Logo** (transparent game logo overlay)
   - **Icon** (shortcut icon, written directly into Steam's shortcuts file)
@@ -57,7 +58,7 @@ Click **Fetch Missing Artwork**. The app searches and downloads art for every ga
 
 ### 5. Review and swap
 
-On the results screen each game shows its Cover, Hero, Logo, and Icon rows. Use ◀ ▶ to cycle through alternatives and **Apply this one** to swap. Click the image to open the full-size version in your browser.
+On the results screen each game shows its Cover, Wide Cover, Hero, Logo, and Icon rows. Use ◀ ▶ to cycle through alternatives and **Apply this one** to swap. Click the image to open the full-size version in your browser.
 
 ### 6. Restart Steam
 
@@ -69,7 +70,7 @@ Art changes take effect after Steam restarts. The app will remind you.
 
 | Feature | Details |
 |---|---|
-| Art types | Cover, Hero, Logo, Icon |
+| Art types | Cover, Wide Cover, Hero, Logo, Icon |
 | Alternatives | Up to 5 per art type, swappable after fetch |
 | Icon support | Written into `shortcuts.vdf` so Steam actually reads it |
 | Undo | Restores the previous fetch's artwork in one click |
@@ -100,7 +101,7 @@ Click the 🎨 button to open Art Style Preferences. Each option has three state
 
 Available filters:
 
-- **Animated** — GIF/WebP animated artwork (note: files are larger and previews take longer to load)
+- **Animated** — animated artwork (note: animated covers are not auto-applied; pick one in the results screen and click **Apply this one** to convert it to APNG — the only animated format Steam renders — with a progress popup. Files are large and conversion takes a while.)
 - **NSFW** — explicit adult content (confirmation required on first enable per session)
 - **Humor / Memes** — meme-style artwork
 - **Cover:** No logo overlay, Alternate style, Blurred, Material design
@@ -190,6 +191,21 @@ pyinstaller --onefile --windowed --name NonSteamScraper --icon icon.ico \
 ```
 
 The executable will be in the `dist/` folder.
+
+You can also run the helper scripts directly: `./build_linux.sh` or `./build_windows.sh`.
+
+### Automated release builds
+
+Pushing a version tag (e.g. `git push origin v1.1.0`) triggers the
+[release workflow](.github/workflows/release.yml), which builds the Linux and Windows
+binaries in a clean environment and attaches them to the matching GitHub Release.
+(Requires the repo's *Settings → Actions → Workflow permissions* to allow read/write.)
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.1.0** — wide cover art and animated covers that actually animate (APNG conversion on apply).
 
 ---
 
