@@ -1,4 +1,5 @@
 import os, re, sys, platform, shutil, subprocess, time, json, threading, vdf, requests
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote as _url_quote
 from datetime import datetime, timedelta, timezone
 try:
@@ -670,6 +671,11 @@ def download_apng(url, out_path, progress_cb=None, status_cb=None, register=True
         register_managed_file(out_path)
     return ok
 
+# Bounded concurrency for SGDB requests. SGDB publishes no rate limit and throttles
+# dynamically via HTTP 429 + Retry-After (handled by _sgdb_get's retry); a handful of
+# workers gets the latency win without tripping that throttle.
+SGDB_MAX_WORKERS = 5
+
 def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None):
     if prefs is None:
         prefs = load_prefs()
@@ -688,10 +694,36 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None):
     # N slots × (1 main + 3 previews) steps max
     total_steps = len(slots) * 4
     step = 0
+    # Progress is bumped from concurrent preview threads, so guard the counter.
+    step_lock = threading.Lock()
+
+    def bump(label):
+        nonlocal step
+        with step_lock:
+            step += 1
+            cur = step
+        if progress_cb:
+            progress_cb(label, cur, total_steps)
+
+    # --- Phase 1: fetch all slots' metadata concurrently (bounded) -------------
+    # Each get_artwork is an independent, network-bound round-trip, so running the
+    # five together collapses ~5 serial round-trips into ~1.
+    def fetch_slot(item):
+        slot, (art_label, endpoint, base, dimensions) = item
+        return slot, get_artwork(sgdb_id, endpoint, prefs, dimensions=dimensions)
+
+    with ThreadPoolExecutor(max_workers=SGDB_MAX_WORKERS) as ex:
+        slot_images = dict(ex.map(fetch_slot, slots.items()))
+
+    # --- Phase 2: per slot (declared order, so results/progress stay deterministic),
+    # download the applied art then the previews (previews run concurrently) -----
     for slot, (art_label, endpoint, base, dimensions) in slots.items():
-        images = get_artwork(sgdb_id, endpoint, prefs, dimensions=dimensions)
+        images = slot_images.get(slot)
         if not images:
-            step += 4
+            # A missing slot still consumes its 1 main + 3 preview steps so the bar
+            # reaches 100% exactly (same accounting as the serial version).
+            for _ in range(4):
+                bump(f"{art_label} — none found")
             results[slot] = None
             continue
         # Keep SGDB's original ranking so animated options stay visible in the results
@@ -710,25 +742,39 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None):
             top = options[applied_index]
             ext = top["url"].split(".")[-1].split("?")[0]
             save_path = os.path.join(GRID_FOLDER, f"{base}.{ext}")
-            step += 1
-            if progress_cb: progress_cb(f"Downloading {art_label}", step, total_steps)
+            bump(f"Downloading {art_label}")
             clear_slot_files(save_path)
             download_artwork(top["url"], save_path)
             if slot == "icons": set_shortcut_icon(unsigned_id, save_path)
             applied_url = top["url"]
         else:
             save_path = os.path.join(GRID_FOLDER, f"{base}.png")
-            step += 1
-            if progress_cb: progress_cb(f"{art_label} — animated, apply to commit", step, total_steps)
+            bump(f"{art_label} — animated, apply to commit")
             applied_url = None
 
-        thumbs = []
-        for i, img in enumerate(options[:3]):
+        # Previews: first 3 options, downloaded at FULL resolution (img["url"]) using
+        # the original {base}_{i} cache names — unchanged from the serial version, so
+        # animated previews still animate and app.py's on-demand cycling path (which
+        # reconstructs {base}_{i} names) stays valid. They write to DISTINCT paths, so
+        # downloading them concurrently is safe.
+        preview_imgs = list(enumerate(options[:3]))
+
+        def fetch_preview(arg):
+            i, img = arg
             u = img["url"]; e = u.split(".")[-1].split("?")[0]
             tp = os.path.join(CACHE_FOLDER, f"{base}_{i}.{e}")
-            step += 1
-            if progress_cb: progress_cb(f"Caching {art_label} preview {i+1}/3", step, total_steps)
-            download_artwork(u, tp, register=False); thumbs.append(tp)
+            bump(f"Caching {art_label} preview {i+1}/3")
+            download_artwork(u, tp, register=False)
+            return i, tp
+
+        if preview_imgs:
+            with ThreadPoolExecutor(max_workers=SGDB_MAX_WORKERS) as ex:
+                pairs = list(ex.map(fetch_preview, preview_imgs))
+            # Re-sort by index so thumb_paths still lines up with options 0..2.
+            thumbs = [tp for _i, tp in sorted(pairs, key=lambda p: p[0])]
+        else:
+            thumbs = []
+
         results[slot] = {"applied_url": applied_url, "applied_path": save_path,
                               "applied_index": applied_index,
                               "option_urls": [img["url"] for img in options],
