@@ -15,7 +15,8 @@ from find_games import (
     is_steam_running, restart_steam, get_all_steam_users,
     clear_managed_artwork, register_managed_file, set_shortcut_icon,
     load_prefs, save_prefs, DEFAULT_PREFS, STEAM_NOT_FOUND, full_reset,
-    search_sgdb_autocomplete, clear_slot_files, download_apng
+    search_sgdb_autocomplete, clear_slot_files, download_apng,
+    parse_net_workarea, compute_window_fit,
 )
 
 VERSION = "1.2.0"
@@ -273,16 +274,16 @@ class SteamArtApp:
 
         # --- Linux/X11: read _NET_WORKAREA from the root window via xprop. ---
         try:
-            import subprocess, shutil, re
+            import subprocess, shutil
             if shutil.which("xprop"):
                 out = subprocess.run(
                     ["xprop", "-root", "_NET_WORKAREA"],
                     capture_output=True, text=True, timeout=1).stdout
-                # e.g. "_NET_WORKAREA(CARDINAL) = 0, 0, 1920, 1053, 0, 0, ..."
-                # The first four numbers are x, y, w, h for the first desktop.
-                nums = [int(n) for n in re.findall(r"\d+", out.split("=", 1)[-1])]
-                if len(nums) >= 4:
-                    wa = (nums[0], nums[1], nums[2], nums[3])
+                # Parsing delegated to the pure find_games helper so it can be
+                # unit-tested without a display.
+                parsed = parse_net_workarea(out)
+                if parsed is not None:
+                    wa = parsed
                     if _sane(*wa):
                         return wa
         except (OSError, ValueError, subprocess.SubprocessError):
@@ -307,32 +308,21 @@ class SteamArtApp:
         # Preferred size (e.g. the classic 900x750), or natural content size.
         req_w = desired_w if desired_w is not None else window.winfo_reqwidth()
         req_h = desired_h if desired_h is not None else window.winfo_reqheight()
-        # Reserve vertical room for the window-manager title bar / decorations.
-        # geometry() only positions the client area, and the title bar sits
-        # outside it; without this reserve, a window capped to the full work-area
-        # height pushes its bottom edge (and the action buttons) under the
-        # taskbar on small screens. RESERVE is generous enough to cover the
-        # title bar whether the WM treats geometry as client- or frame-origin.
+        # The pure size+position math lives in find_games.compute_window_fit so it
+        # can be unit-tested without a display.  The tkinter-specific side effects
+        # (minsize adjustment, geometry call) stay here.
         RESERVE = 80
-        avail_h = max(wa_h - RESERVE, 200)
-        # Never exceed the available area; the scrollable canvas absorbs overflow.
-        final_w = max(1, min(req_w, wa_w))
-        final_h = max(1, min(req_h, avail_h))
+        final_w, final_h, x, y = compute_window_fit(
+            wa_x, wa_y, wa_w, wa_h, req_w, req_h, reserve=RESERVE)
         # Don't let an earlier minsize() force the window bigger than the work
         # area; lower the effective minimum if the screen is small.
+        avail_h = max(wa_h - RESERVE, 200)
         try:
             min_w, min_h = window.minsize()
             if min_w > wa_w or min_h > avail_h:
                 window.minsize(min(min_w, wa_w), min(min_h, avail_h))
         except tk.TclError:
             pass
-        # Centre horizontally; vertically leave RESERVE/2 of slack above and
-        # below so neither the title bar nor the bottom buttons can land under a
-        # panel/taskbar, then clamp every edge inside the work area.
-        x = wa_x + (wa_w - final_w) // 2
-        y = wa_y + (RESERVE // 2) + (avail_h - final_h) // 2
-        x = max(wa_x, min(x, wa_x + wa_w - final_w))
-        y = max(wa_y, min(y, wa_y + wa_h - final_h))
         window.geometry(f"{final_w}x{final_h}+{x}+{y}")
         return final_w, final_h
 
