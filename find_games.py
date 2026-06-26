@@ -1,4 +1,5 @@
-import os, re, sys, platform, shutil, subprocess, time, json, vdf, requests
+import os, re, sys, platform, shutil, subprocess, time, json, hashlib, threading, vdf, requests
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote as _url_quote
 from datetime import datetime, timedelta, timezone
 try:
@@ -36,6 +37,13 @@ def verify_api_key(key):
                          headers={"Authorization": f"Bearer {key.strip()}"}, timeout=8)
         return r.status_code == 200 and bool(r.json().get("success"))
     except Exception: return False
+
+# Upper bound on concurrent SGDB/CDN requests during a fetch. SGDB publishes no
+# fixed rate limit; it throttles dynamically with HTTP 429 + Retry-After (handled
+# by _sgdb_get). We deliberately stay at a handful of workers so we get the latency
+# win of parallelism without tripping that throttle — _sgdb_get's retry remains the
+# safety net if we ever do.
+SGDB_MAX_WORKERS = 5
 
 def _sgdb_get(url, headers, params=None, timeout=5, retries=2):
     """requests.get wrapper that retries on HTTP 429 (rate-limit).
@@ -254,6 +262,29 @@ def clean_old_cache(days=30):
         p = os.path.join(CACHE_FOLDER, f)
         if os.path.isfile(p) and datetime.fromtimestamp(os.path.getmtime(p)) < cutoff:
             os.remove(p)
+
+def _thumb_cache_path(img, thumb_url):
+    """Return the content-addressed cache path for a preview thumbnail.
+
+    The cache is keyed by the SGDB image's stable identity — its numeric ``id`` —
+    rather than the per-fetch filename slot, so re-fetching or undoing reuses the
+    already-downloaded file instead of pulling identical bytes again. When an image
+    record carries no id we fall back to a hash of the (download) URL, which is just
+    as stable for a given image. We key STRICTLY on identity (never on the slot or
+    fetch order) so the cache can never serve the wrong image. The extension comes
+    from the thumb URL so the saved file keeps a valid image suffix.
+    Returns ``(path, key)``."""
+    key = img.get("id")
+    if key:
+        key = f"id{key}"
+    else:
+        # No id on the record — hash the URL we'll actually download. Stable per image.
+        key = "h" + hashlib.sha1(thumb_url.encode("utf-8")).hexdigest()[:16]
+    ext = thumb_url.split(".")[-1].split("?")[0]
+    # Guard against a query-string-only or odd URL producing a junk "extension".
+    if not ext or len(ext) > 5 or "/" in ext:
+        ext = "png"
+    return os.path.join(CACHE_FOLDER, f"thumb_{key}.{ext}"), key
 
 def backup_artwork(unsigned_id):
     os.makedirs(BACKUP_FOLDER, exist_ok=True)
@@ -593,13 +624,46 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None):
     backup_artwork(unsigned_id)
     os.makedirs(CACHE_FOLDER, exist_ok=True)
     results = {}
-    # N slots × (1 main + 3 previews) steps max
+    # N slots × (1 main + 3 previews) steps max. This total is unchanged from the
+    # serial version so app.py's percentage math (step/total_steps) needs no change.
     total_steps = len(slots) * 4
+
+    # The step counter is shared across the concurrent preview/slot work below, so its
+    # increments must be serialized — otherwise two threads can read-modify-write the
+    # same value and the progress percentage stutters or overshoots. We bump the count
+    # under the lock and emit progress_cb with that consistent snapshot. app.py's
+    # progress_cb already marshals to the UI thread, so calling it here is safe.
+    step_lock = threading.Lock()
     step = 0
+    def bump_progress(label):
+        nonlocal step
+        with step_lock:
+            step += 1
+            cur = step
+        if progress_cb:
+            progress_cb(label, cur, total_steps)
+
+    # --- Phase 1: fetch all slots' metadata concurrently (bounded) ---------------
+    # Each get_artwork is independent and network-bound, so running them together
+    # turns 5 serial round-trips into ~1. SGDB_MAX_WORKERS caps concurrency so we
+    # never exceed a handful of in-flight requests; _sgdb_get handles any 429.
+    def fetch_slot(item):
+        slot, (art_label, endpoint, base, dimensions) = item
+        return slot, get_artwork(sgdb_id, endpoint, prefs, dimensions=dimensions)
+
+    with ThreadPoolExecutor(max_workers=SGDB_MAX_WORKERS) as ex:
+        slot_images = dict(ex.map(fetch_slot, slots.items()))
+
+    # --- Phase 2: per slot, download applied art (full-res) + previews (thumbs) ---
+    # Slots are processed in their declared order so results/progress labels stay
+    # deterministic; the parallelism within a slot is in the preview downloads.
     for slot, (art_label, endpoint, base, dimensions) in slots.items():
-        images = get_artwork(sgdb_id, endpoint, prefs, dimensions=dimensions)
+        images = slot_images.get(slot)
         if not images:
-            step += 4
+            # Keep step accounting identical to the serial version: a missing slot
+            # still consumes its 1 main + 3 preview steps so the bar reaches 100%.
+            for _ in range(4):
+                bump_progress(f"{art_label} — none found")
             results[slot] = None
             continue
         # Keep SGDB's original ranking so animated options stay visible in the results
@@ -614,31 +678,57 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None):
         # Target path: the auto-applied static file keeps its own extension; if there
         # is nothing to auto-apply (all options animated), the slot stays empty until
         # the user applies one, which will be written as APNG (.png).
+        # IMPORTANT: applied art ALWAYS uses the full-resolution img["url"] — never the
+        # thumb — so the picture shown in Steam keeps its original quality.
         if applied_index is not None:
             top = options[applied_index]
             ext = top["url"].split(".")[-1].split("?")[0]
             save_path = os.path.join(GRID_FOLDER, f"{base}.{ext}")
-            step += 1
-            if progress_cb: progress_cb(f"Downloading {art_label}", step, total_steps)
+            bump_progress(f"Downloading {art_label}")
             clear_slot_files(save_path)
             download_artwork(top["url"], save_path)
             if slot == "icons": set_shortcut_icon(unsigned_id, save_path)
             applied_url = top["url"]
         else:
             save_path = os.path.join(GRID_FOLDER, f"{base}.png")
-            step += 1
-            if progress_cb: progress_cb(f"{art_label} — animated, apply to commit", step, total_steps)
+            bump_progress(f"{art_label} — animated, apply to commit")
             applied_url = None
 
-        thumbs = []
-        for i, img in enumerate(options[:3]):
-            u = img["url"]; e = u.split(".")[-1].split("?")[0]
-            tp = os.path.join(CACHE_FOLDER, f"{base}_{i}.{e}")
-            step += 1
-            if progress_cb: progress_cb(f"Caching {art_label} preview {i+1}/3", step, total_steps)
-            download_artwork(u, tp, register=False); thumbs.append(tp)
+        # Previews: download the first 3 options as small THUMBNAILS (img["thumb"],
+        # falling back to the full url when SGDB gives no thumb). These ~300x200
+        # previews are the only thing the results screen renders, so the smaller thumb
+        # is plenty and far cheaper — the full url is still preserved in option_urls
+        # below for "open full size" and for applying. The cache is content-addressed
+        # by image identity, so an identical image is downloaded at most once ever.
+        preview_imgs = list(enumerate(options[:3]))
+
+        def fetch_preview(arg):
+            i, img = arg
+            thumb_url = img.get("thumb") or img["url"]
+            tp, _key = _thumb_cache_path(img, thumb_url)
+            # Skip the download when we already have a non-empty cached copy of THIS
+            # exact image — re-fetch/undo then reuses it instead of re-downloading.
+            if os.path.exists(tp) and os.path.getsize(tp) > 0:
+                bump_progress(f"Cached {art_label} preview {i+1}/3")
+            else:
+                bump_progress(f"Caching {art_label} preview {i+1}/3")
+                download_artwork(thumb_url, tp, register=False)
+            return i, tp
+
+        # Run this slot's (up to 3) preview downloads concurrently. They write to
+        # DISTINCT cache paths so there's no file contention; results are reordered by
+        # index so thumb_paths still lines up with the first 3 options.
+        if preview_imgs:
+            with ThreadPoolExecutor(max_workers=SGDB_MAX_WORKERS) as ex:
+                pairs = list(ex.map(fetch_preview, preview_imgs))
+            thumbs = [tp for _i, tp in sorted(pairs, key=lambda p: p[0])]
+        else:
+            thumbs = []
+
         results[slot] = {"applied_url": applied_url, "applied_path": save_path,
                               "applied_index": applied_index,
+                              # FULL-resolution urls — used by app.py for "open full
+                              # size in browser" and for applying. Never the thumb.
                               "option_urls": [img["url"] for img in options],
                               "option_meta": [
                                   {
