@@ -676,7 +676,10 @@ def parse_net_workarea(xprop_output):
         return None
     # Take everything after the first "=" so we skip the property-name header.
     after_eq = xprop_output.split("=", 1)[-1]
-    nums = [int(n) for n in re.findall(r"\d+", after_eq)]
+    # Parse signs honestly so a negative origin is reported as-is and the caller
+    # (which sanity-checks for non-negative coords) can reject it, rather than a
+    # stripped minus turning it into a wrong-but-positive value.
+    nums = [int(n) for n in re.findall(r"-?\d+", after_eq)]
     if len(nums) < 4:
         return None
     return (nums[0], nums[1], nums[2], nums[3])
@@ -708,8 +711,11 @@ def compute_window_fit(wa_x, wa_y, wa_w, wa_h, desired_w, desired_h, reserve=80)
         Every edge is guaranteed to lie within the work area.
     """
     avail_h = max(wa_h - reserve, 200)
+    # Cap to the actual work area as well, so even on a degenerate screen smaller
+    # than the 200px reserve floor the window can never exceed (and overflow) the
+    # work area — keeping the "every edge inside the work area" guarantee.
     final_w = max(1, min(desired_w, wa_w))
-    final_h = max(1, min(desired_h, avail_h))
+    final_h = max(1, min(desired_h, avail_h, wa_h))
     # Centre horizontally; vertically leave reserve/2 of slack above and below
     # so neither the title bar nor the bottom buttons land under a panel/taskbar.
     x = wa_x + (wa_w - final_w) // 2

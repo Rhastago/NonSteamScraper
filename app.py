@@ -5,6 +5,7 @@ import requests
 import os
 import sys
 import glob
+import re
 import webbrowser
 from PIL import Image, ImageTk
 from find_games import (
@@ -175,9 +176,10 @@ class SteamArtApp:
             btn.config(text="Apply this one", image="", compound="none")
 
     def _autosize_window(self):
-        """Size the window to fit all its content so nothing is clipped on open.
-        Temporarily packs the progress widgets to include them in the measurement,
-        then hides them again so they only appear during an active fetch."""
+        """Size the window to fit all its content so nothing is clipped on open,
+        positioned fully within the screen work area (never under a taskbar/panel)
+        and centered. Temporarily packs the progress widgets to include them in
+        the measurement, then hides them again so they only appear during a fetch."""
         self.progress_label.pack(pady=2)
         self.progress_bar.pack(fill="x", padx=20, pady=2)
         self.window.update_idletasks()
@@ -185,11 +187,11 @@ class SteamArtApp:
         req_h = self.window.winfo_reqheight()
         self.progress_label.pack_forget()
         self.progress_bar.pack_forget()
-        screen_w = self.window.winfo_screenwidth()
-        screen_h = self.window.winfo_screenheight()
-        x = (screen_w // 2) - (req_w // 2)
-        y = (screen_h // 2) - (req_h // 2)
-        self.window.geometry(f"{req_w}x{req_h}+{max(x, 0)}+{max(y, 0)}")
+        # Reuse the same work-area-aware fit as the results window so the main
+        # window can't open under a taskbar/panel either. Remember the applied
+        # size so _restore_geometry can clamp a saved position against it.
+        self._main_w, self._main_h = self._fit_window_to_workarea(
+            self.window, req_w, req_h)
 
     # --- Themed widget helpers ---
 
@@ -293,27 +295,23 @@ class SteamArtApp:
         margin = 80
         return 0, 0, screen_w, max(screen_h - margin, 200)
 
-    def _fit_window_to_workarea(self, window, desired_w=None, desired_h=None):
+    def _fit_window_to_workarea(self, window, desired_w, desired_h):
         """Size and position *window* so it sits fully inside the screen work
         area, with its title bar and all edges visible (never under a panel or
         taskbar). Centers within the work area when there is room.
 
-        desired_w/desired_h are the preferred size; when omitted they default to
-        the window's natural required size. The window only shrinks below the
-        desired size when the work area is smaller.
+        desired_w/desired_h are the preferred size; the window only shrinks below
+        it when the work area is smaller.
         Returns the (final_w, final_h) actually applied.
         """
         window.update_idletasks()
         wa_x, wa_y, wa_w, wa_h = self._get_workarea(window)
-        # Preferred size (e.g. the classic 900x750), or natural content size.
-        req_w = desired_w if desired_w is not None else window.winfo_reqwidth()
-        req_h = desired_h if desired_h is not None else window.winfo_reqheight()
         # The pure size+position math lives in find_games.compute_window_fit so it
         # can be unit-tested without a display.  The tkinter-specific side effects
         # (minsize adjustment, geometry call) stay here.
         RESERVE = 80
         final_w, final_h, x, y = compute_window_fit(
-            wa_x, wa_y, wa_w, wa_h, req_w, req_h, reserve=RESERVE)
+            wa_x, wa_y, wa_w, wa_h, desired_w, desired_h, reserve=RESERVE)
         # Don't let an earlier minsize() force the window bigger than the work
         # area; lower the effective minimum if the screen is small.
         avail_h = max(wa_h - RESERVE, 200)
@@ -349,13 +347,27 @@ class SteamArtApp:
         widget.bind("<Leave>", hide)
 
     def _restore_geometry(self):
+        """Restore the saved window position, clamped into the current work area.
+        A position saved on a larger or different screen (e.g. the Deck docked to
+        an external display, then undocked) could otherwise place the window
+        off-screen or under the taskbar with no way to recover it."""
         try:
-            if os.path.exists(GEOMETRY_FILE):
-                with open(GEOMETRY_FILE, "r") as f:
-                    geo = f.read().strip()
-                if "+" in geo:
-                    pos = "+" + "+".join(geo.split("+")[1:])
-                    self.window.geometry(pos)
+            if not os.path.exists(GEOMETRY_FILE):
+                return
+            with open(GEOMETRY_FILE, "r", encoding="utf-8") as f:
+                geo = f.read().strip()
+            # geo looks like "WxH+X+Y" (X/Y may be negative); we keep the
+            # autosized size and only restore a clamped position.
+            coords = re.findall(r"[+-]\d+", geo)
+            if len(coords) < 2:
+                return
+            x, y = int(coords[0]), int(coords[1])
+            wa_x, wa_y, wa_w, wa_h = self._get_workarea(self.window)
+            w = getattr(self, "_main_w", 700)
+            h = getattr(self, "_main_h", 480)
+            x = max(wa_x, min(x, wa_x + wa_w - w))
+            y = max(wa_y, min(y, wa_y + wa_h - h))
+            self.window.geometry(f"+{x}+{y}")
         except Exception:
             pass
 
@@ -433,7 +445,10 @@ class SteamArtApp:
             search_icon.config(image=ic, text="", compound="left")
         search_icon.pack(side="left", padx=(0, 6))
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self._render_list())
+        # Debounce so a large library isn't rebuilt on every keystroke; the list
+        # only re-renders once typing pauses (matches the SGDB search dialog).
+        self._search_after_id = None
+        self.search_var.trace_add("write", lambda *_: self._on_search_changed())
         self.search_entry = tk.Entry(search_frame, textvariable=self.search_var,
                                      font=("Courier", 11), bg=t["entry_bg"], fg=t["fg"],
                                      insertbackground=t["fg"], relief="flat", bd=4)
@@ -594,6 +609,16 @@ class SteamArtApp:
 
         # Re-attach wheel scrolling to the freshly built rows.
         self._size_list_canvas()
+
+    def _on_search_changed(self):
+        """Debounced search handler: coalesce rapid keystrokes into a single
+        list re-render so large libraries stay responsive while typing."""
+        if self._search_after_id is not None:
+            try:
+                self.window.after_cancel(self._search_after_id)
+            except Exception:
+                pass
+        self._search_after_id = self.window.after(250, self._render_list)
 
     def _clear_search(self):
         """Clear the search box and restore the full list."""
@@ -1073,9 +1098,7 @@ class SteamArtApp:
         settings.resizable(True, True)
         settings.config(bg=t["bg"])
         settings.update_idletasks()
-        x = self.window.winfo_x() + (self.window.winfo_width() // 2) - 240
-        y = self.window.winfo_y() + (self.window.winfo_height() // 2) - 260
-        settings.geometry(f"+{x}+{y}")
+        # Final size/position is set once at the end via _fit_window_to_workarea.
 
         tk.Label(settings, text="Settings", font=("Arial", 16, "bold"),
                   bg=t["bg"], fg=t["fg"]).pack(pady=10)
@@ -1275,13 +1298,13 @@ class SteamArtApp:
 
         self._bind_wheel_to_canvas(canvas, canvas)
 
-        # Auto-size to fit all content, capped at screen height
+        # Auto-size to fit all content, fully within the screen work area (so it
+        # can't open under a taskbar/panel) — same shared placement helper the
+        # main and results windows use.
         settings.update_idletasks()
         body_h  = body.winfo_reqheight()
         overhead = 110  # title label + close button + padding
-        win_h   = max(360, min(body_h + overhead, settings.winfo_screenheight() - 80))
-        new_y   = max(20, self.window.winfo_y() + self.window.winfo_height() // 2 - win_h // 2)
-        settings.geometry(f"480x{win_h}+{x}+{new_y}")
+        self._fit_window_to_workarea(settings, 480, max(360, body_h + overhead))
         # Reveal now that it's correctly sized and positioned.
         settings.deiconify()
 

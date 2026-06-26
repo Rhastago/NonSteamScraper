@@ -702,3 +702,20 @@ def test_compute_window_fit_very_small_workarea_height_minimum():
     # avail_h = max(300 - 80, 200) = 220; h = min(300, 220) = 220
     assert h == 220
     assert w >= 1 and h >= 1
+
+
+def test_compute_window_fit_degenerate_screen_never_exceeds_workarea():
+    # When the work area is smaller than the 200px reserve-floor, the window must
+    # still not exceed (and overflow) the work area — the bottom-edge invariant.
+    wa_x, wa_y, wa_w, wa_h = 0, 0, 300, 150
+    w, h, x, y = fg.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
+    assert h <= wa_h and w <= wa_w
+    assert y + h <= wa_y + wa_h
+    assert x + w <= wa_x + wa_w
+
+
+def test_parse_net_workarea_negative_origin_reported_honestly():
+    # A negative origin must be parsed as-is (so the caller's sanity check can
+    # reject it) rather than having the minus stripped into a wrong positive.
+    line = "_NET_WORKAREA(CARDINAL) = -10, 0, 1920, 1053"
+    assert fg.parse_net_workarea(line) == (-10, 0, 1920, 1053)
