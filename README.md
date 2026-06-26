@@ -207,7 +207,7 @@ binaries in a clean environment and attaches them to the matching GitHub Release
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.2.0** — full color-icon UI, redesigned results screen, smarter window placement, and the Windows self-restart crash fix.
+See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.2.5** — main-window search/filter, faster (parallel) artwork fetching, and on-screen window clamping.
 
 ---
 

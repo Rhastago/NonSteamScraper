@@ -4,6 +4,37 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.2.5] — 2026-06-26
+
+### Added
+- **Search / filter box on the main window** — type to instantly filter the game
+  list (and the Hidden section) by name; Escape or the ✕ button clears it. Makes
+  large libraries manageable. The filter is debounced so big libraries stay smooth.
+
+### Changed
+- **Faster artwork fetching.** Downloads now run with bounded concurrency (a small
+  thread pool) instead of strictly one-at-a-time, so fetching a library is
+  noticeably quicker. Concurrency is kept conservative and still honors
+  SteamGridDB's dynamic rate-limiting (HTTP 429 + Retry-After).
+- Library scanning is faster and more accurate — the grid folder is read once per
+  refresh instead of once per game, and game/art matching now uses an exact id
+  boundary, fixing a rare case where one game's id being a prefix of another's
+  could mis-report "has artwork".
+- The API key and the Steam-running status are now cached briefly in memory,
+  removing repeated disk reads and process scans during fetches and UI updates.
+
+### Fixed
+- **The main window now stays fully on-screen.** Its size/position is clamped to
+  the screen work area (like the results window), so a position saved on a larger
+  or different display — e.g. the Deck docked then undocked — can no longer strand
+  it off-screen or under the taskbar.
+- Settings window placement now uses the same work-area-aware logic.
+- Removed an open-then-resize flash when the main and Settings windows appear.
+
+### Development
+- Extracted the pure window-placement math into `find_games.py` with regression
+  tests; expanded the test suite (now 81 tests).
+
 ## [1.2.0] — 2026-06-26
 
 ### Added
@@ -102,6 +133,7 @@ This project adheres to [Semantic Versioning](https://semver.org).
   detection, thumbnail cache, dark/light themes, and factory reset.
 - Cross-platform: Linux (Steam Deck) and Windows.
 
+[1.2.5]: https://github.com/Rhastago/NonSteamScraper/releases/tag/v1.2.5
 [1.2.0]: https://github.com/Rhastago/NonSteamScraper/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Rhastago/NonSteamScraper/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Rhastago/NonSteamScraper/releases/tag/v1.0.0

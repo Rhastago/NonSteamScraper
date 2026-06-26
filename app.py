@@ -20,7 +20,7 @@ from find_games import (
     parse_net_workarea, compute_window_fit,
 )
 
-VERSION = "1.2.0"
+VERSION = "1.2.5"
 
 FIRST_RUN_FILE  = os.path.expanduser("~/.steamart_firstrun")
 THEME_FILE      = os.path.expanduser("~/.steamart_theme")
