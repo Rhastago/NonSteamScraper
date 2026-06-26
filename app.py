@@ -18,7 +18,7 @@ from find_games import (
     search_sgdb_autocomplete, clear_slot_files, download_apng
 )
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 FIRST_RUN_FILE  = os.path.expanduser("~/.steamart_firstrun")
 THEME_FILE      = os.path.expanduser("~/.steamart_theme")
@@ -67,6 +67,14 @@ def save_theme(name):
 
 
 class SteamArtApp:
+    # Coherent icon sizes (px) by role, so glyphs stay big and readable everywhere.
+    ICON_TOOLBAR = 33   # top-bar icon-only buttons
+    ICON_NAV     = 39   # prev/next artwork cycling buttons (need a clear click target)
+    ICON_BTN     = 33   # other icon-only buttons (eye)
+    ICON_ACTION  = 27   # icon beside button text (apply/undo/reset)
+    ICON_INLINE  = 27   # indicators inside list rows / status labels
+    ICON_LOG     = 24   # inline icons in the activity log
+
     def __init__(self, window):
         if STEAM_NOT_FOUND:
             messagebox.showerror(
@@ -84,6 +92,10 @@ class SteamArtApp:
         self.window.minsize(560, 480)
         self.window.resizable(True, True)
         self.window.config(bg=self.theme["bg"])
+        # Build the whole window hidden, then size + position it and reveal it
+        # once (see the deiconify after _restore_geometry) so the user never
+        # sees it appear at a default spot and jump to its final geometry.
+        self.window.withdraw()
         self._set_window_icon()
         self.games = []
         self.hidden_visible = False
@@ -99,6 +111,8 @@ class SteamArtApp:
         self.check_steam_running()
         self._autosize_window()
         self._restore_geometry()
+        # Sized and positioned — reveal it now, in place, with no visible resize.
+        self.window.deiconify()
         self.window.protocol("WM_DELETE_WINDOW", self._on_close)
         self.check_first_run()
 
@@ -140,6 +154,24 @@ class SteamArtApp:
             button.config(image=ic, compound=compound)
         else:
             button.config(image=ic, text="")
+
+    def _set_status(self, text, fg=None, icon=None):
+        """Set the status bar text with an optional leading color icon. Always sets the
+        image (icon or empty) so a previous icon never lingers when the text changes."""
+        ic = self._icon(icon, self.ICON_INLINE) if icon else None
+        self.status_bar.config(text=text, image=ic or "",
+                               compound="left" if ic else "none",
+                               fg=fg or self.theme["fg"])
+
+    def _set_apply_btn(self, btn, applied):
+        """Set an Apply/Applied button's label + color icon by state, clearing any
+        stale image when reverting so the icon and text stay in sync."""
+        ic = self._icon("applied", self.ICON_ACTION) if applied else None
+        if applied:
+            btn.config(text="Applied!", image=ic or "",
+                       compound="left" if ic else "none")
+        else:
+            btn.config(text="Apply this one", image="", compound="none")
 
     def _autosize_window(self):
         """Size the window to fit all its content so nothing is clipped on open.
@@ -197,6 +229,112 @@ class SteamArtApp:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         return canvas, body
+
+    def _get_workarea(self, window):
+        """Return (x, y, w, h) of the usable screen work area (screen minus
+        taskbar/panels), so windows can be placed without landing under the
+        Windows taskbar or a Linux/X11 panel.
+
+        Detection is FLASH-FREE — it never creates a probe window (an earlier
+        transparent-probe approach both flashed and returned garbage sizes on
+        KDE/Plasma). Instead it asks the OS directly:
+          * Windows: SystemParametersInfoW / SPI_GETWORKAREA (ctypes).
+          * Linux/X11: the _NET_WORKAREA root property via `xprop`.
+        Each result must pass a sanity floor (a real work area is most of the
+        screen) so junk values can't shrink the window to a tiny square. Falls
+        back to the full screen minus a bottom taskbar margin if both fail.
+        """
+        window.update_idletasks()
+        screen_w = window.winfo_screenwidth()
+        screen_h = window.winfo_screenheight()
+
+        def _sane(x, y, w, h):
+            # A genuine work area covers most of the screen; reject anything
+            # tiny (garbage) or larger than the screen, and any negative origin.
+            return (x >= 0 and y >= 0
+                    and w >= screen_w * 0.5 and h >= screen_h * 0.5
+                    and w <= screen_w and h <= screen_h)
+
+        # --- Windows: direct OS query, no window, no flash. ---
+        try:
+            import ctypes
+            from ctypes import wintypes
+            SPI_GETWORKAREA = 0x0030
+            rect = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(
+                    SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+                wa = (rect.left, rect.top,
+                      rect.right - rect.left, rect.bottom - rect.top)
+                if _sane(*wa):
+                    return wa
+        except (AttributeError, OSError, ValueError):
+            # Not on Windows / no user32 — fall through.
+            pass
+
+        # --- Linux/X11: read _NET_WORKAREA from the root window via xprop. ---
+        try:
+            import subprocess, shutil, re
+            if shutil.which("xprop"):
+                out = subprocess.run(
+                    ["xprop", "-root", "_NET_WORKAREA"],
+                    capture_output=True, text=True, timeout=1).stdout
+                # e.g. "_NET_WORKAREA(CARDINAL) = 0, 0, 1920, 1053, 0, 0, ..."
+                # The first four numbers are x, y, w, h for the first desktop.
+                nums = [int(n) for n in re.findall(r"\d+", out.split("=", 1)[-1])]
+                if len(nums) >= 4:
+                    wa = (nums[0], nums[1], nums[2], nums[3])
+                    if _sane(*wa):
+                        return wa
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+
+        # Fallback: full screen minus a generous bottom taskbar/panel margin.
+        margin = 80
+        return 0, 0, screen_w, max(screen_h - margin, 200)
+
+    def _fit_window_to_workarea(self, window, desired_w=None, desired_h=None):
+        """Size and position *window* so it sits fully inside the screen work
+        area, with its title bar and all edges visible (never under a panel or
+        taskbar). Centers within the work area when there is room.
+
+        desired_w/desired_h are the preferred size; when omitted they default to
+        the window's natural required size. The window only shrinks below the
+        desired size when the work area is smaller.
+        Returns the (final_w, final_h) actually applied.
+        """
+        window.update_idletasks()
+        wa_x, wa_y, wa_w, wa_h = self._get_workarea(window)
+        # Preferred size (e.g. the classic 900x750), or natural content size.
+        req_w = desired_w if desired_w is not None else window.winfo_reqwidth()
+        req_h = desired_h if desired_h is not None else window.winfo_reqheight()
+        # Reserve vertical room for the window-manager title bar / decorations.
+        # geometry() only positions the client area, and the title bar sits
+        # outside it; without this reserve, a window capped to the full work-area
+        # height pushes its bottom edge (and the action buttons) under the
+        # taskbar on small screens. RESERVE is generous enough to cover the
+        # title bar whether the WM treats geometry as client- or frame-origin.
+        RESERVE = 80
+        avail_h = max(wa_h - RESERVE, 200)
+        # Never exceed the available area; the scrollable canvas absorbs overflow.
+        final_w = max(1, min(req_w, wa_w))
+        final_h = max(1, min(req_h, avail_h))
+        # Don't let an earlier minsize() force the window bigger than the work
+        # area; lower the effective minimum if the screen is small.
+        try:
+            min_w, min_h = window.minsize()
+            if min_w > wa_w or min_h > avail_h:
+                window.minsize(min(min_w, wa_w), min(min_h, avail_h))
+        except tk.TclError:
+            pass
+        # Centre horizontally; vertically leave RESERVE/2 of slack above and
+        # below so neither the title bar nor the bottom buttons can land under a
+        # panel/taskbar, then clamp every edge inside the work area.
+        x = wa_x + (wa_w - final_w) // 2
+        y = wa_y + (RESERVE // 2) + (avail_h - final_h) // 2
+        x = max(wa_x, min(x, wa_x + wa_w - final_w))
+        y = max(wa_y, min(y, wa_y + wa_h - final_h))
+        window.geometry(f"{final_w}x{final_h}+{x}+{y}")
+        return final_w, final_h
 
     def _add_tooltip(self, widget, text):
         """Show a small tooltip near the cursor when hovering over widget."""
@@ -277,19 +415,19 @@ class SteamArtApp:
         header_frame.pack(fill="x", padx=20, pady=10)
         self._label(header_frame, "NonSteamScraper", font=("Arial", 20, "bold")).pack(side="left")
         reload_btn = self._flat_btn(header_frame, "🔄", self.refresh_library, font=("Arial", 12))
-        self._iconify(reload_btn, "refresh", 22)
+        self._iconify(reload_btn, "refresh", self.ICON_TOOLBAR)
         reload_btn.pack(side="left", padx=6)
         self._add_tooltip(reload_btn, "Reload")
         art_btn = self._flat_btn(header_frame, "🎨", self.open_art_prefs, font=("Arial", 12))
-        self._iconify(art_btn, "palette", 22)
+        self._iconify(art_btn, "palette", self.ICON_TOOLBAR)
         art_btn.pack(side="left", padx=2)
         self._add_tooltip(art_btn, "Art Style Preferences")
         settings_btn = self._flat_btn(header_frame, "⚙", self.open_settings, font=("Arial", 14))
-        self._iconify(settings_btn, "settings", 22)
+        self._iconify(settings_btn, "settings", self.ICON_TOOLBAR)
         settings_btn.pack(side="right")
         self._add_tooltip(settings_btn, "Settings")
         info_btn = self._flat_btn(header_frame, "ℹ", self.show_info, font=("Arial", 14))
-        self._iconify(info_btn, "info", 22)
+        self._iconify(info_btn, "info", self.ICON_TOOLBAR)
         info_btn.pack(side="right", padx=4)
         self._add_tooltip(info_btn, "Information")
 
@@ -323,8 +461,9 @@ class SteamArtApp:
         self.fetch_button.pack(pady=10)
 
         # Undo button — enabled only after a successful fetch
-        self.undo_button = self._btn(self.window, "↩️ Undo Last Fetch",
+        self.undo_button = self._btn(self.window, "Undo Last Fetch",
                                      self.undo_fetch, font=("Arial", 10))
+        self._iconify(self.undo_button, "undo", self.ICON_ACTION, compound="left")
         self.undo_button.config(state="disabled")
         self.undo_button.pack()
 
@@ -345,10 +484,9 @@ class SteamArtApp:
     def check_steam_running(self):
         """Display a warning if Steam is open, since artwork changes require a restart."""
         if is_steam_running():
-            self.status_bar.config(
-                text="⚠️ Steam is running — restart Steam after fetching to see changes",
-                fg=self.theme["warn"]
-            )
+            self._set_status(
+                "Steam is running — restart Steam after fetching to see changes",
+                self.theme["warn"], icon="warning")
 
     def _bind_wheel_to_canvas(self, widget, canvas):
         """Bind mouse-wheel scrolling on a widget and all of its descendants so they
@@ -380,9 +518,9 @@ class SteamArtApp:
 
     def refresh_library(self):
         """Reload the library and recheck Steam status."""
-        self.log("🔄 Reloading library...")
+        self.log("Reloading library...", icon="refresh")
         self.load_games()
-        self.status_bar.config(text="Ready", fg=self.theme["fg"])
+        self._set_status("Ready")
         self.check_steam_running()
 
     def load_games(self):
@@ -442,13 +580,13 @@ class SteamArtApp:
     def build_game_row(self, game):
         """Build a single game row with click-to-reveal action buttons."""
         t = self.theme
-        icon = "✅" if game["has_art"] else "🎨"
         row = tk.Frame(self.list_frame, pady=2, cursor="hand2", bg=t["bg"])
         row.pack(fill="x", padx=5)
 
-        label = tk.Label(row, text=f"{icon}  {game['name'][:40]}",
+        label = tk.Label(row, text=f"  {game['name'][:40]}",
                           font=("Courier", 11), anchor="w", cursor="hand2",
                           bg=t["bg"], fg=t["fg"])
+        self._iconify(label, "applied" if game["has_art"] else "palette", self.ICON_INLINE, compound="left")
         label.pack(side="left", fill="x", expand=True)
 
         refetch_btn = self._btn(row, "Re-fetch", lambda g=game: self.refetch_game(g), font=("Arial", 8))
@@ -504,8 +642,10 @@ class SteamArtApp:
         t = self.theme
         row = tk.Frame(self.hidden_frame, pady=2, bg=t["bg"])
         row.pack(fill="x", padx=15)
-        tk.Label(row, text=f"⏭  {game['name'][:35]}", font=("Courier", 11),
-                  anchor="w", fg=t["muted"], bg=t["bg"]).pack(side="left", fill="x", expand=True)
+        skip_lbl = tk.Label(row, text=f"  {game['name'][:35]}", font=("Courier", 11),
+                            anchor="w", fg=t["muted"], bg=t["bg"])
+        self._iconify(skip_lbl, "offline", self.ICON_INLINE, compound="left")
+        skip_lbl.pack(side="left", fill="x", expand=True)
         self._btn(row, "Search", lambda g=game: self.open_sgdb_search(g),
                   font=("Arial", 8)).pack(side="right", padx=2)
         self._btn(row, "Reset Skip", lambda g=game: self.reset_skip(g),
@@ -574,7 +714,8 @@ class SteamArtApp:
                     os.remove(f)
                 except Exception:
                     pass
-            self.log(f"🔍 Matched '{game['name']}' → '{chosen['name']}' (SGDB #{chosen['id']})")
+            self.log(f"Matched '{game['name']}' → '{chosen['name']}' (SGDB #{chosen['id']})",
+                     icon="search")
             dlg.destroy()
             self.load_games()
             self.start_fetch()
@@ -660,7 +801,7 @@ class SteamArtApp:
     def reset_skip(self, game):
         """Remove a game from the skip list so it will be retried on the next fetch."""
         self._remove_from_skip(game["app_id"])
-        self.log(f"↩️ Reset skip for: {game['name']}")
+        self.log(f"Reset skip for: {game['name']}", icon="undo")
         self.load_games()
 
     def refetch_game(self, game):
@@ -668,14 +809,14 @@ class SteamArtApp:
         self._remove_from_skip(game["app_id"])
         for f in glob.glob(os.path.join(GRID_FOLDER, f"{game['app_id']}*")):
             os.remove(f)
-        self.log(f"🔄 Reset artwork for: {game['name']} — will re-fetch on next run")
+        self.log(f"Reset artwork for: {game['name']} — will re-fetch on next run", icon="refresh")
         self.load_games()
 
     def undo_fetch(self):
         """Delete the files downloaded during the last fetch, reverting those games
         back to needing artwork. Works even on a first-time fetch with no prior state."""
         if not self.last_fetch_files:
-            self.log("⚠️ Nothing to undo.")
+            self.log("Nothing to undo.", icon="warning")
             return
         removed = 0
         for path in self.last_fetch_files:
@@ -687,7 +828,8 @@ class SteamArtApp:
                 pass
         self.last_fetch_files = []
         self.undo_button.config(state="disabled")
-        self.log(f"↩️ Undo complete — removed {removed} file(s). Restart Steam to see changes.")
+        self.log(f"Undo complete — removed {removed} file(s). Restart Steam to see changes.",
+                 icon="undo")
         self.load_games()
 
     def show_info(self):
@@ -779,7 +921,7 @@ class SteamArtApp:
 
         def do_save():
             save_prefs({k: v.get() for k, v in vars_.items()})
-            self.log("🎨 Art style preferences saved.")
+            self.log("Art style preferences saved.", icon="palette")
             win.destroy()
 
         def do_reset():
@@ -819,8 +961,9 @@ class SteamArtApp:
 
         header_row = tk.Frame(win, bg=t["bg"])
         header_row.pack(fill="x", padx=10, pady=(10, 0))
-        self._btn(header_row, "↺ Reset to defaults", do_reset,
-                  font=("Arial", 9)).pack(side="left")
+        reset_btn = self._btn(header_row, "Reset to defaults", do_reset, font=("Arial", 9))
+        self._iconify(reset_btn, "undo", self.ICON_ACTION, compound="left")
+        reset_btn.pack(side="left")
         tk.Label(header_row, text="Art Style Preferences", font=("Arial", 16, "bold"),
                  bg=t["bg"], fg=t["fg"]).pack(side="left", expand=True)
 
@@ -888,6 +1031,9 @@ class SteamArtApp:
         t = self.theme
         settings = tk.Toplevel(self.window)
         settings.title("Settings")
+        # Build hidden, then size/position and reveal once (deiconify at the end
+        # of this method) so there's no appear-then-resize flash.
+        settings.withdraw()
         settings.geometry("480x520")
         settings.minsize(420, 360)
         settings.resizable(True, True)
@@ -931,9 +1077,27 @@ class SteamArtApp:
         api_entry = tk.Entry(key_row, textvariable=api_var, font=("Courier", 10), show="*",
                               width=24, bg=t["entry_bg"], fg=t["fg"], insertbackground=t["fg"])
         api_entry.pack(side="left")
-        self._btn(key_row, "👁",
+        # Select the whole key on focus (e.g. a single click) so it can be
+        # replaced/copied without needing to double-click and drag. after_idle
+        # runs the selection after the click's default cursor placement, so it
+        # sticks.
+        api_entry.bind("<FocusIn>", lambda e: e.widget.after(
+            0, lambda: (e.widget.select_range(0, "end"), e.widget.icursor("end"))))
+        # The eye button holds a large image (pixel-sized) while Save is text
+        # (char-sized). Put both in a 2-column grid holder with equal-weight
+        # `uniform` columns so the columns are forced to the same width and the
+        # shared row to the same height; each button fills its cell (sticky
+        # nsew) so the two render as identical boxes. Grid never clips its
+        # children, so the buttons can't vanish.
+        btn_holder = tk.Frame(key_row, bg=t["bg"])
+        btn_holder.pack(side="left", padx=2)
+        btn_holder.grid_columnconfigure(0, weight=1, uniform="keybtns")
+        btn_holder.grid_columnconfigure(1, weight=1, uniform="keybtns")
+        eye_btn = self._btn(btn_holder, "👁",
                   lambda: api_entry.config(show="" if api_entry.cget("show") == "*" else "*"),
-                  font=("Arial", 10)).pack(side="left", padx=2)
+                  font=("Arial", 10))
+        self._iconify(eye_btn, "eye", self.ICON_BTN)
+        eye_btn.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
 
         # Status line shows whether a verified key is on file
         key_status = tk.Label(api_frame, text="", font=("Arial", 9), bg=t["bg"], anchor="w")
@@ -956,7 +1120,7 @@ class SteamArtApp:
                         if ok:
                             save_api_key(candidate)
                             key_status.config(text="✓ Key verified and saved", fg=t["ok"])
-                            self.log("🔑 API key verified and saved.")
+                            self.log("API key verified and saved.", icon="key")
                         else:
                             key_status.config(
                                 text="✗ Key invalid or unreachable — not saved", fg=t["danger"])
@@ -966,7 +1130,8 @@ class SteamArtApp:
 
             threading.Thread(target=worker, daemon=True).start()
 
-        self._btn(key_row, "Save", do_save_key, font=("Arial", 9)).pack(side="left", padx=2)
+        save_btn = self._btn(btn_holder, "Save", do_save_key, font=("Arial", 9))
+        save_btn.grid(row=0, column=1, sticky="nsew")
 
         # Appearance
         appearance_frame = tk.LabelFrame(body, text="Appearance", padx=10, pady=8,
@@ -1001,7 +1166,7 @@ class SteamArtApp:
         def do_clear_cache():
             clear_cache()
             cache_label.config(text="Cache size: 0.0 MB")
-            self.log("🗑️ Cache cleared.")
+            self.log("Cache cleared.", icon="trash")
 
         self._btn(cache_frame, "Clear Cache", do_clear_cache, font=("Arial", 9)).pack(side="right")
 
@@ -1009,11 +1174,17 @@ class SteamArtApp:
         steam_frame = tk.LabelFrame(body, text="Steam", padx=10, pady=8,
                                      bg=t["bg"], fg=t["fg"])
         steam_frame.pack(fill="x", padx=15, pady=5)
-        steam_status = "🟢 Running" if is_steam_running() else "⚫ Not running"
-        tk.Label(steam_frame, text=f"Status: {steam_status}", font=("Arial", 10),
+        running = is_steam_running()
+        tk.Label(steam_frame, text="Status:", font=("Arial", 10),
                   bg=t["bg"], fg=t["fg"]).pack(side="left")
+        steam_status_lbl = tk.Label(steam_frame,
+                  text=" Running" if running else " Not running",
+                  font=("Arial", 10), bg=t["bg"], fg=t["fg"])
+        self._iconify(steam_status_lbl, "online" if running else "offline", self.ICON_INLINE, compound="left")
+        steam_status_lbl.pack(side="left", padx=2)
         self._btn(steam_frame, "Restart Steam",
-                  lambda: [restart_steam(), close_settings(), self.log("🔄 Steam restarting...")],
+                  lambda: [restart_steam(), close_settings(),
+                           self.log("Steam restarting...", icon="refresh")],
                   font=("Arial", 9)).pack(side="right")
 
         # Artwork
@@ -1030,7 +1201,8 @@ class SteamArtApp:
                 parent=settings
             ):
                 deleted = clear_managed_artwork()
-                self.log(f"🗑️ Cleared {deleted} artwork file(s) added by NonSteamScraper.")
+                self.log(f"Cleared {deleted} artwork file(s) added by NonSteamScraper.",
+                         icon="trash")
                 self.load_games()
                 close_settings()
 
@@ -1076,17 +1248,30 @@ class SteamArtApp:
         win_h   = max(360, min(body_h + overhead, settings.winfo_screenheight() - 80))
         new_y   = max(20, self.window.winfo_y() + self.window.winfo_height() // 2 - win_h // 2)
         settings.geometry(f"480x{win_h}+{x}+{new_y}")
+        # Reveal now that it's correctly sized and positioned.
+        settings.deiconify()
 
     def _ui(self, fn):
         """Schedule fn to run on the main (UI) thread. Safe to call from workers."""
         self.window.after(0, fn)
 
-    def log(self, message):
+    def log(self, message, icon=None):
         """Append a message to the activity log. Thread-safe: the text-box mutation
-        is marshaled onto the main thread, so this may be called from worker threads."""
+        is marshaled onto the main thread, so this may be called from worker threads.
+        An optional `icon` name embeds a bundled color icon at the start of the line."""
         def append():
             self.log_box.config(state="normal")
-            self.log_box.insert("end", message + "\n")
+            ic = self._icon(icon, self.ICON_LOG) if icon else None
+            msg = message
+            if ic:
+                # Preserve any leading blank lines, then place the icon at the line start.
+                lead = len(msg) - len(msg.lstrip("\n"))
+                if lead:
+                    self.log_box.insert("end", "\n" * lead)
+                    msg = msg[lead:]
+                self.log_box.image_create("end", image=ic, padx=2)
+                self.log_box.insert("end", " ")
+            self.log_box.insert("end", msg + "\n")
             self.log_box.see("end")
             self.log_box.config(state="disabled")
             self.window.update_idletasks()
@@ -1106,7 +1291,7 @@ class SteamArtApp:
 
         self.fetch_button.config(state="disabled", text="Fetching...")
         self.undo_button.config(state="disabled")
-        self.status_bar.config(text="Working...", fg=self.theme["fg"])
+        self._set_status("Working...")
         self.progress_var.set(0)
         self.progress_label.pack(pady=2)
         self.progress_bar.pack(fill="x", padx=20, pady=2)
@@ -1120,7 +1305,7 @@ class SteamArtApp:
         prefs = load_prefs()
         needs_art = [g for g in self.games if not g["has_art"]]
         if not needs_art:
-            self.log("✅ All games already have artwork!")
+            self.log("All games already have artwork!", icon="applied")
             self._ui(lambda: self.fetch_button.config(state="disabled", text="Nothing to fetch"))
             self._ui(lambda: self.progress_label.pack_forget())
             self._ui(lambda: self.progress_bar.pack_forget())
@@ -1136,15 +1321,15 @@ class SteamArtApp:
             game_start = i / total * 100
             game_end   = (i + 1) / total * 100
 
-            self.log(f"\n🎮 Processing: {name}")
-            self._ui(lambda name=name: self.status_bar.config(text=f"Searching: {name}"))
+            self.log(f"\nProcessing: {name}", icon="game")
+            self._ui(lambda name=name: self._set_status(f"Searching: {name}"))
             self._ui(lambda game_start=game_start: self.progress_var.set(game_start))
             self._ui(lambda i=i, total=total, short=short:
                      self.progress_label.config(text=f"[{i+1}/{total}] {short} — Searching SteamGridDB..."))
 
             sgdb_id = search_game(name, app_id)
             if sgdb_id is False:
-                self.log("  ❌ Network error — will retry on next fetch")
+                self.log("Network error — will retry on next fetch", icon="error")
                 continue
             if sgdb_id:
                 def make_cb(_short, _start, _end, _i, _tot):
@@ -1160,14 +1345,14 @@ class SteamArtApp:
                     sgdb_id, app_id, prefs,
                     progress_cb=make_cb(short, game_start, game_end, i, total)
                 )
-                self.log(f"  ✅ Artwork saved for {name}")
+                self.log(f"Artwork saved for {name}", icon="applied")
                 fetch_results.append({"name": name, "app_id": app_id, "results": results})
                 for art_data in results.values():
                     # applied_index is None for animated slots nothing was auto-applied to.
                     if art_data and art_data.get("applied_index") is not None and art_data.get("applied_path"):
                         self.last_fetch_files.append(art_data["applied_path"])
             else:
-                self.log("  ⚠️ Not found on SteamGridDB — skipping permanently")
+                self.log("Not found on SteamGridDB — skipping permanently", icon="warning")
                 add_to_skip_list(app_id)
 
         self._ui(lambda: self.progress_var.set(100))
@@ -1175,12 +1360,12 @@ class SteamArtApp:
                  self.progress_label.config(text=f"Done! Fetched artwork for {n} of {total} game(s)."))
 
         if fetch_results:
-            self.log("\n✅ Done! Opening results screen...")
+            self.log("\nDone! Opening results screen...", icon="applied")
             self._ui(lambda: self.undo_button.config(state="normal"))
         else:
-            self.log("\n✅ Done! No new artwork was fetched.")
+            self.log("\nDone! No new artwork was fetched.", icon="applied")
 
-        self._ui(lambda: self.status_bar.config(text="Done!"))
+        self._ui(lambda: self._set_status("Done!"))
         self._ui(lambda: self.fetch_button.config(state="normal", text="Fetch Missing Artwork"))
         self._ui(lambda: self.load_games())
         self._ui(lambda: self.check_steam_running())
@@ -1194,11 +1379,11 @@ class SteamArtApp:
         results_window = tk.Toplevel(self.window)
         results_window.title("Results — Review Artwork")
         results_window.config(bg=t["bg"])
+        # Build the whole window hidden, then size/position it and only reveal it
+        # once — so the user never sees it appear at a default spot and then jump
+        # to its final geometry (the "resize flash").
+        results_window.withdraw()
         results_window.update_idletasks()
-        win_w, win_h = 900, 750
-        x = (results_window.winfo_screenwidth()  // 2) - (win_w // 2)
-        y = (results_window.winfo_screenheight() // 2) - (win_h // 2)
-        results_window.geometry(f"{win_w}x{win_h}+{x}+{y}")
         results_window.minsize(560, 480)
         results_window.resizable(True, True)
         # Tie the results window to the main window (and later the popup to the results
@@ -1220,17 +1405,21 @@ class SteamArtApp:
         steam_status_frame = tk.Frame(results_window, bg=t["bg"])
         steam_status_frame.pack(pady=2)
         if is_steam_running():
-            tk.Label(steam_status_frame,
-                      text="⚠️ Steam is running — restart Steam to see your new artwork",
-                      font=("Arial", 9), fg=t["warn"], bg=t["bg"]).pack(side="left")
+            sr_lbl = tk.Label(steam_status_frame,
+                      text=" Steam is running — restart Steam to see your new artwork",
+                      font=("Arial", 9), fg=t["warn"], bg=t["bg"])
+            self._iconify(sr_lbl, "warning", self.ICON_INLINE, compound="left")
+            sr_lbl.pack(side="left")
             rs_btn = self._btn(steam_status_frame, "Restart Steam", lambda: None, font=("Arial", 8))
             rs_btn.config(command=lambda: [restart_steam(),
                                            rs_btn.config(text="Restarting...", state="disabled")])
             rs_btn.pack(side="left", padx=6)
         else:
-            tk.Label(steam_status_frame,
-                      text="⚫ Steam is not running — launch Steam to see your new artwork",
-                      font=("Arial", 9), fg=t["muted2"], bg=t["bg"]).pack(side="left")
+            sn_lbl = tk.Label(steam_status_frame,
+                      text=" Steam is not running — launch Steam to see your new artwork",
+                      font=("Arial", 9), fg=t["muted2"], bg=t["bg"])
+            self._iconify(sn_lbl, "offline", self.ICON_INLINE, compound="left")
+            sn_lbl.pack(side="left")
 
         # Buttons are pinned to the bottom FIRST so capping the window height can
         # never push them off-screen.
@@ -1251,22 +1440,24 @@ class SteamArtApp:
         self._bind_wheel_to_canvas(canvas, canvas)
 
         # Size the window so the first game section is fully visible. Pin the canvas
-        # to the first section's height, let tkinter compute the natural window
-        # height, then cap to the screen. Since the buttons are packed at the bottom,
-        # capping shrinks the canvas (not the buttons) and extra sections scroll.
+        # to the first section's height so tkinter's natural window size accounts
+        # for the headers, the first results card and the bottom buttons. Since the
+        # buttons are packed at the bottom FIRST, capping the window to the work
+        # area shrinks the canvas (not the buttons) and extra sections scroll.
         results_window.update_idletasks()
         sections = scrollable_frame.winfo_children()
         if sections:
             first_section_h = sections[0].winfo_reqheight() + 24
             canvas.config(height=first_section_h)
-            results_window.update_idletasks()
-            needed_h = results_window.winfo_reqheight()
-            screen_h = results_window.winfo_screenheight()
-            screen_w = results_window.winfo_screenwidth()
-            final_h = min(needed_h, screen_h - 100)
-            x = (screen_w // 2) - (win_w // 2)
-            y = max((screen_h // 2) - (final_h // 2), 20)
-            results_window.geometry(f"{win_w}x{final_h}+{max(x, 0)}+{y}")
+        # Use the classic 900x750 as the preferred size. Snap the window fully
+        # into the visible work area (screen minus the taskbar/panels): keep
+        # 900x750 when it fits, otherwise shrink to the work area and let the
+        # canvas scroll, always clamping every edge on-screen so the title bar
+        # and bottom buttons are never hidden behind a taskbar/panel.
+        self._fit_window_to_workarea(results_window, desired_w=900, desired_h=750)
+        # Reveal it now that it's correctly sized and positioned — appears once,
+        # in place, with no visible resize.
+        results_window.deiconify()
 
     def build_game_result_section(self, parent, game_result):
         """Build the artwork review UI for a single game in the results screen."""
@@ -1274,7 +1465,7 @@ class SteamArtApp:
         name    = game_result["name"]
         app_id  = game_result["app_id"]
         results = game_result["results"]
-        frame = tk.LabelFrame(parent, text=f"🎮 {name}", font=("Arial", 12, "bold"),
+        frame = tk.LabelFrame(parent, text=f" {name}", font=("Arial", 12, "bold"),
                                padx=10, pady=10, bg=t["bg"], fg=t["fg"])
         frame.pack(fill="x", padx=10, pady=8)
 
@@ -1285,10 +1476,22 @@ class SteamArtApp:
             if not art_data:
                 continue
 
-            row = tk.Frame(frame, bg=t["bg"])
-            row.pack(fill="x", pady=6, anchor="center")
-            tk.Label(row, text=label, font=("Arial", 10, "bold"), width=16, anchor="w",
-                      bg=t["bg"], fg=t["fg"]).pack(side="left")
+            # Each art type gets its own titled card so it's obvious which
+            # controls belong to which artwork. The card title is the art-type
+            # name (Cover / Wide Cover / ...), replacing the old inline label.
+            cell = tk.LabelFrame(frame, text=f" {label} ", font=("Arial", 10, "bold"),
+                                  relief="groove", bd=1, padx=8, pady=8,
+                                  bg=t["bg"], fg=t["fg"])
+            cell.pack(fill="x", pady=6)
+            # 3-column grid: col0 = ◀ (fixed), col1 = image (weight=1 so it
+            # expands and the thumbnail stays dead-centered between the arrows),
+            # col2 = ▶ (fixed). Rows: 0 = arrows+image, 1 = counter, 2 = apply.
+            # Weighting only the middle column keeps the arrows pinned to the
+            # edges and the image centered at any window width — no screen-pixel
+            # assumptions.
+            cell.grid_columnconfigure(0, weight=0)
+            cell.grid_columnconfigure(1, weight=1)
+            cell.grid_columnconfigure(2, weight=0)
 
             state = {
                 "index": 0,
@@ -1302,10 +1505,13 @@ class SteamArtApp:
                 "app_id": app_id,
             }
 
-            # Fixed-size container so the badge can be positioned absolutely on top
-            img_frame = tk.Frame(row, width=300, height=200, bg=t["placeholder"])
+            # Fixed-size container so the badge can be positioned absolutely on
+            # top. The image box itself stays fixed (the thumbnail is pre-scaled
+            # to ~300x200), but it sits in the weighted middle column so it stays
+            # dead-centered between the ◀/▶ arrows at any window width.
+            img_frame = tk.Frame(cell, width=300, height=200, bg=t["placeholder"])
             img_frame.pack_propagate(False)
-            img_frame.pack(padx=5)
+            img_frame.grid(row=0, column=1, pady=(0, 6))
             img_label = tk.Label(img_frame, bg=t["placeholder"], fg=t["fg"],
                                   text="loading...", wraplength=200)
             img_label.place(x=0, y=0, relwidth=1, relheight=1)
@@ -1313,9 +1519,11 @@ class SteamArtApp:
                                     font=("Arial", 11), padx=3, pady=1)
             state["badge_label"] = badge_label
 
-            counter_label = tk.Label(row, text=f"1 / {len(art_data['option_urls'])}",
+            # Small centered counter on its own row, spanning the full card width
+            # so it doesn't break the ◀ image ▶ symmetry above it.
+            counter_label = tk.Label(cell, text=f"1 / {len(art_data['option_urls'])}",
                                       font=("Arial", 9), bg=t["bg"], fg=t["fg"])
-            counter_label.pack(side="left", padx=4)
+            counter_label.grid(row=1, column=0, columnspan=3, pady=(0, 6))
 
             def load_thumb(path, lbl=img_label):
                 meta0 = state["option_meta"][0] if state["option_meta"] else {}
@@ -1330,10 +1538,11 @@ class SteamArtApp:
 
             # The auto-applied static option (if any) is index 0 on arrival; animated
             # slots auto-apply nothing, so their button starts as "Apply this one".
-            apply_btn = self._btn(
-                row, "✅ Applied!" if state["applied_index"] == 0 else "Apply this one",
-                lambda: None)
-            apply_btn.pack(side="right", padx=6)
+            # Spans all three columns and stretches (sticky="ew") so its left/right
+            # edges align with the ◀ and ▶ arrows above — no fixed width to fight it.
+            apply_btn = self._btn(cell, "Apply this one", lambda: None)
+            self._set_apply_btn(apply_btn, state["applied_index"] == 0)
+            apply_btn.grid(row=2, column=0, columnspan=3, sticky="ew")
 
             # Clicking the image or badge opens the full-size version in the browser
             for w in (img_frame, img_label, badge_label):
@@ -1345,12 +1554,12 @@ class SteamArtApp:
                     if s["index"] > 0:
                         s["index"] -= 1
                         update_view(s, il, cl)
-                        ab.config(text="✅ Applied!" if s["index"] == s["applied_index"] else "Apply this one")
+                        self._set_apply_btn(ab, s["index"] == s["applied_index"])
                 def nxt():
                     if s["index"] < len(s["option_urls"]) - 1:
                         s["index"] += 1
                         update_view(s, il, cl)
-                        ab.config(text="✅ Applied!" if s["index"] == s["applied_index"] else "Apply this one")
+                        self._set_apply_btn(ab, s["index"] == s["applied_index"])
                 def apply():
                     idx = s["index"]
                     url = s["option_urls"][idx]
@@ -1377,15 +1586,19 @@ class SteamArtApp:
                             if s["art_type"] == "icons":
                                 set_shortcut_icon(s["app_id"], new_path)
                             s["applied_index"] = idx
-                            ab.config(text="✅ Applied!")
+                            self._set_apply_btn(ab, True)
                     except Exception:
-                        ab.config(text="Failed — retry")
+                        ab.config(text="Failed — retry", image="", compound="none")
                 return prev, nxt, apply
 
             prev_fn, next_fn, apply_fn = make_callbacks(state, img_label, counter_label, apply_btn)
             apply_btn.config(command=apply_fn)
-            self._btn(row, "◀", prev_fn).pack(side="left")
-            self._btn(row, "▶", next_fn).pack(side="left")
+            prev_b = self._btn(cell, "◀", prev_fn)
+            self._iconify(prev_b, "prev", self.ICON_NAV)
+            prev_b.grid(row=0, column=0, padx=4, pady=(0, 6))
+            next_b = self._btn(cell, "▶", next_fn)
+            self._iconify(next_b, "next", self.ICON_NAV)
+            next_b.grid(row=0, column=2, padx=4, pady=(0, 6))
 
     def apply_animated_art(self, state, apply_btn, url, out_path, index):
         """Apply an animated artwork pick by converting it to APNG (the only animated
@@ -1453,9 +1666,10 @@ class SteamArtApp:
                 popup.destroy()
             if ok:
                 state["applied_index"] = index
-                apply_btn.config(text="✅ Applied!", state="normal")
+                self._set_apply_btn(apply_btn, True)
+                apply_btn.config(state="normal")
             else:
-                apply_btn.config(text="Failed — retry", state="normal")
+                apply_btn.config(text="Failed — retry", image="", compound="none", state="normal")
 
         def worker():
             try:
@@ -1489,8 +1703,8 @@ def _update_badge(badge_label, meta):
     """Show or hide the top-left badge overlay based on image metadata."""
     parts = []
     if meta.get("animated"): parts.append("▶")
-    if meta.get("nsfw"):     parts.append("🍆")
-    if meta.get("humor"):    parts.append("🤡")
+    if meta.get("nsfw"):     parts.append("18+")
+    if meta.get("humor"):    parts.append("MEME")
     text = " ".join(parts)
     badge_label.config(text=text)
     if text:

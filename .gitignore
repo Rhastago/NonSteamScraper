@@ -1,6 +1,7 @@
 venv/
 dist/
 build/
+winbuild/
 __pycache__/
 *.pyc
 *.spec

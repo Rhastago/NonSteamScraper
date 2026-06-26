@@ -4,6 +4,39 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.2.0] — 2026-06-26
+
+### Added
+- **Full color-icon UI.** Every interface glyph that used to be a monochrome/box
+  emoji (toolbar, per-game status, results controls, activity log, status bar,
+  Steam status, API-key eye, etc.) is now a bundled [Fluent Emoji](https://github.com/microsoft/fluentui-emoji)
+  PNG loaded via Pillow, so the app's visual flair renders consistently on every
+  platform instead of depending on the system Tk's emoji support.
+- Single-click in the API-key field now selects the whole key, so it can be
+  replaced or copied without double-clicking and dragging.
+
+### Changed
+- **Redesigned results screen.** Each art type is now a clearly titled card with a
+  responsive layout: the thumbnail sits centered between the ◀/▶ cycle buttons and
+  the Apply button stretches the full card width beneath them. Layout adapts to
+  different window sizes and screen resolutions.
+- Icon sizes were unified into a coherent, readable scale across the whole UI.
+
+### Fixed
+- **Self-restart no longer crashes on Windows** (e.g. toggling light/dark theme).
+  The relaunch now strips the PyInstaller `_MEI`/`_PYI` environment so the new
+  process doesn't try to reuse the old one's deleted temp directory.
+- **Results window snaps fully into view.** It opens at the classic 900×750 (or
+  smaller on small screens) positioned entirely within the screen work area, so
+  its title bar and the bottom action buttons are never hidden behind the taskbar
+  or a desktop panel.
+- **No more open-then-resize flash.** The main, Settings and results windows are
+  built hidden and revealed once already sized and positioned.
+
+### Development
+- Added `make_winbuild.sh`, which produces a self-contained Windows test-build
+  bundle (source + pre-fetched wheels + offline/online build instructions).
+
 ## [1.1.0] — 2026-06-25
 
 ### Added
@@ -69,5 +102,6 @@ This project adheres to [Semantic Versioning](https://semver.org).
   detection, thumbnail cache, dark/light themes, and factory reset.
 - Cross-platform: Linux (Steam Deck) and Windows.
 
+[1.2.0]: https://github.com/Rhastago/NonSteamScraper/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Rhastago/NonSteamScraper/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Rhastago/NonSteamScraper/releases/tag/v1.0.0
