@@ -434,6 +434,25 @@ class SteamArtApp:
         self.summary_label = self._label(self.window, "Loading...", font=("Arial", 11))
         self.summary_label.pack()
 
+        # Search/filter bar — live-filters the visible game list by name.
+        search_frame = self._frame(self.window)
+        search_frame.pack(fill="x", padx=20, pady=(4, 0))
+        search_icon = self._label(search_frame, "🔍", font=("Arial", 12))
+        ic = self._icon("search", self.ICON_INLINE)
+        if ic:
+            search_icon.config(image=ic, text="", compound="left")
+        search_icon.pack(side="left", padx=(0, 6))
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self._render_list())
+        self.search_entry = tk.Entry(search_frame, textvariable=self.search_var,
+                                     font=("Courier", 11), bg=t["entry_bg"], fg=t["fg"],
+                                     insertbackground=t["fg"], relief="flat", bd=4)
+        self.search_entry.pack(side="left", fill="x", expand=True)
+        self.search_entry.bind("<Escape>", lambda e: self._clear_search())
+        clear_btn = self._flat_btn(search_frame, "✕", self._clear_search, font=("Arial", 11))
+        clear_btn.pack(side="left", padx=(6, 0))
+        self._add_tooltip(clear_btn, "Clear search")
+
         list_container = self._frame(self.window)
         list_container.pack(fill="both", expand=True, padx=20, pady=10)
 
@@ -527,9 +546,25 @@ class SteamArtApp:
         """Reload the game list from Steam and refresh the UI."""
         self.games = get_non_steam_games()
         needs_art = [g for g in self.games if not g["has_art"]]
-        skipped    = [g for g in self.games if g.get("skipped")]
-        normal     = [g for g in self.games if not g.get("skipped")]
 
+        # Summary + fetch button reflect the full library, not the filtered view.
+        if not self.games:
+            self.summary_label.config(text="No non-Steam games found")
+            self.fetch_button.config(state="disabled", text="Nothing to fetch")
+        else:
+            self.summary_label.config(
+                text=f"Found {len(self.games)} Non-Steam Games — {len(needs_art)} need artwork")
+            self.fetch_button.config(
+                state="disabled" if not needs_art else "normal",
+                text="Nothing to fetch" if not needs_art else "Fetch Missing Artwork"
+            )
+
+        self._render_list()
+
+    def _render_list(self):
+        """(Re)build the displayed rows from self.games, applying the current search
+        filter. Does not re-fetch data or mutate self.games — it only chooses which
+        rows to display, so filtering stays cheap and reversible."""
         self.selected_row = None
         self.selected_btn = None
         self.selected_rename_btn = None
@@ -539,7 +574,6 @@ class SteamArtApp:
 
         if not self.games:
             # No non-Steam games in the library — explain how to add some.
-            self.summary_label.config(text="No non-Steam games found")
             self._label(
                 self.list_frame,
                 "No non-Steam games were found in your Steam library.\n\n"
@@ -548,16 +582,15 @@ class SteamArtApp:
                 "then click the refresh button above to reload.",
                 font=("Arial", 11), justify="left", anchor="w"
             ).pack(fill="x", padx=10, pady=20)
-            self.fetch_button.config(state="disabled", text="Nothing to fetch")
-            self.window.update_idletasks()
-            content_h = self.list_frame.winfo_reqheight()
-            screen_h = self.window.winfo_screenheight()
-            self.list_canvas.config(height=min(max(content_h, 40), screen_h // 3))
-            self._bind_wheel_to_canvas(self.list_canvas, self.list_canvas)
+            self._size_list_canvas(min_height=40)
             return
 
-        self.summary_label.config(
-            text=f"Found {len(self.games)} Non-Steam Games — {len(needs_art)} need artwork")
+        query = self.search_var.get().strip().lower()
+        skipped = [g for g in self.games if g.get("skipped")]
+        normal  = [g for g in self.games if not g.get("skipped")]
+        if query:
+            normal  = [g for g in normal  if query in g["name"].lower()]
+            skipped = [g for g in skipped if query in g["name"].lower()]
 
         for game in normal:
             self.build_game_row(game)
@@ -565,15 +598,26 @@ class SteamArtApp:
         if skipped:
             self.build_hidden_section(skipped)
 
-        self.fetch_button.config(
-            state="disabled" if not needs_art else "normal",
-            text="Nothing to fetch" if not needs_art else "Fetch Missing Artwork"
-        )
+        if query and not normal and not skipped:
+            self._label(self.list_frame, "No games match your search.",
+                        font=("Arial", 11), anchor="w").pack(fill="x", padx=10, pady=20)
 
         # Re-attach wheel scrolling to the freshly built rows.
+        self._size_list_canvas()
+
+    def _clear_search(self):
+        """Clear the search box and restore the full list."""
+        self.search_var.set("")
+        self.search_entry.focus_set()
+
+    def _size_list_canvas(self, min_height=None):
+        """Fit the list canvas to its content (capped at a third of the screen) and
+        re-bind wheel scrolling to the freshly built rows."""
         self.window.update_idletasks()
         content_h = self.list_frame.winfo_reqheight()
         screen_h = self.window.winfo_screenheight()
+        if min_height is not None:
+            content_h = max(content_h, min_height)
         self.list_canvas.config(height=min(content_h, screen_h // 3))
         self._bind_wheel_to_canvas(self.list_canvas, self.list_canvas)
 
