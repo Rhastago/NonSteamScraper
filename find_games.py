@@ -22,13 +22,56 @@ def _debug(context):
 
 APIKEY_FILE = os.path.expanduser("~/.steamart_apikey")
 
+# ---------------------------------------------------------------------------
+# API-key mtime cache (Task #9)
+# Invariant: _apikey_cache holds (path, mtime_or_None, value).
+#   - On each load_api_key() call we stat APIKEY_FILE.
+#   - If the stat succeeds and mtime equals the cached mtime, return the
+#     cached value (fast path — no file open).
+#   - If the mtime differs (file changed) or is None (file appeared after a
+#     previous miss), we re-read the file and update the cache.
+#   - If stat raises (file missing/unreadable), we cache (path, None, "") so
+#     a persistently missing file isn't re-stat-thrashed, but a new file that
+#     later appears will have a different mtime and force a re-read.
+# A threading.Lock serialises reads from the concurrent SGDB worker threads.
+# ---------------------------------------------------------------------------
+_apikey_lock  = threading.Lock()
+_apikey_cache = (None, None, "")   # (path, mtime, value)
+
 def load_api_key():
-    try:
-        with open(APIKEY_FILE, encoding="utf-8") as f: return f.read().strip()
-    except Exception: _debug("load_api_key"); return ""
+    global _apikey_cache
+    path = APIKEY_FILE
+    with _apikey_lock:
+        cached_path, cached_mtime, cached_value = _apikey_cache
+        # Fast path: stat the file and compare mtime.
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            mtime = None   # file missing or unreadable
+        if cached_path == path and cached_mtime == mtime:
+            return cached_value   # cache hit (mtime unchanged, or still missing)
+        # Cache miss — read the file (or return "" if missing).
+        try:
+            with open(path, encoding="utf-8") as f:
+                value = f.read().strip()
+        except Exception:
+            _debug("load_api_key")
+            value = ""
+        _apikey_cache = (path, mtime, value)
+        return value
 
 def save_api_key(key):
-    with open(APIKEY_FILE, "w", encoding="utf-8") as f: f.write(key.strip())
+    # Write the file, then update the cache so the new key is visible
+    # immediately without a round-trip through the mtime check.
+    global _apikey_cache
+    with open(APIKEY_FILE, "w", encoding="utf-8") as f:
+        f.write(key.strip())
+    with _apikey_lock:
+        try:
+            mtime = os.stat(APIKEY_FILE).st_mtime
+        except OSError:
+            mtime = None
+        _apikey_cache = (APIKEY_FILE, mtime, key.strip())
 
 def verify_api_key(key):
     if not key or not key.strip(): return False
@@ -323,11 +366,34 @@ def full_reset():
         except Exception:
             pass
 
+# ---------------------------------------------------------------------------
+# is_steam_running TTL cache (Task #10)
+# Invariant: _steam_cache holds (timestamp, bool_result).
+#   - If the cached result is younger than _STEAM_RUNNING_TTL seconds, return
+#     it immediately without iterating processes (cheap path for UI events).
+#   - Otherwise, call psutil and refresh the cache.
+# No lock needed: a float read/write is atomic on CPython, and a stale read
+# in a tiny race window just causes one redundant psutil scan — not a hazard.
+# ---------------------------------------------------------------------------
+_STEAM_RUNNING_TTL = 2.5   # seconds between full process-list scans
+_steam_cache = (0.0, False)  # (last_check_monotonic, last_result)
+
 def is_steam_running():
-    if not PSUTIL_AVAILABLE: return False
+    global _steam_cache
+    if not PSUTIL_AVAILABLE:
+        return False
+    now = time.monotonic()
+    last_ts, last_result = _steam_cache
+    if now - last_ts < _STEAM_RUNNING_TTL:
+        return last_result   # cache still fresh — skip the process scan
     target = {"Linux": "steam", "Windows": "steam.exe", "Darwin": "steam"}.get(platform.system(), "steam").lower()
-    try: return any(p.info["name"] and p.info["name"].lower() == target for p in psutil.process_iter(["name"]))
-    except Exception: return False
+    try:
+        result = any(p.info["name"] and p.info["name"].lower() == target
+                     for p in psutil.process_iter(["name"]))
+    except Exception:
+        result = False
+    _steam_cache = (now, result)
+    return result
 
 def restart_steam():
     s = platform.system()
@@ -347,6 +413,33 @@ def get_non_steam_games():
         data = vdf.binary_loads(f.read())
     shortcuts = data.get("shortcuts", {})
     skip_list = load_skip_list(); seen = set(); games = []
+
+    # --- Task #3: single grid-folder scan with boundary-correct matching -------
+    # Build a set of uids that have at least one art file by listing GRID_FOLDER
+    # exactly once (O(files)) instead of once per game (O(games × files)).
+    #
+    # Boundary fix: `startswith(str(uid))` has a prefix false-positive — uid
+    # 12345 would match filename "123456p.png" (a DIFFERENT game). Instead, we
+    # extract each filename's LEADING DIGIT RUN via regex so "123456p.png"
+    # contributes uid "123456", which will never equal "12345".
+    #
+    # Grid filenames follow these templates:
+    #   {uid}p.png   {uid}.png   {uid}_hero.png   {uid}_logo.png   {uid}_icon.png
+    # The uid is always the run of digits before the first 'p', '.', or '_'.
+    # re.match(r"(\d+)", filename) extracts exactly that leading digit run.
+    #
+    # If GRID_FOLDER doesn't exist or listdir fails, uids_with_art stays empty
+    # so has_art falls through to the skip-list check without crashing.
+    uids_with_art = set()
+    try:
+        for fname in os.listdir(GRID_FOLDER):
+            m = re.match(r"(\d+)", fname)
+            if m:
+                uids_with_art.add(m.group(1))
+    except OSError:
+        pass  # GRID_FOLDER missing or unreadable — treat as no art files
+    # ---------------------------------------------------------------------------
+
     for _key, game in shortcuts.items():
         app_id = game.get("appid")
         if app_id is None: continue
@@ -354,9 +447,8 @@ def get_non_steam_games():
         uid = app_id & 0xFFFFFFFF
         if uid in seen: continue
         seen.add(uid)
-        grid_files = [f for f in os.listdir(GRID_FOLDER) if f.startswith(str(uid))]
         in_skip = str(uid) in skip_list
-        games.append({"name": name, "app_id": uid, "has_art": len(grid_files) > 0 or in_skip, "skipped": in_skip})
+        games.append({"name": name, "app_id": uid, "has_art": (str(uid) in uids_with_art) or in_skip, "skipped": in_skip})
     return games
 
 def set_shortcut_icon(unsigned_id, icon_path):
