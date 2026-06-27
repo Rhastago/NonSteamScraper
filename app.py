@@ -49,8 +49,8 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self.window.resizable(True, True)
         self.window.config(bg=self.theme["bg"])
         # Build the whole window hidden, then size + position it and reveal it
-        # once (see the deiconify after _restore_geometry) so the user never
-        # sees it appear at a default spot and jump to its final geometry.
+        # once (after _autosize_window below) so the user never sees it appear
+        # at a default spot and jump to its final geometry.
         self.window.withdraw()
         self._set_window_icon()
         self.games = []
@@ -88,8 +88,9 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self._flush_pending_icons()
         self._poll_pending_icons()
         self._autosize_window()
-        # The window is centered by _autosize_window every launch; we intentionally
-        # do NOT restore a saved position (see _restore_geometry).
+        # The window is centered by _autosize_window every launch; we deliberately
+        # do not restore a saved position (a stale position can land off-screen after
+        # a display change, e.g. the Deck undocked from an external monitor).
         # Sized and positioned — reveal it now, in place, with no visible resize.
         self.window.deiconify()
         self.window.protocol("WM_DELETE_WINDOW", self._on_close)

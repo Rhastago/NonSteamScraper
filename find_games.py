@@ -1024,11 +1024,9 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
                     results["icon_to_set"] = (unsigned_id, save_path)
                 else:
                     set_shortcut_icon(unsigned_id, save_path)
-            applied_url = top["url"]
         else:
             save_path = os.path.join(GRID_FOLDER, f"{base}.png")
             bump(f"{art_label} — animated, apply to commit")
-            applied_url = None
 
         # Previews: first 3 options, downloaded at FULL resolution (img["url"]) using
         # the original {base}_{i} cache names — unchanged from the serial version, so
@@ -1053,7 +1051,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
         else:
             thumbs = []
 
-        results[slot] = {"applied_url": applied_url, "applied_path": save_path,
+        results[slot] = {"applied_path": save_path,
                               "applied_index": applied_index,
                               "option_urls": [img["url"] for img in options],
                               "option_meta": [
@@ -1064,7 +1062,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
                                   }
                                   for img in options
                               ],
-                              "thumb_paths": thumbs, "current_index": 0, "filename_base": base}
+                              "thumb_paths": thumbs, "filename_base": base}
     return results
 
 # --- Consuming a download_all_artwork() results dict ------------------------

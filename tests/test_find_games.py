@@ -1232,9 +1232,9 @@ def test_check_for_update_uses_10s_timeout(monkeypatch):
 def _slot(applied_index, applied_path):
     """Minimal art-slot dict shaped like download_all_artwork emits."""
     return {
-        "applied_url": None, "applied_path": applied_path,
+        "applied_path": applied_path,
         "applied_index": applied_index, "option_urls": [],
-        "option_meta": [], "thumb_paths": [], "current_index": 0,
+        "option_meta": [], "thumb_paths": [],
         "filename_base": "x",
     }
 
@@ -1617,8 +1617,6 @@ def test_download_all_artwork_happy_path_all_slots_populated(tmp_path, monkeypat
         assert isinstance(sd, dict), f"{slot} should be a populated dict"
         # The only option is static -> auto-applied at index 0.
         assert sd["applied_index"] == 0
-        assert sd["current_index"] == 0
-        assert sd["applied_url"] == sd["option_urls"][0]
         assert sd["applied_path"]  # a target path was assigned
         assert sd["option_meta"][0]["animated"] is False
 
@@ -1706,7 +1704,6 @@ def test_download_all_artwork_all_animated_slot_not_auto_applied(tmp_path, monke
     icons = results["icons"]
     assert icons is not None  # options exist, just none auto-applied
     assert icons["applied_index"] is None
-    assert icons["applied_url"] is None
     assert icons["applied_path"].endswith(".png")
     assert all(m["animated"] is True for m in icons["option_meta"])
 

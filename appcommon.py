@@ -9,7 +9,7 @@ circular import, since app.py imports those modules in turn).
 import os
 import sys
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 FIRST_RUN_FILE = os.path.expanduser("~/.steamart_firstrun")
 

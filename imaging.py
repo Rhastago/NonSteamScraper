@@ -41,7 +41,7 @@ def _update_badge(badge_label, meta):
         badge_label.place_forget()
 
 
-def _display_image_on_label(lbl, path, on_animated=None):
+def _display_image_on_label(lbl, path, on_animated=None, cache=None, cache_key=None):
     """Display the image at path on lbl. Plays frame-by-frame if the image is animated.
     on_animated(bool) is called with the actual animation status detected from the file.
 
@@ -51,6 +51,10 @@ def _display_image_on_label(lbl, path, on_animated=None):
     Staleness guard: a token is stamped on the label before the worker starts; if the
     token has been replaced by the time the worker finishes (user moved to a different
     image), the result is silently discarded.
+
+    cache/cache_key (#6): when both are given, a successfully-built STATIC PhotoImage is
+    stored as cache[cache_key] so a later revisit can assign it synchronously and skip
+    this off-thread decode. Animated images are never cached.
     """
     # Cancel any in-flight animation — this runs on the UI thread (safe).
     if hasattr(lbl, "_anim_id") and lbl._anim_id:
@@ -93,6 +97,10 @@ def _display_image_on_label(lbl, path, on_animated=None):
                     lbl.config(image=photo, text="",
                                width=photo.width(), height=photo.height())
                     lbl.image = photo  # keep a reference so GC doesn't collect it
+                    # Static-only cache for the results cycle (#6): store the built
+                    # PhotoImage so a revisit to this index assigns it synchronously.
+                    if cache is not None and cache_key is not None:
+                        cache[cache_key] = photo
                 lbl.after(0, apply_static)
         except Exception:
             def apply_error():
@@ -181,7 +189,41 @@ def update_view(state, img_label, counter_label):
             _update_badge(_bl, _meta)
 
     if index < len(state["paths"]):
-        _display_image_on_label(img_label, state["paths"][index], on_animated)
+        # Per-index decoded-image cache (#6): revisiting an index via ◀/▶ should be
+        # instant instead of re-opening + re-decoding the file off-thread every time
+        # (the row-thumb path already caches; the results cycle didn't). We cache the
+        # built PhotoImage keyed by index for STATIC images ONLY — on a cache hit we
+        # assign it synchronously (keeping a reference on the label so it isn't GC'd to
+        # blank) and skip the worker entirely. Animated images are NOT cached: they
+        # must keep the existing _display_image_on_label animation path, so they always
+        # fall through to it. The cache is populated from _display_image_on_label's
+        # static apply via state["_img_cache"], so the staleness-token / winfo_exists
+        # guards there are untouched and preserved.
+        cache = state.get("_img_cache")
+        if cache is None:
+            cache = state["_img_cache"] = {}
+        cached = cache.get(index)
+        if cached is not None:
+            # Cancel any in-flight animation before swapping in the static cache hit,
+            # mirroring _display_image_on_label so a prior animated frame can't keep
+            # firing on this label.
+            if getattr(img_label, "_anim_id", None):
+                try:
+                    img_label.after_cancel(img_label._anim_id)
+                except Exception:
+                    pass
+                img_label._anim_id = None
+            # Bump the load token so any in-flight off-thread decode self-discards
+            # rather than overwriting this synchronous cache hit.
+            img_label._load_token = object()
+            img_label.config(image=cached, text="",
+                             width=cached.width(), height=cached.height())
+            img_label.image = cached
+            if badge_label:
+                _update_badge(badge_label, meta)
+        else:
+            _display_image_on_label(img_label, state["paths"][index], on_animated,
+                                    cache=cache, cache_key=index)
     else:
         # Fetch on demand — keep the current image visible while downloading to
         # avoid the label reverting to character-unit dimensions mid-load.

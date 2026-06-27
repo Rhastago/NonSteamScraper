@@ -4,6 +4,24 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.4.2] — 2026-06-28
+
+A round of bug fixes from a code-review pass, an icon-status consistency fix, and a Windows popup-flash fix.
+
+### Fixed
+- **Results screen — icons no longer claim to be applied before they are.** When an icon is applied (or auto-applied during a fetch) while Steam is running, it can't be written to `shortcuts.vdf` yet, so it's queued. The results screen now shows that icon as **"Queued (close Steam)"** with no accent border until it's actually written; the border and **"Applied!"** now always mean the icon really landed. Previously a queued icon could misleadingly read "Applied!" with a border.
+- **Results screen — failed swaps now say so.** Applying an alternative whose download fails (a non-200 response) now shows **"Failed — retry"** instead of silently doing nothing.
+- **Windows — popups no longer flash.** The Quick Start guide, Art Style Preferences, and SteamGridDB Search windows no longer momentarily appear at the wrong size/position before settling; they now open directly at their final geometry.
+- **Quick Start guide copy.** Corrected stale text — the per-game button is **"Search"** (not "Rename"), a note that icons apply automatically once Steam is closed, and clearer wording that **"Re-fetch"** clears a game's art for re-download on the next fetch.
+
+### Changed
+- **Faster artwork cycling.** Paging back and forth through alternatives (◀/▶) on the results screen is now instant on revisit — each option's preview is cached after first decode — while animated previews still animate.
+
+### Internal
+- Hardened animated-artwork apply against the results window being closed mid-conversion.
+- Cheaper Steam-status polling (skips parsing the pending-icons file when nothing is queued).
+- Code-review cleanup: removed a dead geometry method and unused result-slot fields, unified the modal-reveal helper, and centralized the results apply-button/border logic into a single source of truth.
+
 ## [1.4.1] — 2026-06-27
 
 A small results-screen refinement, plus a large internal refactor and new tests (no behavior change).

@@ -114,6 +114,11 @@ def show_results(app, fetch_results):
 
     canvas, scrollable_frame = app._make_scrollable_frame(results_window, padx=10, pady=5)
 
+    # One-time snapshot of the pending-icon queue so each game's build can tell
+    # whether its auto-applied icon was actually written or merely QUEUED (Steam
+    # was open during the fetch). Read once here, not per-game, to avoid N file reads.
+    app._build_pending_icons = fg.load_pending_icons()
+
     for game_result in fetch_results:
         build_game_result_section(app, scrollable_frame, game_result)
 
@@ -166,7 +171,11 @@ def _refresh_results_steam_ui(app):
     steam_status_frame = w["steam_status_frame"]
     action_frame = w["action_frame"]
 
-    pending_count = len(fg.load_pending_icons())
+    # has_pending_icons() is a cheap existence check; only open+JSON-parse the queue
+    # file when something is actually pending (this runs every ~3s poll tick). The
+    # count must stay correct when pending — it feeds the state key and the "N icon(s)…"
+    # label — so we keep the full parse on the has-pending path.
+    pending_count = len(fg.load_pending_icons()) if fg.has_pending_icons() else 0
     pending_active = pending_count > 0
     steam_running_now = fg.is_steam_running()
 
@@ -415,13 +424,21 @@ def _mark_queued_icons_applied(app):
     normal "Applied!" state, once the queued icons have actually been written. Called
     from the apply flow's on_success AND from _refresh_results_steam_ui when the
     pending queue clears via the silent background poll (user closed Steam manually)."""
-    btns = getattr(app, "_queued_apply_btns", None)
-    if not btns:
+    entries = getattr(app, "_queued_apply_btns", None)
+    if not entries:
         return
-    for btn in btns:
+    # Each entry carries everything needed to finish the job now that the icon is
+    # actually written: promote its queued_index to applied_index, clear the queued
+    # marker, and re-sync that slot's button label + border. This is where the
+    # "Applied!" label and the accent border finally appear for a deferred icon.
+    for entry in entries:
         try:
+            s = entry["state"]
+            s["applied_index"] = entry["index"]
+            s["queued_index"] = None
+            btn = entry["btn"]
             if btn.winfo_exists():
-                app._set_apply_btn(btn, True)
+                _sync_apply_ui(app, s, btn)
         except Exception:
             pass
     app._queued_apply_btns = []
@@ -430,16 +447,40 @@ def _mark_queued_icons_applied(app):
 def _set_applied_border(app, state):
     """Frame the image in the accent color when the option being viewed is the
     one currently applied to Steam; plain otherwise. applied_index is None when
-    nothing is applied yet (all-animated slot), so no option is framed then."""
+    nothing is applied yet (all-animated slot), so no option is framed then. A
+    queued (deferred) icon is NOT applied yet, so it never gets a border — only the
+    truly-written applied_index does."""
     fr = state.get("img_frame")
     if fr is None:
         return
-    if state["applied_index"] is not None and state["index"] == state["applied_index"]:
-        fr.config(highlightthickness=3,
-                  highlightbackground=app.theme["accent"],
-                  highlightcolor=app.theme["accent"])
+    # Now called from several places (incl. after-conversion / deferred writes), so
+    # the frame may have been destroyed when the results window closed mid-flight —
+    # guard so a TclError can't bubble out of a worker's after-callback.
+    try:
+        if not fr.winfo_exists():
+            return
+        if state["applied_index"] is not None and state["index"] == state["applied_index"]:
+            fr.config(highlightthickness=3,
+                      highlightbackground=app.theme["accent"],
+                      highlightcolor=app.theme["accent"])
+        else:
+            fr.config(highlightthickness=0)
+    except Exception:
+        pass
+
+
+def _sync_apply_ui(app, state, apply_btn):
+    """Single source of truth for a slot's apply-button label AND accent border,
+    derived from the currently-viewed index vs the queued/applied indices.
+    queued (deferred icon) wins over applied; border shows only for the truly-applied index."""
+    idx = state["index"]
+    qi = state.get("queued_index")
+    if qi is not None and idx == qi:
+        app._set_apply_btn(apply_btn, True, queued=True)
     else:
-        fr.config(highlightthickness=0)
+        ai = state.get("applied_index")
+        app._set_apply_btn(apply_btn, ai is not None and idx == ai)
+    _set_applied_border(app, state)
 
 
 def build_game_result_section(app, parent, game_result):
@@ -484,9 +525,24 @@ def build_game_result_section(app, parent, game_result):
             "applied_path": art_data["applied_path"],
             # None when nothing was auto-applied (animated-only slot).
             "applied_index": art_data.get("applied_index"),
+            # Index whose icon write was DEFERRED (queued because Steam was open).
+            # Distinct from applied_index: queued means "intent, not yet written", so
+            # it drives the "Queued (close Steam)" label but never the accent border.
+            "queued_index": None,
             "art_type": art_type,
             "app_id": app_id,
         }
+
+        # An icon auto-applied during the fetch while Steam was running was NOT
+        # written to shortcuts.vdf — the fetch pipeline saved it to the pending
+        # queue instead. So its applied_index is intent, not a real write: present
+        # it exactly like a manual deferred apply ("Queued (close Steam)", no
+        # border) until Steam closes and the queue flushes. Detected via the
+        # one-time snapshot taken in show_results (keys are int uids).
+        if (art_type == "icons" and state["applied_index"] is not None
+                and app_id in getattr(app, "_build_pending_icons", {})):
+            state["queued_index"] = state["applied_index"]
+            state["applied_index"] = None
 
         # Fixed-size container so the badge can be positioned absolutely on
         # top. The image box itself stays fixed (the thumbnail is pre-scaled
@@ -519,15 +575,23 @@ def build_game_result_section(app, parent, game_result):
 
         _update_badge(badge_label, state["option_meta"][0] if state["option_meta"] else {})
         load_thumb(art_data["thumb_paths"][0])
-        _set_applied_border(app, state)
 
         # The auto-applied static option (if any) is index 0 on arrival; animated
         # slots auto-apply nothing, so their button starts as "Apply this one".
         # Spans all three columns and stretches (sticky="ew") so its left/right
         # edges align with the ◀ and ▶ arrows above — no fixed width to fight it.
         apply_btn = app._btn(cell, "Apply this one", lambda: None, primary=True)
-        app._set_apply_btn(apply_btn, state["applied_index"] == 0)
         apply_btn.grid(row=2, column=0, columnspan=3, sticky="ew")
+        # Initial button label + border via the single source of truth (#5).
+        _sync_apply_ui(app, state, apply_btn)
+
+        # An icon that arrived already-queued from the fetch (above) must be tracked
+        # like a manual deferred apply so the same close-Steam flow promotes it to
+        # "Applied!" + border once the queue is written.
+        if state["queued_index"] is not None:
+            app._queued_apply_btns.append(
+                {"state": state, "index": state["queued_index"],
+                 "btn": apply_btn, "il": img_label, "cl": counter_label})
 
         # Clicking the image or badge opens the full-size version in the browser
         for w in (img_frame, img_label, badge_label):
@@ -535,18 +599,19 @@ def build_game_result_section(app, parent, game_result):
             w.config(cursor="hand2")
 
         def make_callbacks(s, il, cl, ab):
+            # prev/nxt share one body (#5): bounds-check, move ±1, refresh the view,
+            # then re-sync the button label + border through the single helper so the
+            # border can never be forgotten or drift out of step with the label.
+            def step(delta):
+                new_idx = s["index"] + delta
+                if 0 <= new_idx <= len(s["option_urls"]) - 1:
+                    s["index"] = new_idx
+                    update_view(s, il, cl)
+                    _sync_apply_ui(app, s, ab)
             def prev():
-                if s["index"] > 0:
-                    s["index"] -= 1
-                    update_view(s, il, cl)
-                    app._set_apply_btn(ab, s["index"] == s["applied_index"])
-                    _set_applied_border(app, s)
+                step(-1)
             def nxt():
-                if s["index"] < len(s["option_urls"]) - 1:
-                    s["index"] += 1
-                    update_view(s, il, cl)
-                    app._set_apply_btn(ab, s["index"] == s["applied_index"])
-                    _set_applied_border(app, s)
+                step(1)
             def apply():
                 idx = s["index"]
                 url = s["option_urls"][idx]
@@ -575,21 +640,33 @@ def build_game_result_section(app, parent, game_result):
                         # queue the icon (auto-applies when Steam closes) and surface
                         # the results-window pending action; only write immediately
                         # when Steam is closed. (s["app_id"] is the int uid.)
-                        s["applied_index"] = idx
-                        _set_applied_border(app, s)
                         if s["art_type"] == "icons" and fg.is_steam_running():
+                            # DEFERRED: the icon isn't written yet, so this is intent,
+                            # not application. Mark queued_index (NOT applied_index) so
+                            # the slot shows "Queued (close Steam)" with NO border; the
+                            # border + "Applied!" only land once the write happens.
                             fg.save_pending_icons({s["app_id"]: new_path})
-                            app._set_apply_btn(ab, True, queued=True)
-                            # Track this queued button so _mark_queued_icons_applied
-                            # can flip it to "Applied!" once the icons are written.
-                            app._queued_apply_btns.append(ab)
+                            s["queued_index"] = idx
+                            _sync_apply_ui(app, s, ab)
+                            # Track enough to finish the job later: _mark_queued_icons_applied
+                            # promotes queued_index -> applied_index and re-syncs this slot
+                            # once the icons are actually written.
+                            app._queued_apply_btns.append(
+                                {"state": s, "index": idx, "btn": ab, "il": il, "cl": cl})
                             # Make the pending warning + "Close Steam & Apply Icons"
                             # action (re)appear/refresh right away.
                             _refresh_results_steam_ui(app)
                         else:
+                            # Immediate write succeeded — NOW it's truly applied, so set
+                            # applied_index and let _sync_apply_ui draw the border + label.
                             if s["art_type"] == "icons":
                                 set_shortcut_icon(s["app_id"], new_path)
-                            app._set_apply_btn(ab, True)
+                            s["applied_index"] = idx
+                            _sync_apply_ui(app, s, ab)
+                    else:
+                        # stream=True does NOT raise on 4xx/5xx, so the except below
+                        # never catches a non-200 — give the same explicit feedback.
+                        ab.config(text="Failed — retry", image="", compound="none")
                 except Exception:
                     ab.config(text="Failed — retry", image="", compound="none")
             return prev, nxt, apply
@@ -670,10 +747,15 @@ def apply_animated_art(app, state, apply_btn, url, out_path, index):
         if popup.winfo_exists():
             app._close_modal(popup)
             popup.destroy()
+        # The worker marshals this back via after(0,...); if the results window was
+        # destroyed mid-conversion, apply_btn / state["img_frame"] are gone, so touching
+        # them would raise a TclError. Bail once the popup is closed.
+        if not apply_btn.winfo_exists():
+            return
         if ok:
             state["applied_index"] = index
-            _set_applied_border(app, state)
-            app._set_apply_btn(apply_btn, True)
+            state["queued_index"] = None
+            _sync_apply_ui(app, state, apply_btn)
             apply_btn.config(state="normal")
         else:
             apply_btn.config(text="Failed — retry", image="", compound="none", state="normal")

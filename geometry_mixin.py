@@ -34,14 +34,8 @@ class GeometryMixin:
         mapped window raises TclError, so callers must deiconify first; we still
         update_idletasks and retry the grab once via after() to be safe."""
         parent = self._modal_stack[-1] if self._modal_stack else self.window
-        try:
-            win.transient(parent)
-        except Exception:
-            pass
-        try:
-            win.update_idletasks()
-        except Exception:
-            pass
+        self._safe(lambda: win.transient(parent))
+        self._safe(win.update_idletasks)
 
         def _grab():
             try:
@@ -54,14 +48,8 @@ class GeometryMixin:
                     pass
 
         _grab()
-        try:
-            win.lift()
-        except Exception:
-            pass
-        try:
-            win.focus_force()
-        except Exception:
-            pass
+        self._safe(win.lift)
+        self._safe(win.focus_force)
         self._modal_stack.append(win)
 
 
@@ -114,7 +102,7 @@ class GeometryMixin:
         self.progress_bar.pack_forget()
         # Reuse the same work-area-aware fit as the results window so the main
         # window can't open under a taskbar/panel either. Remember the applied
-        # size so _restore_geometry can clamp a saved position against it.
+        # size in case it is needed by future clamping logic.
         self._main_w, self._main_h = self._fit_window_to_workarea(
             self.window, req_w, req_h)
 
@@ -249,18 +237,9 @@ class GeometryMixin:
             pass
 
 
-    def _restore_geometry(self):
-        """No-op: the main window now centers on the work area every launch
-        (done by _autosize_window) and intentionally ignores any saved position.
-        A saved position could land off-screen after a display change (e.g. the
-        Deck docked to an external display, then undocked) with no way to recover
-        it, so we always re-center instead. Kept as a method for compatibility."""
-        return
-
-
     def _on_close(self):
-        # We no longer persist the window position — the window always centers on
-        # launch (see _restore_geometry) — so there is nothing to save here.
+        # We deliberately do not persist or restore the window position — the window
+        # always re-centers on launch — so there is nothing to save here.
         # Stop the thumbnail decode pool so no worker survives the window. Don't wait
         # on in-flight decodes — their UI assignment self-discards once the window is
         # gone (winfo_exists/after both fail safely).

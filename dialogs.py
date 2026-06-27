@@ -22,19 +22,55 @@ from find_games import (
 )
 
 
+# --- Flash-free popup reveal ------------------------------------------------
+# On Windows the DWM maps and composites a Toplevel during deiconify() and only
+# applies the final geometry a frame or two later, so withdraw()->deiconify()
+# alone still lets the OS paint ONE intermediate frame (the "resize flash").
+# Keeping the window fully transparent (-alpha 0) through the whole map+position
+# and flipping it opaque only after the geometry has settled removes the flash:
+# there is simply nothing visible to paint until everything is final. -alpha is a
+# no-op/absent on some X11 setups, so every attribute call is guarded.
+def _hide_until_ready(win):
+    """Hide a freshly-created Toplevel for build/positioning: unmapped AND, where
+    supported, fully transparent so the reveal can't show an intermediate frame."""
+    win.withdraw()
+    try:
+        win.attributes("-alpha", 0.0)
+    except tk.TclError:
+        pass
+
+
+def _reveal(win):
+    """Map the window, let its final geometry settle, then fade it in opaque on the
+    NEXT idle cycle (after the map+position is fully flushed) so Windows can't catch
+    an intermediate geometry. No-op if the window was already closed."""
+    win.update_idletasks()
+    win.deiconify()
+    win.update_idletasks()
+
+    def _opaque():
+        try:
+            if win.winfo_exists():
+                win.attributes("-alpha", 1.0)
+        except tk.TclError:
+            pass
+    try:
+        win.after(0, _opaque)
+    except tk.TclError:
+        _opaque()
+
+
 def show_info(app):
     """Display a scrollable quick-start guide window."""
     t = app.theme
     info = tk.Toplevel(app.window)
     info.title("Quick Start Guide")
-    info.geometry("520x500")
+    # Build hidden + transparent so the user never sees the default-size window
+    # jump to its final geometry (the "resize flash" visible on Windows).
+    _hide_until_ready(info)
     info.minsize(420, 360)
     info.resizable(True, True)
     info.config(bg=t["bg"])
-    info.update_idletasks()
-    x = app.window.winfo_x() + (app.window.winfo_width() // 2) - 260
-    y = app.window.winfo_y() + (app.window.winfo_height() // 2) - 250
-    info.geometry(f"+{x}+{y}")
 
     tk.Label(info, text="Welcome to NonSteamScraper",
               font=(FONT_UI, 16, "bold"), bg=t["bg"], fg=t["fg"]).pack(pady=(12, 0))
@@ -81,16 +117,26 @@ def show_info(app):
     section("3. Fetch artwork", [
         "Click 'Fetch Missing Artwork'. Review the results and",
         "swap to alternatives you prefer. Restart Steam to see changes.",
+        "Icons apply automatically once Steam is closed.",
     ])
     section("Tips", [
-        "• If a game isn't found, use 'Rename' to set its correct title.",
-        "• Use 'Re-fetch' to redo a game's artwork from scratch.",
+        "• If a game isn't found, use 'Search' to look it up on",
+        "  SteamGridDB and pick the right match.",
+        "• 'Re-fetch' clears a game's current art so it's re-downloaded",
+        "  on your next fetch.",
         "• Skipped games are tucked into the 'Hidden' section.",
         "• Toggle dark/light mode anytime in Settings.",
         "• 'Undo Last Fetch' restores the previous artwork.",
     ])
 
     app._bind_wheel_to_canvas(canvas, canvas)
+
+    # Size + position in ONE geometry call (no intermediate size->position step),
+    # then reveal flash-free.
+    x = app.window.winfo_x() + (app.window.winfo_width() // 2) - 260
+    y = app.window.winfo_y() + (app.window.winfo_height() // 2) - 250
+    info.geometry(f"520x500+{x}+{y}")
+    _reveal(info)
     app._open_modal(info)
 
 
@@ -99,18 +145,15 @@ def open_sgdb_search(app, game):
     t = app.theme
     dlg = tk.Toplevel(app.window)
     dlg.title("Find on SteamGridDB")
+    # Build hidden + transparent so the user never sees the default-size window
+    # jump to its final geometry (the "resize flash" visible on Windows).
+    _hide_until_ready(dlg)
     dlg.minsize(420, 300)
     dlg.config(bg=t["bg"])
 
     def _close_dlg(evt=None):
         app._close_modal(dlg)
         dlg.destroy()
-
-    # Centre over parent window
-    app.window.update_idletasks()
-    px = app.window.winfo_x() + app.window.winfo_width() // 2 - 210
-    py = app.window.winfo_y() + app.window.winfo_height() // 2 - 180
-    dlg.geometry(f"420x360+{px}+{py}")
 
     tk.Label(dlg, text=game["name"][:48], font=(FONT_UI, 11, "bold"),
              bg=t["bg"], fg=t["fg"]).pack(pady=(12, 2), padx=12)
@@ -233,6 +276,13 @@ def open_sgdb_search(app, game):
     app._btn(btn_bar, "Select", _apply, primary=True).pack(side="right")
     app._btn(btn_bar, "Cancel", _close_dlg).pack(side="right", padx=(0, 6))
 
+    # Centre over parent (size + position in one call), then reveal flash-free.
+    app.window.update_idletasks()
+    px = app.window.winfo_x() + app.window.winfo_width() // 2 - 210
+    py = app.window.winfo_y() + app.window.winfo_height() // 2 - 180
+    dlg.geometry(f"420x360+{px}+{py}")
+    _reveal(dlg)
+
     # Kick off initial search with the game's current name
     _do_search(game["name"])
     app._open_modal(dlg)
@@ -243,14 +293,12 @@ def open_art_prefs(app):
     t = app.theme
     win = tk.Toplevel(app.window)
     win.title("Art Style Preferences")
-    win.geometry("500x580")
+    # Build hidden + transparent so the user never sees the default-size window
+    # jump to its final geometry (the "resize flash" visible on Windows).
+    _hide_until_ready(win)
     win.minsize(440, 420)
     win.resizable(True, True)
     win.config(bg=t["bg"])
-    win.update_idletasks()
-    x = app.window.winfo_x() + (app.window.winfo_width() // 2) - 250
-    y = app.window.winfo_y() + (app.window.winfo_height() // 2) - 290
-    win.geometry(f"+{x}+{y}")
 
     prefs = load_prefs()
     vars_ = {k: tk.StringVar(value=v) for k, v in prefs.items()}
@@ -387,4 +435,10 @@ def open_art_prefs(app):
     pref_row(body, "Official", "icon_official", tip="The official game icon.")
 
     app._bind_wheel_to_canvas(canvas, canvas)
+
+    # Size + position in ONE geometry call, then reveal flash-free.
+    x = app.window.winfo_x() + (app.window.winfo_width() // 2) - 250
+    y = app.window.winfo_y() + (app.window.winfo_height() // 2) - 290
+    win.geometry(f"500x580+{x}+{y}")
+    _reveal(win)
     app._open_modal(win)
