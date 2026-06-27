@@ -4,6 +4,17 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.4.1] — 2026-06-27
+
+A small results-screen refinement, plus a large internal refactor and new tests (no behavior change).
+
+### Changed
+- **Results screen:** the artwork option currently applied to Steam is now framed with an accent-colored border as you cycle through the alternatives, so it's obvious at a glance which one is live versus which are alternatives you're previewing.
+
+### Internal
+- Split the ~3,000-line `app.py` into focused modules — themed-widget / geometry / library / fetch mixins, plus dedicated Settings, Results, and dialog modules — for maintainability. Behavior-preserving.
+- Added fetch-pipeline integration tests covering the artwork download/apply seam (146 tests total).
+
 ## [1.4.0] — 2026-06-27
 
 A broad visual redesign plus a few correctness fixes.

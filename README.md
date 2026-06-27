@@ -214,7 +214,7 @@ binaries in a clean environment and attaches them to the matching GitHub Release
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.4.0** — a visual redesign: accent color themes, cover thumbnails in the game list, a prominent Fetch button, a collapsible activity log, first-run onboarding, and a Factory Reset that now preserves your artwork.
+See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.4.1** — the results screen now frames the currently-applied artwork with an accent border as you cycle alternatives, on top of a large internal refactor and new integration tests (no behavior change).
 
 ---
 

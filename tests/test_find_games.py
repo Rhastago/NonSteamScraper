@@ -22,6 +22,7 @@ No test makes a real network call. The only network-touching function tested is
 import os
 import sys
 import json
+import types
 import tempfile
 
 import pytest
@@ -1507,3 +1508,230 @@ def test_full_reset_preserves_art_but_clears_settings(tmp_path, monkeypatch):
     for name, p in settings.items():
         assert not p.exists(), f"{name} should have been cleared"
     assert fg.has_pending_icons() is False  # pending queue swept
+
+
+# ---------------------------------------------------------------------------
+# download_all_artwork — full fetch-pipeline INTEGRATION tests.
+#
+# These drive the REAL download_all_artwork end-to-end, mocking the network at
+# the LOWEST seam — fg._sgdb_get — so the genuine get_artwork tiered-fallback,
+# is_animated_image classification, applied_index selection, option_meta vote
+# plumbing, and the icon_to_set tuple contract all execute for real. Only the
+# byte-level downloads (fg.download_artwork) and the OS/Steam side effects are
+# stubbed. This is the seam whose worst historical bug — a tuple reaching a
+# `.get()` in a values()-loop — silently hung the UI on "Fetching…" forever.
+# ---------------------------------------------------------------------------
+
+def _sgdb_payload(assets):
+    """Wrap a list of SGDB asset dicts in the {success, data} envelope that
+    get_artwork's `.json()` consumer expects, returned via a tiny object that
+    only needs a .json() method — exactly what _sgdb_get yields in production."""
+    payload = {"success": True, "data": list(assets)}
+    return types.SimpleNamespace(json=lambda p=payload: p)
+
+
+def _install_fetch_mocks(monkeypatch, tmp_path, slot_assets,
+                         record_icon=True):
+    """Wire up every external dependency download_all_artwork touches so it runs
+    purely in-memory under tmp_path. `slot_assets` maps an endpoint substring
+    ("grids"/"heroes"/"logos"/"icons") -> the list of assets _sgdb_get returns
+    for any URL hitting that endpoint. Returns the recorder list passed to a fake
+    set_shortcut_icon so callers can assert it was / wasn't invoked.
+
+    NOTE: get_artwork calls _sgdb_get multiple times per slot (tiered fallback);
+    branching purely on the endpoint substring makes the fake deterministic and,
+    because every endpoint always returns >=1 asset here, the Tier-3 fill loop
+    stops immediately."""
+    grid = tmp_path / "grid"
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
+    monkeypatch.setattr(fg, "CACHE_FOLDER", str(cache))
+    monkeypatch.setattr(fg, "BACKUP_FOLDER", str(tmp_path / "backup"))
+    os.makedirs(grid, exist_ok=True)
+
+    def fake_sgdb_get(url, headers=None, params=None, timeout=None, retries=3):
+        # grids_wide also hits the "grids" endpoint (split only by dimensions),
+        # so the "grids" branch deliberately serves both portrait + wide covers.
+        for key, assets in slot_assets.items():
+            if f"/{key}/" in url:
+                return _sgdb_payload(assets)
+        return _sgdb_payload([])
+
+    def fake_download_artwork(url, save_path, register=True):
+        # Create an empty file so applied_path / thumb_paths actually exist on
+        # disk, then report success — no network, no real image bytes.
+        with open(save_path, "wb") as f:
+            f.write(b"")
+        return True
+
+    icon_calls = []
+    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get)
+    monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
+    monkeypatch.setattr(fg, "register_managed_file", lambda *a, **k: None)
+    monkeypatch.setattr(fg, "backup_artwork", lambda *a, **k: None)
+    monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: False)
+    monkeypatch.setattr(fg, "load_api_key", lambda *a, **k: "FAKEKEY")
+    if record_icon:
+        monkeypatch.setattr(
+            fg, "set_shortcut_icon",
+            lambda uid, path, *a, **k: icon_calls.append((uid, path)) or True)
+    else:
+        monkeypatch.setattr(
+            fg, "set_shortcut_icon",
+            lambda *a, **k: pytest.fail("set_shortcut_icon must not be called"))
+    return icon_calls
+
+
+def _static(url, **extra):
+    """A static SGDB asset (PNG). Extra keys (nsfw/humor/style/...) override."""
+    a = {"url": url, "thumb": url, "mime": "image/png",
+         "nsfw": False, "humor": False, "style": "alternate"}
+    a.update(extra)
+    return a
+
+
+def _animated(url, **extra):
+    """An animated SGDB asset. is_animated_image keys off mime image/webp|gif."""
+    a = {"url": url, "thumb": url, "mime": "image/webp",
+         "nsfw": False, "humor": False, "style": "alternate"}
+    a.update(extra)
+    return a
+
+
+def test_download_all_artwork_happy_path_all_slots_populated(tmp_path, monkeypatch):
+    """All 5 slots return a single static asset -> every slot dict is populated,
+    applied_index points at the first (only) static option, option_urls echo the
+    inputs, and option_meta carries animated/nsfw/humor."""
+    slot_assets = {
+        "grids":  [_static("https://sgdb/grids.png", nsfw=True, humor=False)],
+        "heroes": [_static("https://sgdb/heroes.png", nsfw=False, humor=True)],
+        "logos":  [_static("https://sgdb/logos.png")],
+        "icons":  [_static("https://sgdb/icons.png")],
+    }
+    icon_calls = _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
+
+    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
+
+    for slot in ("grids", "grids_wide", "heroes", "logos", "icons"):
+        sd = results[slot]
+        assert isinstance(sd, dict), f"{slot} should be a populated dict"
+        # The only option is static -> auto-applied at index 0.
+        assert sd["applied_index"] == 0
+        assert sd["current_index"] == 0
+        assert sd["applied_url"] == sd["option_urls"][0]
+        assert sd["applied_path"]  # a target path was assigned
+        assert sd["option_meta"][0]["animated"] is False
+
+    # grids and grids_wide both come from the "grids" endpoint assets.
+    assert results["grids"]["option_urls"] == ["https://sgdb/grids.png"]
+    assert results["grids_wide"]["option_urls"] == ["https://sgdb/grids.png"]
+    assert results["heroes"]["option_urls"] == ["https://sgdb/heroes.png"]
+
+    # Per-slot metadata flows through verbatim.
+    gm = results["grids"]["option_meta"][0]
+    assert gm["nsfw"] is True and gm["humor"] is False
+    hm = results["heroes"]["option_meta"][0]
+    assert hm["nsfw"] is False and hm["humor"] is True
+
+    # Non-defer mode: the icon was written immediately, icon_to_set stays None.
+    assert results["icon_to_set"] is None
+    assert len(icon_calls) == 1 and icon_calls[0][0] == 12345
+
+
+def test_download_all_artwork_icon_to_set_tuple_contract(tmp_path, monkeypatch):
+    """THE regression guard. defer_icon=True with a static icon -> icon_to_set is
+    the (unsigned_id, path) TUPLE; both consumers handle the results dict without
+    choking on that tuple, and the deferred icon is NOT written eagerly."""
+    slot_assets = {
+        "grids":  [_static("https://sgdb/grids.png")],
+        "heroes": [_static("https://sgdb/heroes.png")],
+        "logos":  [_static("https://sgdb/logos.png")],
+        "icons":  [_static("https://sgdb/icons.png")],
+    }
+    # record_icon=False -> fail loudly if set_shortcut_icon fires in defer mode.
+    _install_fetch_mocks(monkeypatch, tmp_path, slot_assets, record_icon=False)
+
+    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+
+    # icon_to_set is the deferred TUPLE, not a slot dict.
+    assert isinstance(results["icon_to_set"], tuple)
+    uid, path = results["icon_to_set"]
+    assert uid == 12345
+    assert path == results["icons"]["applied_path"]
+
+    # icon_write_from_results returns exactly that tuple.
+    assert fg.icon_write_from_results(results) == (12345, path)
+
+    # applied_paths_from_results must iterate the slots AND the icon_to_set tuple
+    # without raising (the tuple has no .get()) and return a list of str paths.
+    paths = fg.applied_paths_from_results(results)
+    assert isinstance(paths, list)
+    assert all(isinstance(p, str) for p in paths)
+    assert path in paths  # the icon's applied path is collected as a slot path
+
+
+def test_download_all_artwork_non_defer_writes_icon(tmp_path, monkeypatch):
+    """defer_icon=False with a static icon -> icon_to_set is None and
+    set_shortcut_icon WAS called with (unsigned_id, icon_path)."""
+    slot_assets = {
+        "grids":  [_static("https://sgdb/grids.png")],
+        "heroes": [_static("https://sgdb/heroes.png")],
+        "logos":  [_static("https://sgdb/logos.png")],
+        "icons":  [_static("https://sgdb/icons.png")],
+    }
+    icon_calls = _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
+
+    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
+
+    assert results["icon_to_set"] is None
+    assert icon_calls == [(12345, results["icons"]["applied_path"])]
+
+
+def test_download_all_artwork_all_animated_slot_not_auto_applied(tmp_path, monkeypatch):
+    """A slot whose every option is animated -> applied_index is None,
+    applied_path falls back to the .png target (committed on demand later), and
+    for the icons slot no icon write happens at all."""
+    slot_assets = {
+        "grids":  [_static("https://sgdb/grids.png")],
+        "heroes": [_static("https://sgdb/heroes.png")],
+        "logos":  [_static("https://sgdb/logos.png")],
+        # Every icon option is animated -> nothing to auto-apply.
+        "icons":  [_animated("https://sgdb/icon0.webp"),
+                   _animated("https://sgdb/icon1.gif")],
+    }
+    icon_calls = _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
+
+    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
+
+    icons = results["icons"]
+    assert icons is not None  # options exist, just none auto-applied
+    assert icons["applied_index"] is None
+    assert icons["applied_url"] is None
+    assert icons["applied_path"].endswith(".png")
+    assert all(m["animated"] is True for m in icons["option_meta"])
+
+    # No static icon was applied -> no eager write, no deferred tuple.
+    assert icon_calls == []
+    assert results["icon_to_set"] is None
+    # A static slot still auto-applies normally alongside the animated one.
+    assert results["grids"]["applied_index"] == 0
+
+
+def test_download_all_artwork_missing_slot_is_none_and_consumable(tmp_path, monkeypatch):
+    """A slot whose _sgdb_get returns empty data -> results[slot] is None, and
+    both consumer helpers tolerate the None slot without crashing."""
+    slot_assets = {
+        "grids":  [_static("https://sgdb/grids.png")],
+        "heroes": [],  # nothing found for the hero slot
+        "logos":  [_static("https://sgdb/logos.png")],
+        "icons":  [_static("https://sgdb/icons.png")],
+    }
+    _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
+
+    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+
+    assert results["heroes"] is None
+    # Consumers must skip the None slot (and the icon tuple) without raising.
+    paths = fg.applied_paths_from_results(results)
+    assert isinstance(paths, list)
+    assert fg.icon_write_from_results(results)[0] == 12345

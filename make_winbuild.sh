@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 PY=python3
 [ -x venv/bin/python ] && PY=venv/bin/python
 
-VER=$("$PY" -c "import re,sys;print(re.search(r'VERSION = \"([^\"]+)\"',open('app.py').read()).group(1))")
+VER=$("$PY" -c "import re,sys;print(re.search(r'VERSION = \"([^\"]+)\"',open('appcommon.py').read()).group(1))")
 SHA=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
 # Output to winbuild/ (NOT dist/) so the Linux build's `rm -rf dist` can't wipe it.
 OUTDIR=winbuild
@@ -20,7 +20,10 @@ mkdir -p "$APP" "$OUTDIR"
 echo "Staging source (working tree)…"
 # Explicit list of everything a Windows build needs, taken from the working tree
 # (so uncommitted changes are included).
-for item in app.py find_games.py requirements.txt icon.png icon.ico \
+for item in app.py appcommon.py find_games.py theming.py imaging.py \
+            ui_mixin.py geometry_mixin.py library_mixin.py fetch_mixin.py \
+            dialogs.py settings_window.py results_window.py \
+            requirements.txt icon.png icon.ico \
             build_windows.sh assets README.md CHANGELOG.md LICENSE; do
     [ -e "$item" ] && cp -r "$item" "$APP/"
 done
