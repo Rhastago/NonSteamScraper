@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
+import time
 import requests
 import os
 import sys
@@ -8,9 +9,10 @@ import glob
 import re
 import webbrowser
 from PIL import Image, ImageTk
+import find_games as fg  # live access to rebound globals (e.g. fg.GRID_FOLDER after account switch)
 from find_games import (
     get_non_steam_games, search_game, download_all_artwork,
-    GRID_FOLDER, load_api_key, save_api_key, verify_api_key,
+    load_api_key, save_api_key, verify_api_key,
     add_to_skip_list, SKIP_FILE, save_name_override, get_cache_size,
     clear_cache, clean_old_cache,
     is_steam_running, restart_steam, get_all_steam_users,
@@ -20,7 +22,7 @@ from find_games import (
     parse_net_workarea, compute_window_fit,
 )
 
-VERSION = "1.2.5"
+VERSION = "1.3.0"
 
 FIRST_RUN_FILE  = os.path.expanduser("~/.steamart_firstrun")
 THEME_FILE      = os.path.expanduser("~/.steamart_theme")
@@ -107,16 +109,94 @@ class SteamArtApp:
         self.selected_rename_btn = None
         self.last_fetch_files = []
         self._icon_cache = {}
+        # Stack of currently-open modal Toplevels (bottom -> top). _open_modal pushes,
+        # _close_modal pops and restores the grab to the new top (or the main window).
+        self._modal_stack = []
         self.build_ui()
         clean_old_cache()
         self.load_games()
         self.check_steam_running()
+        # Defer & auto-apply: flush any icons queued from a previous session if Steam
+        # is closed now, then poll so newly-queued icons apply the moment Steam closes.
+        self._flush_pending_icons()
+        self._poll_pending_icons()
         self._autosize_window()
         self._restore_geometry()
         # Sized and positioned — reveal it now, in place, with no visible resize.
         self.window.deiconify()
         self.window.protocol("WM_DELETE_WINDOW", self._on_close)
         self.check_first_run()
+
+    @staticmethod
+    def _safe(fn):
+        """Call fn() swallowing any Tk error (window gone / not viewable)."""
+        try:
+            fn()
+        except Exception:
+            pass
+
+    def _open_modal(self, win):
+        """Make `win` modal over the current chain and push it onto _modal_stack.
+
+        The new top sits transient-above whatever is currently top-of-stack (or the
+        main window), so nested popups stack correctly and stay visible-with-parent.
+        grab_set() is an application-local grab: it blocks this app's OTHER windows
+        (lower in the stack) but not other OS apps. A grab on a withdrawn / not-yet-
+        mapped window raises TclError, so callers must deiconify first; we still
+        update_idletasks and retry the grab once via after() to be safe."""
+        parent = self._modal_stack[-1] if self._modal_stack else self.window
+        try:
+            win.transient(parent)
+        except Exception:
+            pass
+        try:
+            win.update_idletasks()
+        except Exception:
+            pass
+
+        def _grab():
+            try:
+                win.grab_set()
+            except tk.TclError:
+                # Not viewable yet — try once more shortly.
+                try:
+                    win.after(10, lambda: self._safe(win.grab_set))
+                except Exception:
+                    pass
+
+        _grab()
+        try:
+            win.lift()
+        except Exception:
+            pass
+        try:
+            win.focus_force()
+        except Exception:
+            pass
+        self._modal_stack.append(win)
+
+    def _close_modal(self, win):
+        """End `win`'s modality and hand control back to the previous level.
+
+        Releases win's grab, pops it off _modal_stack, then re-grabs the new top so
+        the level below regains modality (a bare grab_release would otherwise drop
+        modality entirely while a lower window still has its own grab). Falls back to
+        focusing the main window when the stack empties. Call this on EVERY close path
+        BEFORE win.destroy() so the grab can never get stuck."""
+        try:
+            win.grab_release()
+        except Exception:
+            pass
+        if win in self._modal_stack:
+            self._modal_stack.remove(win)
+        if self._modal_stack:
+            top = self._modal_stack[-1]
+            self._safe(top.grab_set)
+            self._safe(top.lift)
+            self._safe(top.focus_force)
+        else:
+            self._safe(self.window.lift)
+            self._safe(self.window.focus_force)
 
     def _set_window_icon(self):
         """Load the bundled icon for the window and all child windows.
@@ -165,9 +245,17 @@ class SteamArtApp:
                                compound="left" if ic else "none",
                                fg=fg or self.theme["fg"])
 
-    def _set_apply_btn(self, btn, applied):
+    def _set_apply_btn(self, btn, applied, queued=False):
         """Set an Apply/Applied button's label + color icon by state, clearing any
-        stale image when reverting so the icon and text stay in sync."""
+        stale image when reverting so the icon and text stay in sync. `queued` is the
+        icon-deferred case: the art downloaded but the shortcuts.vdf write is pending a
+        Steam-close, so we show a distinct "Queued" label instead of "Applied!"."""
+        if queued:
+            # Icon write deferred while Steam is running (applies on Steam close).
+            ic = self._icon("warning", self.ICON_ACTION)
+            btn.config(text="Queued (close Steam)", image=ic or "",
+                       compound="left" if ic else "none")
+            return
         ic = self._icon("applied", self.ICON_ACTION) if applied else None
         if applied:
             btn.config(text="Applied!", image=ic or "",
@@ -507,6 +595,9 @@ class SteamArtApp:
 
     def check_steam_running(self):
         """Display a warning if Steam is open, since artwork changes require a restart."""
+        # Opportunistic flush: a manual refresh after closing Steam applies queued icons
+        # immediately (the periodic poll is the primary mechanism).
+        self._flush_pending_icons()
         if is_steam_running():
             self._set_status(
                 "Steam is running — restart Steam after fetching to see changes",
@@ -717,8 +808,10 @@ class SteamArtApp:
         dlg.title("Find on SteamGridDB")
         dlg.minsize(420, 300)
         dlg.config(bg=t["bg"])
-        dlg.transient(self.window)
-        dlg.grab_set()
+
+        def _close_dlg(evt=None):
+            self._close_modal(dlg)
+            dlg.destroy()
 
         # Centre over parent window
         self.window.update_idletasks()
@@ -768,14 +861,15 @@ class SteamArtApp:
             chosen = results[sel[0]]
             save_name_override(game["app_id"], chosen["name"])
             self._remove_from_skip(game["app_id"])
-            for f in glob.glob(os.path.join(GRID_FOLDER, f"{game['app_id']}*")):
+            # fg.GRID_FOLDER (not the by-value import) so account switches are honored.
+            for f in glob.glob(os.path.join(fg.GRID_FOLDER, f"{game['app_id']}*")):
                 try:
                     os.remove(f)
                 except Exception:
                     pass
             self.log(f"Matched '{game['name']}' → '{chosen['name']}' (SGDB #{chosen['id']})",
                      icon="search")
-            dlg.destroy()
+            _close_dlg()
             self.load_games()
             self.start_fetch()
 
@@ -833,18 +927,20 @@ class SteamArtApp:
         search_var.trace_add("write", _on_type)
         listbox.bind("<Double-Button-1>", _apply)
         listbox.bind("<Return>", _apply)
-        listbox.bind("<Escape>", lambda e: dlg.destroy())
+        listbox.bind("<Escape>", _close_dlg)
         entry.bind("<Return>", lambda e: (listbox.selection_set(0), _apply()) if results else None)
         entry.bind("<Down>", _entry_down)
-        entry.bind("<Escape>", lambda e: dlg.destroy())
+        entry.bind("<Escape>", _close_dlg)
         listbox.bind("<Up>", _listbox_up)
-        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        dlg.bind("<Escape>", _close_dlg)
+        dlg.protocol("WM_DELETE_WINDOW", _close_dlg)
 
         self._btn(btn_bar, "Select", _apply).pack(side="right")
-        self._btn(btn_bar, "Cancel", dlg.destroy).pack(side="right", padx=(0, 6))
+        self._btn(btn_bar, "Cancel", _close_dlg).pack(side="right", padx=(0, 6))
 
         # Kick off initial search with the game's current name
         _do_search(game["name"])
+        self._open_modal(dlg)
 
     def toggle_hidden(self):
         """Expand or collapse the hidden games section."""
@@ -866,7 +962,8 @@ class SteamArtApp:
     def refetch_game(self, game):
         """Clear existing artwork and skip data so a game is fully reprocessed."""
         self._remove_from_skip(game["app_id"])
-        for f in glob.glob(os.path.join(GRID_FOLDER, f"{game['app_id']}*")):
+        # fg.GRID_FOLDER (not the by-value import) so account switches are honored.
+        for f in glob.glob(os.path.join(fg.GRID_FOLDER, f"{game['app_id']}*")):
             os.remove(f)
         self.log(f"Reset artwork for: {game['name']} — will re-fetch on next run", icon="refresh")
         self.load_games()
@@ -911,6 +1008,7 @@ class SteamArtApp:
                   font=("Arial", 10), bg=t["bg"], fg=t["muted"]).pack()
 
         def close_info():
+            self._close_modal(info)
             info.destroy()
 
         # Close button pinned at the bottom so it is always reachable
@@ -959,6 +1057,7 @@ class SteamArtApp:
         ])
 
         self._bind_wheel_to_canvas(canvas, canvas)
+        self._open_modal(info)
 
     def open_art_prefs(self):
         """Open the art style preferences window."""
@@ -981,6 +1080,7 @@ class SteamArtApp:
         def do_save():
             save_prefs({k: v.get() for k, v in vars_.items()})
             self.log("Art style preferences saved.", icon="palette")
+            self._close_modal(win)
             win.destroy()
 
         def do_reset():
@@ -1084,6 +1184,7 @@ class SteamArtApp:
         pref_row(body, "Official", "icon_official")
 
         self._bind_wheel_to_canvas(canvas, canvas)
+        self._open_modal(win)
 
     def open_settings(self):
         """Open the settings panel."""
@@ -1104,9 +1205,8 @@ class SteamArtApp:
                   bg=t["bg"], fg=t["fg"]).pack(pady=10)
 
         def close_settings():
+            self._close_modal(settings)
             settings.destroy()
-            self.window.lift()
-            self.window.focus_force()
 
         # Close button pinned at the bottom so it is always reachable
         self._btn(settings, "Close", close_settings, font=("Arial", 11)).pack(side="bottom", pady=12)
@@ -1133,7 +1233,7 @@ class SteamArtApp:
         api_var = tk.StringVar(value=load_api_key())
         api_entry = tk.Entry(key_row, textvariable=api_var, font=("Courier", 10), show="*",
                               width=24, bg=t["entry_bg"], fg=t["fg"], insertbackground=t["fg"])
-        api_entry.pack(side="left")
+        api_entry.pack(side="left", fill="y")
         # Select the whole key on focus (e.g. a single click) so it can be
         # replaced/copied without needing to double-click and drag. after_idle
         # runs the selection after the click's default cursor placement, so it
@@ -1199,18 +1299,6 @@ class SteamArtApp:
         toggle_text = "Switch to Dark Mode" if self.theme_name == "light" else "Switch to Light Mode"
         self._btn(appearance_frame, toggle_text, self.toggle_theme,
                   font=("Arial", 9)).pack(side="right")
-
-        # Steam Account (only shown when multiple accounts are detected)
-        users = get_all_steam_users()
-        if len(users) > 1:
-            account_frame = tk.LabelFrame(body, text="Steam Account", padx=10, pady=8,
-                                           bg=t["bg"], fg=t["fg"])
-            account_frame.pack(fill="x", padx=15, pady=5)
-            tk.Label(account_frame, text="Select account:", font=("Arial", 10),
-                      bg=t["bg"], fg=t["fg"]).pack(side="left")
-            om = tk.OptionMenu(account_frame, tk.StringVar(value=users[0]), *users)
-            om.config(bg=t["button_bg"], fg=t["button_fg"], highlightthickness=0)
-            om.pack(side="left", padx=8)
 
         # Cache
         cache_frame = tk.LabelFrame(body, text="Cache", padx=10, pady=8,
@@ -1296,6 +1384,111 @@ class SteamArtApp:
         tk.Label(reset_frame, text="Cannot be undone",
                   font=("Arial", 8), fg=t["muted2"], bg=t["bg"]).pack(side="left", padx=8)
 
+        # Updates
+        updates_frame = tk.LabelFrame(body, text="Updates", padx=10, pady=8,
+                                       bg=t["bg"], fg=t["fg"])
+        updates_frame.pack(fill="x", padx=15, pady=5)
+        tk.Label(updates_frame, text=f"Current version: v{VERSION}",
+                  font=("Arial", 10), bg=t["bg"], fg=t["fg"]).pack(anchor="w")
+        update_status = tk.Label(updates_frame, text="", font=("Arial", 9),
+                                  bg=t["bg"], fg=t["muted2"])
+        update_status.pack(anchor="w", pady=(2, 0))
+        # "Download" button shown only when an update is available.
+        download_btn_holder = tk.Frame(updates_frame, bg=t["bg"])
+        download_btn_holder.pack(anchor="w", pady=(2, 0))
+
+        def do_check_update():
+            check_btn.config(state="disabled")
+            update_status.config(text="Checking…", fg=t["muted2"])
+            # Hide any previous download button while checking.
+            for w in download_btn_holder.winfo_children():
+                w.destroy()
+
+            def worker():
+                result = fg.check_for_update(VERSION)
+
+                def finish():
+                    try:
+                        check_btn.config(state="normal")
+                        err = (result or {}).get("error") if result else None
+                        if not result or err:
+                            msg = (f"Could not check: {err}" if err
+                                   else "Could not check for updates.")
+                            update_status.config(text=msg, fg=t["warn"])
+                        elif result["available"]:
+                            update_status.config(
+                                text=f"Update available: v{result['latest']}",
+                                fg=t["ok"])
+                            # Show a Download button that opens the platform link.
+                            self._btn(
+                                download_btn_holder,
+                                f"Download v{result['latest']}",
+                                lambda url=result["url"]: webbrowser.open(url),
+                                font=("Arial", 9),
+                            ).pack(side="left")
+                        else:
+                            update_status.config(
+                                text=f"You're on the latest version (v{result['current']}).",
+                                fg=t["muted2"])
+                    except Exception:
+                        pass
+                self.window.after(0, finish)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        check_btn = self._btn(updates_frame, "Check for updates", do_check_update,
+                               font=("Arial", 9))
+        check_btn.pack(anchor="w", pady=(4, 0))
+        # Always-available manual fallback — works even when the auto-check is
+        # rate-limited or offline. Same hyperlink style as the SteamGridDB link.
+        releases_link = tk.Label(updates_frame, text="View releases page",
+                                 font=("Arial", 9, "underline"),
+                                 fg=t["link"], bg=t["bg"], cursor="hand2")
+        releases_link.pack(anchor="w", pady=(4, 0))
+        releases_link.bind("<Button-1>", lambda e: webbrowser.open(fg.RELEASES_URL))
+
+        # Steam Account — always shown; interactive only when 2+ accounts found.
+        # Placed after Updates so it appears at the bottom of the settings.
+        users = get_all_steam_users()
+        account_frame = tk.LabelFrame(body, text="Steam Account", padx=10, pady=8,
+                                       bg=t["bg"], fg=t["fg"])
+        account_frame.pack(fill="x", padx=15, pady=5)
+        tk.Label(account_frame, text="Select account:", font=("Arial", 10),
+                  bg=t["bg"], fg=t["fg"]).pack(side="left")
+        if len(users) > 1:
+            # Build display labels "PersonaName (id)" when known, else the bare id.
+            personas = fg.get_steam_user_personas()
+            label_to_id = {}
+            id_to_label = {}
+            for u in users:
+                label = f"{personas[u]} ({u})" if u in personas else u
+                label_to_id[label] = u
+                id_to_label[u] = label
+            active = fg.get_active_user()
+            account_var = tk.StringVar(value=id_to_label.get(active, users[0]))
+
+            def on_account_change(label):
+                uid = label_to_id.get(label)
+                if uid and fg.set_active_user(uid):
+                    self.log(f"Switched to Steam account {label}.", icon="refresh")
+                    self.load_games()  # reload shortcuts for the newly active account
+
+            om = tk.OptionMenu(account_frame, account_var, *id_to_label.values(),
+                               command=on_account_change)
+            om.config(bg=t["button_bg"], fg=t["button_fg"], highlightthickness=0)
+            om.pack(side="left", padx=8)
+        else:
+            # 0 or 1 accounts — show a disabled placeholder so the section is
+            # always visible but clearly non-interactive.
+            placeholder = ("Only one Steam account detected"
+                           if len(users) == 1
+                           else "No Steam account detected")
+            om_var = tk.StringVar(value=placeholder)
+            om = tk.OptionMenu(account_frame, om_var, placeholder)
+            om.config(bg=t["button_bg"], fg=t["button_fg"],
+                      highlightthickness=0, state="disabled")
+            om.pack(side="left", padx=8)
+
         self._bind_wheel_to_canvas(canvas, canvas)
 
         # Auto-size to fit all content, fully within the screen work area (so it
@@ -1304,13 +1497,32 @@ class SteamArtApp:
         settings.update_idletasks()
         body_h  = body.winfo_reqheight()
         overhead = 110  # title label + close button + padding
-        self._fit_window_to_workarea(settings, 480, max(360, body_h + overhead))
-        # Reveal now that it's correctly sized and positioned.
+        body_w = body.winfo_reqwidth() + 40  # +40 for scrollbar and frame padding
+        self._fit_window_to_workarea(settings, max(480, body_w), max(360, body_h + overhead))
+        # Reveal now that it's correctly sized and positioned, then grab it modal.
         settings.deiconify()
+        self._open_modal(settings)
 
     def _ui(self, fn):
         """Schedule fn to run on the main (UI) thread. Safe to call from workers."""
         self.window.after(0, fn)
+
+    def _flush_pending_icons(self):
+        """Auto-apply deferred icon writes when it's safe. No-op (cheap existence check)
+        when nothing is pending or Steam is running. Steam is closed when this writes, so
+        the icons show on Steam's next launch. Part of the "defer & auto-apply" design:
+        no dialog, no Steam restart by us (see find_games.PENDING_ICONS_FILE)."""
+        if fg.has_pending_icons() and not fg.is_steam_running():
+            n = fg.apply_pending_icons()
+            if n > 0:
+                self.log(f"Applied {n} queued icon(s) — restart Steam to see them.",
+                         icon="applied")
+
+    def _poll_pending_icons(self):
+        """Periodic timer that flushes pending icons the moment Steam is closed, then
+        reschedules itself. Primary mechanism behind defer & auto-apply."""
+        self._flush_pending_icons()
+        self.window.after(4000, self._poll_pending_icons)
 
     def log(self, message, icon=None):
         """Append a message to the activity log. Thread-safe: the text-box mutation
@@ -1357,6 +1569,24 @@ class SteamArtApp:
         thread.start()
 
     def run_fetch(self):
+        """Background-thread entry point. Wraps the real work so that ANY exception
+        is logged and the UI is reset to a usable state instead of silently hanging
+        on "Fetching…" forever (this thread has no Tk event loop to recover it).
+        See the icon_to_set/tuple hazard in find_games for the bug this guards."""
+        try:
+            self._run_fetch_body()
+        except Exception as e:
+            import traceback
+            self.log(f"Fetch failed: {e}", icon="error")
+            if fg.DEBUG:
+                traceback.print_exc()
+            # Reset the UI from this background thread via the _ui marshaling helper.
+            self._ui(lambda: self.fetch_button.config(state="normal", text="Fetch Missing Artwork"))
+            self._ui(lambda: self.progress_label.pack_forget())
+            self._ui(lambda: self.progress_bar.pack_forget())
+            self._ui(lambda: self._set_status("Fetch failed — see log."))
+
+    def _run_fetch_body(self):
         """Background thread: search and download artwork for all games missing it."""
         self.last_fetch_files = []
         prefs = load_prefs()
@@ -1370,6 +1600,10 @@ class SteamArtApp:
 
         total = len(needs_art)
         fetch_results = []
+        # Icon writes to shortcuts.vdf are deferred during the loop and batched into a
+        # single atomic write after it (one read+parse+write instead of N), done while
+        # Steam is closed so it can't clobber them. {unsigned_id: icon_path}.
+        icons_to_set = {}
 
         for i, game in enumerate(needs_art):
             name   = game["name"]
@@ -1400,17 +1634,38 @@ class SteamArtApp:
 
                 results = download_all_artwork(
                     sgdb_id, app_id, prefs,
-                    progress_cb=make_cb(short, game_start, game_end, i, total)
+                    progress_cb=make_cb(short, game_start, game_end, i, total),
+                    defer_icon=True,
                 )
                 self.log(f"Artwork saved for {name}", icon="applied")
+                # Collect the deferred icon write (if any) for one batched apply later.
+                # NOTE: use the find_games helpers — results mixes slot dicts with the
+                # icon_to_set TUPLE, so a naive values()-loop with .get() crashes here
+                # (the bug that silently hung this thread). See find_games helpers.
+                icon_pair = fg.icon_write_from_results(results)
+                if icon_pair:
+                    uid, icon_path = icon_pair
+                    icons_to_set[uid] = icon_path
                 fetch_results.append({"name": name, "app_id": app_id, "results": results})
-                for art_data in results.values():
-                    # applied_index is None for animated slots nothing was auto-applied to.
-                    if art_data and art_data.get("applied_index") is not None and art_data.get("applied_path"):
-                        self.last_fetch_files.append(art_data["applied_path"])
+                self.last_fetch_files.extend(fg.applied_paths_from_results(results))
             else:
                 self.log("Not found on SteamGridDB — skipping permanently", icon="warning")
                 add_to_skip_list(app_id)
+
+        # --- Batched icon write -------------------------------------------------
+        # Only ICON writes (shortcuts.vdf) care about Steam being open; grid/hero/logo
+        # art already wrote to fg.GRID_FOLDER and is fine. "Defer & auto-apply": if Steam
+        # is running we DON'T prompt or write — we persist the pending icons and let the
+        # poll flush them when Steam closes. WHY: the old from-thread yes/no dialog could
+        # hang, and the stop→sleep→write→start restart was racy (Steam could clobber the file).
+        if icons_to_set:
+            if fg.is_steam_running():
+                fg.save_pending_icons(icons_to_set)
+                self.log(f"Steam is running — {len(icons_to_set)} icon(s) queued; "
+                         "they'll apply automatically when you close Steam.", icon="warning")
+            else:
+                n = fg.set_shortcut_icons(icons_to_set)
+                self.log(f"Applied {n} icon(s) to shortcuts.vdf.", icon="applied")
 
         self._ui(lambda: self.progress_var.set(100))
         self._ui(lambda n=len(fetch_results), total=total:
@@ -1458,36 +1713,67 @@ class SteamArtApp:
         tk.Label(results_window, text="Cycle through alternatives and apply your preferred art.",
                   font=("Arial", 10), bg=t["bg"], fg=t["fg"]).pack()
 
-        # Steam status reminder (with inline Restart Steam when Steam is running)
+        # Steam status reminder (with inline Restart Steam when Steam is running).
+        # Rebuilt live by _refresh_results_steam_ui (see below) every ~3s.
         steam_status_frame = tk.Frame(results_window, bg=t["bg"])
         steam_status_frame.pack(pady=2)
-        if is_steam_running():
-            sr_lbl = tk.Label(steam_status_frame,
-                      text=" Steam is running — restart Steam to see your new artwork",
-                      font=("Arial", 9), fg=t["warn"], bg=t["bg"])
-            self._iconify(sr_lbl, "warning", self.ICON_INLINE, compound="left")
-            sr_lbl.pack(side="left")
-            rs_btn = self._btn(steam_status_frame, "Restart Steam", lambda: None, font=("Arial", 8))
-            rs_btn.config(command=lambda: [restart_steam(),
-                                           rs_btn.config(text="Restarting...", state="disabled")])
-            rs_btn.pack(side="left", padx=6)
-        else:
-            sn_lbl = tk.Label(steam_status_frame,
-                      text=" Steam is not running — launch Steam to see your new artwork",
-                      font=("Arial", 9), fg=t["muted2"], bg=t["bg"])
-            self._iconify(sn_lbl, "offline", self.ICON_INLINE, compound="left")
-            sn_lbl.pack(side="left")
+
+        # Pending-icon warning + action sit just ABOVE the bottom buttons so they're
+        # next to Back / All Done. Only shown when icons are queued (Steam was open
+        # during the fetch). Rebuilt live by _refresh_results_steam_ui.
+        action_frame = tk.Frame(results_window, bg=t["bg"])
 
         # Buttons are pinned to the bottom FIRST so capping the window height can
         # never push them off-screen.
         btn_frame = tk.Frame(results_window, bg=t["bg"])
+        # Loader sits in its OWN row UNDER the button row. With side="bottom" the
+        # FIRST-packed bottom widget lands LOWEST, so to get the visible top-to-bottom
+        # order action_frame -> btn_frame -> loader_frame we pack them bottom-up:
+        # loader_frame first (lowest), then btn_frame, then action_frame (highest).
+        # The loader is packed ONCE here (always present) — never pack_forget/re-pack
+        # during the flow (that on-demand bottom-pack was the invisible-loader bug).
+        # Its inner label is empty when idle, so this row is ~0 height and unobtrusive.
+        loader_frame = tk.Frame(results_window, bg=t["bg"])
+        loader_frame.pack(side="bottom")
         btn_frame.pack(side="bottom", pady=15)
-        self._btn(btn_frame, "← Back",
-                  lambda: [results_window.destroy(), self.window.lift(), self.window.focus_force()],
-                  font=("Arial", 12), width=12).pack(side="left", padx=10)
-        self._btn(btn_frame, "All Done!",
-                  lambda: [results_window.destroy(), self.window.destroy()],
-                  font=("Arial", 13, "bold"), width=12).pack(side="left", padx=10)
+        action_frame.pack(side="bottom", pady=(0, 4))
+        def _close_results():
+            self._close_modal(results_window)
+            results_window.destroy()
+
+        back_btn = self._btn(btn_frame, "← Back", _close_results,
+                  font=("Arial", 12), width=12)
+        back_btn.pack(side="left", padx=10)
+        done_btn = self._btn(btn_frame, "All Done!",
+                  lambda: [self._close_modal(results_window),
+                           results_window.destroy(), self.window.destroy()],
+                  font=("Arial", 13, "bold"), width=12)
+        done_btn.pack(side="left", padx=10)
+        results_window.protocol("WM_DELETE_WINDOW", _close_results)
+
+        # Per-results-window registry of apply buttons left in the "Queued (close
+        # Steam)" state. Reset fresh each time the window opens. _mark_queued_icons_applied
+        # flips them to "Applied!" once the queued icons are actually written.
+        self._queued_apply_btns = []
+
+        # Remember the live-UI widgets so _refresh_results_steam_ui and the poll can
+        # rebuild the status line + pending action on demand without re-deriving them.
+        self._results_widgets = {
+            "window": results_window, "steam_status_frame": steam_status_frame,
+            "action_frame": action_frame, "btn_frame": btn_frame,
+            "loader_frame": loader_frame, "back_btn": back_btn, "done_btn": done_btn,
+            "t": t,
+        }
+        # True while the "Close Steam & Apply Icons" flow is mid-run (buttons disabled,
+        # its own loader showing); the poll/refresh must NOT rebuild over it then.
+        self._results_applying = False
+        # Reset the cached render-state for this fresh window so the first poll reconciles
+        # against an unknown baseline (the initial build below is rendered directly).
+        self._results_steam_state = None
+        # Build the status line + (if needed) the pending action for the first time,
+        # then start the ~3s poll that keeps them in sync with Steam's live state.
+        self._refresh_results_steam_ui()
+        self._poll_results_steam_ui()
 
         canvas, scrollable_frame = self._make_scrollable_frame(results_window, padx=10, pady=5)
 
@@ -1513,8 +1799,291 @@ class SteamArtApp:
         # and bottom buttons are never hidden behind a taskbar/panel.
         self._fit_window_to_workarea(results_window, desired_w=900, desired_h=750)
         # Reveal it now that it's correctly sized and positioned — appears once,
-        # in place, with no visible resize.
+        # in place, with no visible resize — then grab it modal over the main window.
         results_window.deiconify()
+        self._open_modal(results_window)
+
+    def _refresh_results_steam_ui(self):
+        """Re-render the results window's Steam-status line and pending-icon action to
+        match the LIVE state (fg.is_steam_running / fg.has_pending_icons). Safe to call
+        repeatedly: it tears down and rebuilds the two frames' children each time rather
+        than appending, so widgets never stack up. NO-OPs while the apply flow is running
+        (it owns those widgets then) or once the window is gone."""
+        w = getattr(self, "_results_widgets", None)
+        if not w:
+            return
+        rw = w["window"]
+        # Window closed (Back/All Done) -> nothing to refresh.
+        try:
+            if not rw.winfo_exists():
+                return
+        except Exception:
+            return
+        # The "Close Steam & Apply Icons" flow disables buttons + shows its own loader
+        # and mutates these same frames; don't fight it mid-run.
+        if self._results_applying:
+            return
+
+        t = w["t"]
+        steam_status_frame = w["steam_status_frame"]
+        action_frame = w["action_frame"]
+
+        pending_count = len(fg.load_pending_icons())
+        pending_active = pending_count > 0
+        steam_running_now = fg.is_steam_running()
+
+        # Only rebuild when the observable state actually changes — otherwise the 3s
+        # poll would destroy+recreate the status line and action button every tick,
+        # flickering them (and yanking the button out from under the cursor).
+        # The COUNT is part of the key (not just has_pending): queuing a 2nd/3rd icon
+        # keeps (running, has_pending) unchanged, so a bool key left the "N icon(s)…"
+        # label stuck at its first value even though the queue grew.
+        state = (steam_running_now, pending_count)
+        if getattr(self, "_results_steam_state", None) == state:
+            return
+        self._results_steam_state = state
+
+        # The silent 4s background poll may have applied the queued icons (user closed
+        # Steam manually, no button). If the queue just cleared but we still have buttons
+        # stuck on "Queued (close Steam)", flip them to "Applied!" here too.
+        if not pending_active and getattr(self, "_queued_apply_btns", None):
+            self._mark_queued_icons_applied()
+
+        # --- Status line: rebuild from scratch so it can't accumulate labels. ---
+        for child in steam_status_frame.winfo_children():
+            child.destroy()
+        # Pending icons (queued because Steam was open) need Steam CLOSED to write.
+        # When some are pending AND Steam is running, the plain "Restart Steam" button
+        # is redundant/misleading — it wouldn't apply them — so we suppress it and let
+        # the dedicated "Close Steam & Apply Icons" action handle it instead.
+        if steam_running_now:
+            sr_lbl = tk.Label(steam_status_frame,
+                      text=" Steam is running — restart Steam to see your new artwork",
+                      font=("Arial", 9), fg=t["warn"], bg=t["bg"])
+            self._iconify(sr_lbl, "warning", self.ICON_INLINE, compound="left")
+            sr_lbl.pack(side="left")
+            if not pending_active:
+                rs_btn = self._btn(steam_status_frame, "Restart Steam", lambda: None, font=("Arial", 8))
+                rs_btn.config(command=lambda: [restart_steam(),
+                                               rs_btn.config(text="Restarting...", state="disabled")])
+                rs_btn.pack(side="left", padx=6)
+        else:
+            sn_lbl = tk.Label(steam_status_frame,
+                      text=" Steam is not running — launch Steam to see your new artwork",
+                      font=("Arial", 9), fg=t["muted2"], bg=t["bg"])
+            self._iconify(sn_lbl, "offline", self.ICON_INLINE, compound="left")
+            sn_lbl.pack(side="left")
+
+        # --- Pending action: show when icons are queued, clear it otherwise. ---
+        # Always wipe the frame first so a rebuild can't double up the warning/button.
+        for child in action_frame.winfo_children():
+            child.destroy()
+        if pending_active:
+            self._add_pending_icon_action(
+                rw, action_frame, steam_status_frame,
+                w["btn_frame"], w["loader_frame"], w["back_btn"], w["done_btn"], t)
+
+    def _poll_results_steam_ui(self):
+        """~3s timer: refresh the results window's Steam-status + pending UI, then
+        reschedule — but only while the window still exists, so closing it (Back/All
+        Done) cleanly ends the poll. Only REFRESHES UI; it never applies icons (the
+        user drives that via the button; the separate 4s _poll_pending_icons auto-applies)."""
+        w = getattr(self, "_results_widgets", None)
+        rw = w["window"] if w else None
+        try:
+            if rw is None or not rw.winfo_exists():
+                return  # window gone -> stop (don't reschedule)
+        except Exception:
+            return
+        self._refresh_results_steam_ui()
+        rw.after(3000, self._poll_results_steam_ui)
+
+    def _add_pending_icon_action(self, results_window, action_frame, steam_status_frame,
+                                 btn_frame, loader_frame, back_btn, done_btn, t):
+        """Build the "Close Steam & Apply Icons" warning + button and wire its flow.
+
+        WHY this exists: icons can't be written to shortcuts.vdf while Steam is open
+        (Steam clobbers the file on exit), so they were queued. Applying them means
+        close Steam → VERIFY it's really gone → write → confirm. We do that on a
+        daemon worker thread and marshal every widget update back to the UI thread via
+        results_window.after(0, ...). NO modal/blocking dialog and NO blind fixed sleep:
+        a modal popped from a worker is exactly what hung the app before, and a fixed
+        sleep can't actually confirm Steam closed — so we POLL is_steam_running(force=True)
+        instead (force= bypasses the 2.5s cache that would otherwise report a stale True)."""
+        pending_count = len(fg.load_pending_icons())
+        warn_lbl = tk.Label(action_frame,
+                  text=f" {pending_count} icon(s) need Steam closed to apply.",
+                  font=("Arial", 9, "bold"), fg=t["warn"], bg=t["bg"])
+        self._iconify(warn_lbl, "warning", self.ICON_INLINE, compound="left")
+        warn_lbl.pack(side="left", padx=(0, 8))
+        action_btn = self._btn(action_frame, "Close Steam & Apply Icons",
+                               lambda: None, font=("Arial", 9, "bold"))
+        action_btn.pack(side="left")
+
+        # Animated text loader (cycles "Working ." / ".." / "...") in its own row UNDER
+        # the Back / All Done buttons. A plain Label avoids any ttk-theme mismatch.
+        # Rebuilt fresh each time this action is (re)created, so clear any stale child.
+        for child in loader_frame.winfo_children():
+            child.destroy()
+        loader_lbl = tk.Label(loader_frame, text="", font=("Arial", 10),
+                              fg=t["muted2"], bg=t["bg"])
+        loader_lbl.pack()
+        anim = {"on": False, "step": 0}
+
+        def alive():
+            try:
+                return bool(results_window.winfo_exists())
+            except Exception:
+                return False
+
+        def animate():
+            # Self-rescheduling dot animation; stops when anim["on"] is cleared.
+            if not anim["on"] or not alive():
+                return
+            dots = "." * (anim["step"] % 3 + 1)
+            try:
+                loader_lbl.config(text=f"  {anim['base']} {dots}")
+            except Exception:
+                return
+            anim["step"] += 1
+            results_window.after(400, animate)
+
+        def set_loader(text):
+            # Update the loader's base text (called from the UI thread).
+            if not alive():
+                return
+            anim["base"] = text
+
+        def show_loader(text):
+            # The loader_frame is packed ONCE at window creation (always present), so
+            # we only start the animation here — never pack/unpack the frame (that was
+            # the invisible-loader bug). The empty -> non-empty label simply grows the
+            # already-placed row under the buttons.
+            anim["base"] = text
+            anim["on"] = True
+            anim["step"] = 0
+            animate()
+
+        def hide_loader():
+            # Stop the animation and blank the label so the row collapses to ~0 height
+            # again. Do NOT pack_forget the frame — it stays put.
+            anim["on"] = False
+            if alive():
+                try:
+                    loader_lbl.config(text="")
+                except Exception:
+                    pass
+
+        def enable_buttons(include_action):
+            if not alive():
+                return
+            try:
+                back_btn.config(state="normal")
+                done_btn.config(state="normal")
+                if include_action and action_btn.winfo_exists():
+                    action_btn.config(state="normal")
+            except Exception:
+                pass
+
+        def on_success(n):
+            # Flow finished — let the poll refresh again. The action/loader stay as the
+            # success message below; the next poll sees no pending icons and clears them.
+            self._results_applying = False
+            hide_loader()
+            enable_buttons(include_action=False)
+            # Icons are now written — flip any "Queued (close Steam)" buttons to "Applied!".
+            self._mark_queued_icons_applied()
+            try:
+                action_btn.destroy()
+                warn_lbl.config(
+                    text=(f" Applied {n} icon(s) — launch Steam to see them."
+                          if n > 0 else " Icons applied — launch Steam to see them."),
+                    fg=t["ok"])
+                self._iconify(warn_lbl, "applied", self.ICON_INLINE, compound="left")
+                # Steam is now closed — replace the status line accordingly.
+                for child in steam_status_frame.winfo_children():
+                    child.destroy()
+                sn_lbl = tk.Label(steam_status_frame,
+                          text=" Steam is not running — launch Steam to see your new artwork",
+                          font=("Arial", 9), fg=t["muted2"], bg=t["bg"])
+                self._iconify(sn_lbl, "offline", self.ICON_INLINE, compound="left")
+                sn_lbl.pack(side="left")
+            except Exception:
+                pass
+            self.log(f"Applied {n} queued icon(s) — launch Steam to see them.",
+                     icon="applied")
+            # Sync the cached render-state to what we just drew so the poll treats this
+            # terminal message as current and won't rebuild over it until state changes.
+            self._results_steam_state = (fg.is_steam_running(), len(fg.load_pending_icons()))
+
+        def on_fail(msg):
+            # Flow ended (failed) — clear the guard so the poll resumes refreshing.
+            self._results_applying = False
+            hide_loader()
+            enable_buttons(include_action=True)  # let them retry
+            if alive():
+                try:
+                    warn_lbl.config(text=f" {msg}", fg=t["danger"])
+                    self._iconify(warn_lbl, "warning", self.ICON_INLINE, compound="left")
+                except Exception:
+                    pass
+            # Pin the cached state to the live values so the poll preserves this error
+            # message until something actually changes (e.g. the user closes Steam).
+            self._results_steam_state = (fg.is_steam_running(), len(fg.load_pending_icons()))
+
+        def worker():
+            # Runs OFF the UI thread. All widget writes go back via results_window.after.
+            fg.stop_steam()
+            results_window.after(0, lambda: set_loader("Closing Steam"))
+            # Poll until Steam is REALLY gone (force=True bypasses the stale cache),
+            # up to ~20s. No fixed sleep — we must confirm before writing.
+            deadline = time.monotonic() + 20.0
+            closed = not fg.is_steam_running(force=True)
+            while not closed and time.monotonic() < deadline:
+                time.sleep(1.5)
+                closed = not fg.is_steam_running(force=True)
+            if not closed:
+                results_window.after(0, lambda:
+                    on_fail("Couldn't close Steam — close it manually and try again."))
+                return
+            results_window.after(0, lambda: set_loader("Applying icons"))
+            n = fg.apply_pending_icons()
+            # The silent 4s poll may have won the race and applied them already, so
+            # treat an empty queue as success even if our own call wrote 0.
+            if n > 0 or not fg.has_pending_icons():
+                results_window.after(0, lambda: on_success(n))
+            else:
+                results_window.after(0, lambda:
+                    on_fail("Couldn't apply icons — see the log."))
+
+        def start_apply():
+            # UI thread: lock everything, show the loader, then hand off to the worker.
+            # Guard the poll/refresh off while we own these widgets (cleared in
+            # on_success / on_fail).
+            self._results_applying = True
+            back_btn.config(state="disabled")
+            done_btn.config(state="disabled")
+            action_btn.config(state="disabled")
+            show_loader("Closing Steam")
+            threading.Thread(target=worker, daemon=True).start()
+
+        action_btn.config(command=start_apply)
+
+    def _mark_queued_icons_applied(self):
+        """Flip every per-image apply button still showing "Queued (close Steam)" to the
+        normal "Applied!" state, once the queued icons have actually been written. Called
+        from the apply flow's on_success AND from _refresh_results_steam_ui when the
+        pending queue clears via the silent background poll (user closed Steam manually)."""
+        btns = getattr(self, "_queued_apply_btns", None)
+        if not btns:
+            return
+        for btn in btns:
+            try:
+                if btn.winfo_exists():
+                    self._set_apply_btn(btn, True)
+            except Exception:
+                pass
+        self._queued_apply_btns = []
 
     def build_game_result_section(self, parent, game_result):
         """Build the artwork review UI for a single game in the results screen."""
@@ -1640,10 +2209,25 @@ class SteamArtApp:
                                     f.write(chunk)
                             register_managed_file(new_path)
                             # Icons must also be registered in shortcuts.vdf to apply.
-                            if s["art_type"] == "icons":
-                                set_shortcut_icon(s["app_id"], new_path)
+                            # BUT Steam clobbers shortcuts.vdf on exit, so a write while
+                            # Steam is running is silently lost. If Steam is up, DEFER:
+                            # queue the icon (auto-applies when Steam closes) and surface
+                            # the results-window pending action; only write immediately
+                            # when Steam is closed. (s["app_id"] is the int uid.)
                             s["applied_index"] = idx
-                            self._set_apply_btn(ab, True)
+                            if s["art_type"] == "icons" and fg.is_steam_running():
+                                fg.save_pending_icons({s["app_id"]: new_path})
+                                self._set_apply_btn(ab, True, queued=True)
+                                # Track this queued button so _mark_queued_icons_applied
+                                # can flip it to "Applied!" once the icons are written.
+                                self._queued_apply_btns.append(ab)
+                                # Make the pending warning + "Close Steam & Apply Icons"
+                                # action (re)appear/refresh right away.
+                                self._refresh_results_steam_ui()
+                            else:
+                                if s["art_type"] == "icons":
+                                    set_shortcut_icon(s["app_id"], new_path)
+                                self._set_apply_btn(ab, True)
                     except Exception:
                         ab.config(text="Failed — retry", image="", compound="none")
                 return prev, nxt, apply
@@ -1694,11 +2278,9 @@ class SteamArtApp:
         # APNG frame chunks Pillow writes), so this is an accurate determinate bar.
         bar = ttk.Progressbar(popup, mode="determinate", maximum=100, length=300)
         bar.pack(pady=10)
-        try:
-            popup.grab_set()
-        except tk.TclError:
-            pass
-        popup.lift()
+        # Nest this popup modally ON TOP of the results window; closing it restores
+        # the results window's grab (a bare grab_release would drop modality).
+        self._open_modal(popup)
 
         last_pct = {"v": -1}
 
@@ -1719,7 +2301,7 @@ class SteamArtApp:
 
         def finish(ok):
             if popup.winfo_exists():
-                popup.grab_release()
+                self._close_modal(popup)
                 popup.destroy()
             if ok:
                 state["applied_index"] = index
@@ -1772,27 +2354,65 @@ def _update_badge(badge_label, meta):
 
 def _display_image_on_label(lbl, path, on_animated=None):
     """Display the image at path on lbl. Plays frame-by-frame if the image is animated.
-    on_animated(bool) is called with the actual animation status detected from the file."""
+    on_animated(bool) is called with the actual animation status detected from the file.
+
+    PIL work (Image.open + thumbnail) happens on a worker thread; ImageTk.PhotoImage
+    and all widget mutations happen back on the UI thread (Tk requirement).
+
+    Staleness guard: a token is stamped on the label before the worker starts; if the
+    token has been replaced by the time the worker finishes (user moved to a different
+    image), the result is silently discarded.
+    """
+    # Cancel any in-flight animation — this runs on the UI thread (safe).
     if hasattr(lbl, "_anim_id") and lbl._anim_id:
         try:
             lbl.after_cancel(lbl._anim_id)
         except Exception:
             pass
         lbl._anim_id = None
-    try:
-        img = Image.open(path)
-        is_animated = getattr(img, "n_frames", 1) > 1
-        if on_animated:
-            on_animated(is_animated)
-        if is_animated:
-            _run_animation(lbl, img, 0)
-        else:
-            img.thumbnail((300, 200))
-            photo = ImageTk.PhotoImage(img)
-            lbl.config(image=photo, text="", width=photo.width(), height=photo.height())
-            lbl.image = photo
-    except Exception:
-        lbl.config(text="preview\nunavailable")
+
+    # Stamp a new load token so stale decode results self-discard.
+    token = object()
+    lbl._load_token = token
+
+    def worker():
+        try:
+            img = Image.open(path)
+            is_animated = getattr(img, "n_frames", 1) > 1
+
+            if is_animated:
+                # Image object is opened in the worker; frame iteration starts on the
+                # UI thread (via after) because _run_animation calls lbl.after internally.
+                def apply_animated():
+                    if lbl._load_token is not token:
+                        return  # stale — a newer image won the race
+                    if on_animated:
+                        on_animated(True)
+                    _run_animation(lbl, img, 0)
+                lbl.after(0, apply_animated)
+            else:
+                img.thumbnail((300, 200))
+                # Copy so the original can be GC'd; thumbnail mutates in-place.
+                copy = img.copy()
+
+                def apply_static():
+                    if lbl._load_token is not token:
+                        return  # stale
+                    if on_animated:
+                        on_animated(False)
+                    photo = ImageTk.PhotoImage(copy)
+                    lbl.config(image=photo, text="",
+                               width=photo.width(), height=photo.height())
+                    lbl.image = photo  # keep a reference so GC doesn't collect it
+                lbl.after(0, apply_static)
+        except Exception:
+            def apply_error():
+                if lbl._load_token is not token:
+                    return
+                lbl.config(text="preview\nunavailable")
+            lbl.after(0, apply_error)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # update_view is a standalone helper rather than a class method because it

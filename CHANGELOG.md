@@ -4,6 +4,47 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.3.0] — 2026-06-27
+
+### Added
+- **Multiple Steam accounts.** The app now detects every account that has signed
+  in on this machine and lets you switch between them from Settings. The account
+  picker is always visible — greyed out when only one account exists — and the
+  app remembers your selection between sessions, fetching artwork for whichever
+  account is active.
+- **In-app update check.** Settings shows your current version and a "Check for
+  updates" button that compares against the latest GitHub release. It clearly
+  reports "up to date", an available update with a direct link to the releases
+  page, or a friendly message if GitHub's rate limit is hit (with a "try again
+  in ~N min" hint). A "View releases page" link is always available.
+- **Deferred / auto-apply icons.** Steam overwrites `shortcuts.vdf` on exit, so
+  icons can only be written safely while Steam is closed. If Steam is running
+  when you fetch, icons are now queued instead of lost, and the app applies them
+  automatically the moment Steam closes — even across app restarts. The results
+  screen offers a one-click "Close Steam & Apply Icons" action and shows how many
+  icons are pending.
+
+### Changed
+- **Smoother UI under load.** Image decoding now happens off the UI thread, so
+  browsing results and cycling alternatives stays responsive while artwork loads.
+- **Window modality chaining.** Settings, the results window, and all dialogs
+  (information, art-style preferences, etc.) now layer correctly — the most
+  recently opened window stays in front and holds focus, and closing it returns
+  focus to the one beneath. No more dialogs hiding behind the main window.
+- Icon writes to `shortcuts.vdf` are now batched and written atomically (temp
+  file + replace), so a single fetch updates all icons in one safe pass.
+
+### Fixed
+- Fetching no longer hangs when Steam is open — icons are deferred cleanly
+  instead of stalling the fetch.
+- The results-screen loader now animates reliably beneath the action buttons.
+- The "icons pending" count now updates correctly as more icons are queued.
+- Removed status-line flicker on the results screen's Steam-state polling.
+
+### Development
+- Expanded the test suite to 131 tests, including regression coverage for the
+  deferred-icon path and the update-check / rate-limit handling.
+
 ## [1.2.5] — 2026-06-26
 
 ### Added

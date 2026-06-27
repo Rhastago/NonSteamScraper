@@ -187,12 +187,26 @@ def get_all_steam_users():
     return [u for u in os.listdir(udp)
             if u != "0" and os.path.exists(os.path.join(udp, u, "config", "shortcuts.vdf"))]
 
+ACCOUNT_FILE  = os.path.expanduser("~/.steamart_account")
+
 STEAM_USERDATA, STEAM_USER_ID = find_steam_user()
 if STEAM_USER_ID is None:
     _udp = get_steam_path()
     if _udp and os.path.exists(_udp):
         _c = [u for u in os.listdir(_udp) if u != "0" and os.path.isdir(os.path.join(_udp, u))]
         if _c: STEAM_USERDATA, STEAM_USER_ID = _udp, _c[0]
+# Prefer a previously chosen account (~/.steamart_account) if it's still valid.
+# This only changes behavior when 2+ accounts exist; with 0 or 1 account the
+# saved id either matches the sole account or is invalid, so the fallback stands.
+if STEAM_USER_ID is not None:
+    try:
+        with open(ACCOUNT_FILE, encoding="utf-8") as _f:
+            _saved = _f.read().strip()
+        _udp = get_steam_path()
+        if _saved and _udp and os.path.exists(os.path.join(_udp, _saved, "config", "shortcuts.vdf")):
+            STEAM_USERDATA, STEAM_USER_ID = _udp, _saved
+    except Exception:
+        _debug("restore_active_user")
 STEAM_NOT_FOUND = STEAM_USER_ID is None
 if STEAM_NOT_FOUND:
     SHORTCUTS_PATH = GRID_FOLDER = ""
@@ -201,12 +215,73 @@ else:
     GRID_FOLDER    = os.path.join(STEAM_USERDATA, STEAM_USER_ID, "config", "grid")
     os.makedirs(GRID_FOLDER, exist_ok=True)
 
+def get_active_user():
+    """Return the currently active userdata folder id (or None if Steam not found)."""
+    return STEAM_USER_ID
+
+def set_active_user(user_id):
+    """Switch the active Steam account by rebinding the module globals
+    (STEAM_USERDATA, STEAM_USER_ID, SHORTCUTS_PATH, GRID_FOLDER) and persisting
+    the choice to ~/.steamart_account. Backend functions read these globals, so
+    the switch takes effect for subsequent calls. Returns True on success, False
+    if user_id is not a valid account folder with a shortcuts.vdf."""
+    global STEAM_USERDATA, STEAM_USER_ID, SHORTCUTS_PATH, GRID_FOLDER
+    udp = get_steam_path()
+    if not udp or not user_id or not os.path.exists(os.path.join(udp, user_id, "config", "shortcuts.vdf")):
+        return False
+    STEAM_USERDATA = udp
+    STEAM_USER_ID  = user_id
+    SHORTCUTS_PATH = os.path.join(udp, user_id, "config", "shortcuts.vdf")
+    GRID_FOLDER    = os.path.join(udp, user_id, "config", "grid")
+    os.makedirs(GRID_FOLDER, exist_ok=True)
+    try:
+        with open(ACCOUNT_FILE, "w", encoding="utf-8") as f:
+            f.write(user_id)
+    except Exception:
+        _debug("set_active_user persist")
+    return True
+
+def get_steam_user_personas():
+    """Return {folder_user_id: persona_name} parsed from loginusers.vdf (text VDF).
+    loginusers.vdf top-level keys are SteamID64 strings; the userdata folder id is
+    the low 32 bits of that id (int(steamid64) & 0xFFFFFFFF). Ids without a known
+    persona simply won't appear. Never raises."""
+    personas = {}
+    try:
+        udp = get_steam_path()
+        if not udp:
+            return personas
+        path = os.path.join(os.path.dirname(udp), "config", "loginusers.vdf")
+        with open(path, encoding="utf-8") as f:
+            data = vdf.loads(f.read())
+        for sid64, info in (data.get("users") or {}).items():
+            try:
+                folder_id = str(int(sid64) & 0xFFFFFFFF)
+                name = info.get("PersonaName")
+                if name:
+                    personas[folder_id] = name
+            except (ValueError, TypeError, AttributeError):
+                continue
+    except Exception:
+        _debug("get_steam_user_personas")
+    return personas
+
 SKIP_FILE     = os.path.expanduser("~/.steamart_skip")
 NAMES_FILE    = os.path.expanduser("~/.steamart_names")
 CACHE_FOLDER  = os.path.expanduser("~/.steamart_cache")
 BACKUP_FOLDER = os.path.expanduser("~/.steamart_backup")
 MANAGED_FILE  = os.path.expanduser("~/.steamart_managed")
 PREFS_FILE    = os.path.expanduser("~/.steamart_prefs")
+# Icons are only safe to write into shortcuts.vdf while Steam is CLOSED (Steam
+# rewrites the file on exit and would clobber our change). When a fetch finishes
+# with Steam open we therefore DEFER the icon writes to this file instead of
+# prompting and restarting Steam ourselves. WHY no dialog/restart:
+#   - the old prompt was marshaled from the fetch worker thread to the UI thread
+#     and could hang forever (the dialog didn't reliably appear), and
+#   - auto-restarting (stop → sleep(3) → write → start) was racy — Steam shutting
+#     down gracefully could rewrite shortcuts.vdf and clobber our icon.
+# Instead the app polls and flushes these pending icons the moment Steam is closed.
+PENDING_ICONS_FILE = os.path.expanduser("~/.steamart_pending_icons")
 
 DEFAULT_PREFS = {
     "animated": "never", "nsfw": "never", "humor": "ok",
@@ -299,10 +374,15 @@ def clean_old_cache(days=30):
         if os.path.isfile(p) and datetime.fromtimestamp(os.path.getmtime(p)) < cutoff:
             os.remove(p)
 
-def backup_artwork(unsigned_id):
+def backup_artwork(unsigned_id, existing_files=None):
+    # existing_files: optional pre-listed GRID_FOLDER snapshot. download_all_artwork
+    # passes ONE snapshot down so backup_artwork + clear_slot_files don't re-listdir
+    # the same folder ~6× per game. Standalone callers leave it None and list here.
     os.makedirs(BACKUP_FOLDER, exist_ok=True)
     managed = load_managed_files()
-    for f in os.listdir(GRID_FOLDER):
+    if existing_files is None:
+        existing_files = os.listdir(GRID_FOLDER)
+    for f in existing_files:
         if f.startswith(str(unsigned_id)):
             src = os.path.join(GRID_FOLDER, f)
             if src in managed: shutil.copy2(src, os.path.join(BACKUP_FOLDER, f))
@@ -348,13 +428,19 @@ def full_reset():
 _STEAM_RUNNING_TTL = 2.5   # seconds between full process-list scans
 _steam_cache = (0.0, False)  # (last_check_monotonic, last_result)
 
-def is_steam_running():
+def is_steam_running(force=False):
     global _steam_cache
     if not PSUTIL_AVAILABLE:
         return False
     now = time.monotonic()
     last_ts, last_result = _steam_cache
-    if now - last_ts < _STEAM_RUNNING_TTL:
+    # force=True bypasses the TTL cache and always runs the psutil scan, then
+    # refreshes the shared cache below. Callers use this right after stop_steam()
+    # so a cached True can't linger up to _STEAM_RUNNING_TTL and make us think
+    # Steam is still running. Refreshing _steam_cache here also means the very
+    # next plain is_steam_running() (e.g. inside apply_pending_icons) sees the
+    # same fresh False instead of the stale True.
+    if not force and now - last_ts < _STEAM_RUNNING_TTL:
         return last_result   # cache still fresh — skip the process scan
     target = {"Linux": "steam", "Windows": "steam.exe", "Darwin": "steam"}.get(platform.system(), "steam").lower()
     try:
@@ -365,17 +451,31 @@ def is_steam_running():
     _steam_cache = (now, result)
     return result
 
-def restart_steam():
+def stop_steam():
+    """Kill the running Steam process (no relaunch). Factored out of restart_steam so
+    callers can do stop → (write shortcuts.vdf) → start with the file write happening
+    while Steam is closed and can't clobber it."""
     s = platform.system()
     try:
-        if s == "Linux":   subprocess.Popen(["pkill", "-x", "steam"]); time.sleep(3); subprocess.Popen(["steam"])
+        if s == "Linux":     subprocess.Popen(["pkill", "-x", "steam"])
+        elif s == "Windows": subprocess.Popen(["taskkill", "/F", "/IM", "steam.exe"])
+        elif s == "Darwin":  subprocess.Popen(["pkill", "-x", "Steam"])
+    except Exception as e: print(f"Failed to stop Steam: {e}")
+
+def start_steam():
+    """Launch Steam (no kill first). Pair with stop_steam() for a stop→write→start."""
+    s = platform.system()
+    try:
+        if s == "Linux":     subprocess.Popen(["steam"])
         elif s == "Windows":
             install = _windows_steam_install() or r"C:\Program Files (x86)\Steam"
-            subprocess.Popen(["taskkill", "/F", "/IM", "steam.exe"])
-            time.sleep(3)
             subprocess.Popen([os.path.join(install, "steam.exe")])
-        elif s == "Darwin":  subprocess.Popen(["pkill", "-x", "Steam"]); time.sleep(3); subprocess.Popen(["open", "-a", "Steam"])
-    except Exception as e: print(f"Failed to restart Steam: {e}")
+        elif s == "Darwin":  subprocess.Popen(["open", "-a", "Steam"])
+    except Exception as e: print(f"Failed to start Steam: {e}")
+
+def restart_steam():
+    # Unchanged behavior: stop, wait for the process to exit, then relaunch.
+    stop_steam(); time.sleep(3); start_steam()
 
 def get_non_steam_games():
     if not os.path.exists(SHORTCUTS_PATH): return []
@@ -421,27 +521,105 @@ def get_non_steam_games():
         games.append({"name": name, "app_id": uid, "has_art": (str(uid) in uids_with_art) or in_skip, "skipped": in_skip})
     return games
 
-def set_shortcut_icon(unsigned_id, icon_path):
-    """Write an icon path into shortcuts.vdf for the given app. Backs up on first write.
-    Note: Steam should be closed when this runs to prevent it overwriting the change."""
-    if not os.path.exists(SHORTCUTS_PATH): return False
+def _write_shortcuts_atomic(data):
+    """Serialize `data` and atomically replace shortcuts.vdf: write a temp file in the
+    SAME directory, then os.replace() onto SHORTCUTS_PATH. os.replace is atomic within
+    one filesystem, so a crash/clobber mid-write can never leave a truncated vdf."""
+    folder = os.path.dirname(SHORTCUTS_PATH)
+    tmp = os.path.join(folder, "shortcuts.vdf.tmp")
+    with open(tmp, "wb") as f:
+        f.write(vdf.binary_dumps(data))
+    os.replace(tmp, SHORTCUTS_PATH)
+
+def set_shortcut_icons(mapping):
+    """Batch-write icons into shortcuts.vdf in ONE read+parse+write instead of one full
+    rewrite per game. `mapping` is {unsigned_id: icon_path}. Every shortcut whose
+    (appid & 0xFFFFFFFF) is a key gets game["icon"] set (all shortcuts sharing an appid,
+    like the single-write path). Backs up on first write; writes atomically. Returns the
+    count of shortcuts changed. Never raises (matches set_shortcut_icon's style)."""
+    if not mapping or not os.path.exists(SHORTCUTS_PATH): return 0
     try:
         os.makedirs(BACKUP_FOLDER, exist_ok=True)
         bak = os.path.join(BACKUP_FOLDER, "shortcuts.vdf.bak")
         if not os.path.exists(bak): shutil.copy2(SHORTCUTS_PATH, bak)
         with open(SHORTCUTS_PATH, "rb") as f: data = vdf.binary_loads(f.read())
-        changed = False
-        # Update every shortcut sharing this appid, not just the first — duplicate
-        # non-Steam entries with the same appid would otherwise miss the icon.
+        changed = 0
         for _key, game in data.get("shortcuts", {}).items():
             aid = game.get("appid")
-            if aid is not None and (aid & 0xFFFFFFFF) == unsigned_id:
-                game["icon"] = icon_path; changed = True
+            if aid is None: continue
+            uid = aid & 0xFFFFFFFF
+            if uid in mapping:
+                game["icon"] = mapping[uid]; changed += 1
         if changed:
-            with open(SHORTCUTS_PATH, "wb") as f: f.write(vdf.binary_dumps(data))
+            _write_shortcuts_atomic(data)
         return changed
     except Exception as e:
-        print(f"Failed to set icon for {unsigned_id}: {e}"); return False
+        print(f"Failed to set icons: {e}"); return 0
+
+def set_shortcut_icon(unsigned_id, icon_path):
+    """Write an icon path into shortcuts.vdf for the given app. Backs up on first write.
+    Note: Steam should be closed when this runs to prevent it overwriting the change.
+    Delegates to set_shortcut_icons so there's one atomic code path; returns bool to
+    preserve its existing contract for callers (app.py on-demand apply)."""
+    return set_shortcut_icons({unsigned_id: icon_path}) > 0
+
+# --- Pending (deferred) icon writes ----------------------------------------------
+# See PENDING_ICONS_FILE above for the design rationale (defer when Steam is open,
+# auto-apply when it closes — no dialog, no Steam restart by us). All five helpers
+# below are pure file I/O, tkinter-free, and never raise so the UI poll is safe.
+def save_pending_icons(mapping):
+    """MERGE `mapping` ({unsigned_id:int -> icon_path:str}) into any existing pending
+    file and write it back as JSON (keys stored as strings). Never raises."""
+    if not mapping: return
+    try:
+        merged = {str(k): v for k, v in load_pending_icons().items()}
+        merged.update({str(k): v for k, v in mapping.items()})
+        with open(PENDING_ICONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(merged, f)
+    except Exception as e:
+        print(f"Failed to save pending icons: {e}")
+
+def load_pending_icons():
+    """Return {int_uid: path} from the pending file. {} if missing/unparseable. Never raises."""
+    try:
+        with open(PENDING_ICONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {int(k): v for k, v in data.items()}
+    except Exception:
+        return {}
+
+def clear_pending_icons():
+    """Remove the pending-icons file if present. Never raises."""
+    try:
+        if os.path.exists(PENDING_ICONS_FILE):
+            os.remove(PENDING_ICONS_FILE)
+    except Exception as e:
+        print(f"Failed to clear pending icons: {e}")
+
+def has_pending_icons():
+    """Cheap existence check so the UI poll can early-out without reading/parsing."""
+    return os.path.exists(PENDING_ICONS_FILE)
+
+def apply_pending_icons():
+    """Safe flush of deferred icon writes. Returns the count written (0 if it did nothing).
+    Does NOTHING (returns 0, leaves the pending file intact) if Steam is running, if there
+    are no pending icons, or if SHORTCUTS_PATH doesn't exist — so we never write while Steam
+    could clobber it. Otherwise: load pending, drop entries whose icon path no longer exists
+    on disk, set_shortcut_icons(...) the rest, then clear_pending_icons() and return the count.
+
+    We only clear the pending file when we actually reach a write attempt with Steam closed
+    (never when we skipped because Steam was running). If filtering leaves nothing valid to
+    write, we still clear: those icon files are gone, so there's nothing to retry. Never raises."""
+    try:
+        if is_steam_running(): return 0
+        pending = load_pending_icons()
+        if not pending or not os.path.exists(SHORTCUTS_PATH): return 0
+        valid = {uid: path for uid, path in pending.items() if os.path.exists(path)}
+        n = set_shortcut_icons(valid) if valid else 0
+        clear_pending_icons()  # reached a real write attempt while Steam was closed
+        return n
+    except Exception as e:
+        print(f"Failed to apply pending icons: {e}"); return 0
 
 def search_game(name, app_id=None):
     key = load_api_key(); headers = {"Authorization": f"Bearer {key}"}
@@ -588,19 +766,24 @@ def download_artwork(url, save_path, register=True):
         except OSError: pass
         print(f"    ❌ Network error: {e}"); return False
 
-def clear_slot_files(save_path):
+def clear_slot_files(save_path, existing_files=None):
     """Delete any existing artwork sharing `save_path`'s grid slot but using a
     different extension. Steam keys art off the filename base (e.g. '12345p'), so a
     leftover '12345p.png' would keep displaying instead of a new '12345p.webp' —
     this guarantees the freshly downloaded file is the only one Steam sees.
-    The previous file is already preserved by backup_artwork() before this runs."""
+    The previous file is already preserved by backup_artwork() before this runs.
+
+    existing_files: optional pre-listed folder snapshot to avoid a redundant listdir
+    (download_all_artwork shares ONE snapshot across this game's slots — safe because
+    each slot has a distinct filename base). Standalone callers leave it None."""
     folder = os.path.dirname(save_path)
     prefix = os.path.basename(save_path).rsplit(".", 1)[0] + "."
-    try:
-        existing = os.listdir(folder)
-    except OSError:
-        return
-    for f in existing:
+    if existing_files is None:
+        try:
+            existing_files = os.listdir(folder)
+        except OSError:
+            return
+    for f in existing_files:
         if f.startswith(prefix):
             try: os.remove(os.path.join(folder, f))
             except OSError: pass
@@ -676,7 +859,7 @@ def download_apng(url, out_path, progress_cb=None, status_cb=None, register=True
 # workers gets the latency win without tripping that throttle.
 SGDB_MAX_WORKERS = 5
 
-def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None):
+def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, defer_icon=False):
     if prefs is None:
         prefs = load_prefs()
     # slot key -> (label, SGDB endpoint, filename base, dimensions filter)
@@ -688,9 +871,20 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None):
         "logos":      ("Logo",            "logos",  f"{unsigned_id}_logo", None),
         "icons":      ("Icon",            "icons",  f"{unsigned_id}_icon", None),
     }
-    backup_artwork(unsigned_id)
+    # One GRID_FOLDER snapshot reused by backup_artwork + every clear_slot_files below,
+    # instead of ~6 listdir calls per game. Safe to share within ONE game: each slot has
+    # a distinct filename base, so a slot's freshly written file never affects another
+    # slot's clear. (Taken fresh per call — never shared across games.)
+    try:
+        existing_files = os.listdir(GRID_FOLDER)
+    except OSError:
+        existing_files = []
+    backup_artwork(unsigned_id, existing_files=existing_files)
     os.makedirs(CACHE_FOLDER, exist_ok=True)
     results = {}
+    # When defer_icon=True, the icon's vdf write is deferred to the caller (batch write
+    # at end of fetch-all). Surfaced via results["icon_to_set"] = (unsigned_id, path).
+    results["icon_to_set"] = None
     # N slots × (1 main + 3 previews) steps max
     total_steps = len(slots) * 4
     step = 0
@@ -743,9 +937,15 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None):
             ext = top["url"].split(".")[-1].split("?")[0]
             save_path = os.path.join(GRID_FOLDER, f"{base}.{ext}")
             bump(f"Downloading {art_label}")
-            clear_slot_files(save_path)
+            clear_slot_files(save_path, existing_files=existing_files)
             download_artwork(top["url"], save_path)
-            if slot == "icons": set_shortcut_icon(unsigned_id, save_path)
+            if slot == "icons":
+                if defer_icon:
+                    # Defer the shortcuts.vdf write so the caller can batch + write all
+                    # icons in ONE atomic pass (and while Steam is closed).
+                    results["icon_to_set"] = (unsigned_id, save_path)
+                else:
+                    set_shortcut_icon(unsigned_id, save_path)
             applied_url = top["url"]
         else:
             save_path = os.path.join(GRID_FOLDER, f"{base}.png")
@@ -788,6 +988,36 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None):
                               ],
                               "thumb_paths": thumbs, "current_index": 0, "filename_base": base}
     return results
+
+# --- Consuming a download_all_artwork() results dict ------------------------
+# HAZARD: the results dict mixes two kinds of values. Art-slot keys
+# ("grids"/"grids_wide"/"heroes"/"logos"/"icons") map to slot dicts (or None),
+# but the reserved "icon_to_set" key maps to a TUPLE (unsigned_id, path) or None
+# in defer_icon mode. A naive `for v in results.values(): v.get(...)` loop blows
+# up with AttributeError on that tuple (tuples have no .get), and because the
+# consumer runs in a daemon thread that crash silently hangs the UI on
+# "Fetching…" forever. These helpers are the ONLY supported way to consume the
+# dict: they iterate art slots and the icon entry separately, so the tuple can
+# never reach .get(). Do NOT re-inline a values()-loop over results.
+ICON_TO_SET_KEY = "icon_to_set"
+
+def applied_paths_from_results(results):
+    """Return the applied_path of every ART SLOT that auto-applied a static image
+    (applied_index is not None and applied_path is set). Iterates only slot dicts
+    and skips the reserved icon_to_set entry / any non-dict value, so the
+    icon_to_set tuple can't trip a .get() call."""
+    paths = []
+    for key, art_data in results.items():
+        if key == ICON_TO_SET_KEY or not isinstance(art_data, dict):
+            continue
+        if art_data.get("applied_index") is not None and art_data.get("applied_path"):
+            paths.append(art_data["applied_path"])
+    return paths
+
+def icon_write_from_results(results):
+    """Return the deferred icon write (unsigned_id, path) tuple, or None. This is
+    the ONLY value in results that is a tuple rather than a slot dict."""
+    return results.get(ICON_TO_SET_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -862,6 +1092,138 @@ def compute_window_fit(wa_x, wa_y, wa_w, wa_h, desired_w, desired_h, reserve=80)
     x = max(wa_x, min(x, wa_x + wa_w - final_w))
     y = max(wa_y, min(y, wa_y + wa_h - final_h))
     return final_w, final_h, x, y
+
+
+# ---------------------------------------------------------------------------
+# Update check — pure network helper, no tkinter dependency.
+# ---------------------------------------------------------------------------
+
+# Single source of truth for the repo's releases page — used both as a manual
+# fallback link in the UI and (implicitly) by the asset-picking logic below.
+RELEASES_URL = "https://github.com/Rhastago/NonSteamScraper/releases"
+
+
+def _rate_limit_reason(headers):
+    """Build the rate-limit error string, adding the minutes until the limit resets
+    when GitHub supplies it. GitHub returns `X-RateLimit-Reset` (UNIX epoch seconds)
+    on a rate-limited 403; some proxies use `Retry-After` (seconds). Parsing is fully
+    defensive — a missing/garbage header just falls back to the generic message."""
+    try:
+        reset = headers.get("X-RateLimit-Reset")
+        if reset:
+            secs = int(reset) - int(time.time())
+            if secs > 0:
+                mins = max(1, (secs + 59) // 60)  # ceil without importing math
+                return f"GitHub rate limit reached — try again in ~{mins} min."
+        retry_after = headers.get("Retry-After")
+        if retry_after:
+            secs = int(retry_after)
+            if secs > 0:
+                mins = max(1, (secs + 59) // 60)
+                return f"GitHub rate limit reached — try again in ~{mins} min."
+    except Exception:
+        pass
+    return "GitHub rate limit reached — try again later."
+
+
+def _version_tuple(s):
+    """Convert a version string like "1.2.3" or "v1.2.5-beta" to a comparable
+    int tuple. Strips a leading "v" and any non-numeric suffix on each part."""
+    s = s.lstrip("v").strip()
+    parts = []
+    for p in s.split("."):
+        m = re.match(r"(\d+)", p)
+        parts.append(int(m.group(1)) if m else 0)
+    return tuple(parts) if parts else (0,)
+
+
+def check_for_update(current_version):
+    """Check GitHub releases for a newer version.
+
+    Returns a dict on both success and failure — never raises, never returns None.
+
+    Success::
+        {"available": bool, "latest": str, "current": str, "url": str, "error": None}
+
+    Failure::
+        {"available": False, "latest": None, "current": current_version,
+         "url": None, "error": "<short human reason>"}
+
+    Retry policy: retries ONCE only on RequestException (network/timeout), with a
+    1 s pause.  Non-200 HTTP responses are returned immediately (no retry) so that
+    rate-limit errors don't burn more of the 60/hr unauthenticated GitHub budget.
+    """
+    _UA = "NonSteamScraper-update-check"
+    _HEADERS = {"Accept": "application/vnd.github+json", "User-Agent": _UA}
+    _URL = "https://api.github.com/repos/Rhastago/NonSteamScraper/releases/latest"
+
+    def _err(reason):
+        return {"available": False, "latest": None, "current": current_version,
+                "url": None, "error": reason}
+
+    for attempt in range(2):  # initial try + one retry (network errors only)
+        if attempt:
+            time.sleep(1)
+        try:
+            r = requests.get(_URL, headers=_HEADERS, timeout=10)
+            if r.status_code != 200:
+                # Do NOT retry non-200 — return the reason immediately.
+                _debug("check_for_update")
+                if r.status_code == 403:
+                    return _err(_rate_limit_reason(getattr(r, "headers", {}) or {}))
+                return _err(f"GitHub returned HTTP {r.status_code}.")
+            data = r.json()
+            raw_tag = data.get("tag_name", "")
+            latest = raw_tag.lstrip("v").strip()
+            if not latest:
+                return _err("Unexpected response from GitHub.")
+
+            available = _version_tuple(latest) > _version_tuple(current_version)
+
+            # Pick the most appropriate asset for the current platform.
+            assets = data.get("assets", [])
+            plat = platform.system()  # "Linux", "Windows", "Darwin", …
+            url = data.get("html_url", "")  # fallback: release page
+
+            if assets:
+                name_lower = [a["name"].lower() for a in assets]
+                if plat == "Windows":
+                    # prefer an asset whose name contains "win", else .zip or .exe
+                    for keyword in ("win", ".zip", ".exe"):
+                        for i, nl in enumerate(name_lower):
+                            if keyword in nl:
+                                url = assets[i]["browser_download_url"]
+                                break
+                        else:
+                            continue
+                        break
+                elif plat == "Linux":
+                    # prefer an asset whose name contains "linux", else the one
+                    # with no file extension (bare binary)
+                    matched = None
+                    for i, nl in enumerate(name_lower):
+                        if "linux" in nl:
+                            matched = assets[i]["browser_download_url"]
+                            break
+                    if matched is None:
+                        for i, a in enumerate(assets):
+                            if "." not in a["name"]:
+                                matched = a["browser_download_url"]
+                                break
+                    if matched:
+                        url = matched
+                # Darwin / other: fall through to html_url (release page)
+
+            return {"available": available, "latest": latest,
+                    "current": current_version, "url": url, "error": None}
+        except requests.exceptions.RequestException:
+            _debug("check_for_update")
+            # Network error — retry once, then report reason.
+        except Exception:
+            _debug("check_for_update")
+            return _err("Unexpected response from GitHub.")  # parse error, no retry
+
+    return _err("Couldn't reach GitHub (network error).")
 
 
 if __name__ == "__main__":

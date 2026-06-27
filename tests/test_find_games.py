@@ -719,3 +719,651 @@ def test_parse_net_workarea_negative_origin_reported_honestly():
     # reject it) rather than having the minus stripped into a wrong positive.
     line = "_NET_WORKAREA(CARDINAL) = -10, 0, 1920, 1053"
     assert fg.parse_net_workarea(line) == (-10, 0, 1920, 1053)
+
+
+# ---------------------------------------------------------------------------
+# clear_slot_files / backup_artwork — shared listdir snapshot (existing_files)
+# ---------------------------------------------------------------------------
+
+def test_clear_slot_files_uses_provided_snapshot(tmp_path):
+    # When existing_files is provided, it's used verbatim instead of listdir — so a
+    # name in the snapshot that no longer exists on disk is simply skipped (no error),
+    # and on-disk files NOT in the snapshot are left untouched.
+    _touch(tmp_path / "123p.png")
+    _touch(tmp_path / "123p.jpg")  # on disk but intentionally NOT in the snapshot
+    snapshot = ["123p.png", "ghost123p.removed"]  # ghost entry must not raise
+
+    fg.clear_slot_files(str(tmp_path / "123p.webp"), existing_files=snapshot)
+
+    assert not (tmp_path / "123p.png").exists()  # in snapshot + matches prefix -> removed
+    assert (tmp_path / "123p.jpg").exists()      # not in snapshot -> untouched
+
+
+def test_backup_artwork_uses_provided_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(fg, "GRID_FOLDER", str(tmp_path / "grid"))
+    monkeypatch.setattr(fg, "BACKUP_FOLDER", str(tmp_path / "backup"))
+    monkeypatch.setattr(fg, "MANAGED_FILE", str(tmp_path / "managed"))
+    os.makedirs(fg.GRID_FOLDER)
+    art = os.path.join(fg.GRID_FOLDER, "123p.png")
+    _touch(art)
+    fg.register_managed_file(art)  # only managed files get backed up
+
+    # Pass the snapshot explicitly; backup must not re-listdir GRID_FOLDER.
+    fg.backup_artwork(123, existing_files=["123p.png"])
+    assert os.path.exists(os.path.join(fg.BACKUP_FOLDER, "123p.png"))
+
+
+# ---------------------------------------------------------------------------
+# set_shortcut_icons (batch) / set_shortcut_icon (single, delegates) — atomic vdf
+# ---------------------------------------------------------------------------
+
+def _write_shortcuts(path, shortcuts):
+    """Helper: serialize {key: {appid, ...}} shortcuts into a binary vdf at `path`."""
+    import vdf
+    with open(path, "wb") as f:
+        f.write(vdf.binary_dumps({"shortcuts": shortcuts}))
+
+
+def _read_shortcuts(path):
+    import vdf
+    with open(path, "rb") as f:
+        return vdf.binary_loads(f.read())["shortcuts"]
+
+
+def _setup_shortcuts(tmp_path, monkeypatch, shortcuts):
+    sc = tmp_path / "shortcuts.vdf"
+    _write_shortcuts(str(sc), shortcuts)
+    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
+    monkeypatch.setattr(fg, "BACKUP_FOLDER", str(tmp_path / "backup"))
+    return sc
+
+
+def test_set_shortcut_icons_batch_sets_all_matching_appids(tmp_path, monkeypatch):
+    # Two shortcuts share appid 100 (both must get the icon); 200 gets its own; 300
+    # is not in the mapping and must be left unchanged.
+    sc = _setup_shortcuts(tmp_path, monkeypatch, {
+        "0": {"appid": 100, "icon": ""},
+        "1": {"appid": 100, "icon": ""},  # duplicate appid
+        "2": {"appid": 200, "icon": ""},
+        "3": {"appid": 300, "icon": "keep"},
+    })
+    changed = fg.set_shortcut_icons({100: "/a/icon100.png", 200: "/a/icon200.png"})
+    assert changed == 3  # both 100s + the single 200
+
+    out = _read_shortcuts(str(sc))
+    assert out["0"]["icon"] == "/a/icon100.png"
+    assert out["1"]["icon"] == "/a/icon100.png"
+    assert out["2"]["icon"] == "/a/icon200.png"
+    assert out["3"]["icon"] == "keep"  # untouched
+
+
+def test_set_shortcut_icons_appid_masked_to_unsigned(tmp_path, monkeypatch):
+    # appid is stored as a signed 32-bit int in the vdf; the mapping key is the
+    # unsigned id, so matching must apply (appid & 0xFFFFFFFF).
+    signed = -1  # 0xFFFFFFFF unsigned
+    uid = signed & 0xFFFFFFFF
+    sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": signed, "icon": ""}})
+    assert fg.set_shortcut_icons({uid: "/a/i.png"}) == 1
+    assert _read_shortcuts(str(sc))["0"]["icon"] == "/a/i.png"
+
+
+def test_set_shortcut_icons_backs_up_once(tmp_path, monkeypatch):
+    sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""}})
+    fg.set_shortcut_icons({100: "/a/i.png"})
+    bak = os.path.join(fg.BACKUP_FOLDER, "shortcuts.vdf.bak")
+    assert os.path.exists(bak)
+    import shutil
+    before = open(bak, "rb").read()
+    # A second write must not overwrite the original backup.
+    fg.set_shortcut_icons({100: "/a/i2.png"})
+    assert open(bak, "rb").read() == before
+
+
+def test_set_shortcut_icons_empty_mapping_returns_zero(tmp_path, monkeypatch):
+    _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""}})
+    assert fg.set_shortcut_icons({}) == 0
+
+
+def test_set_shortcut_icons_missing_file_returns_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(tmp_path / "nope.vdf"))
+    assert fg.set_shortcut_icons({100: "/a/i.png"}) == 0
+
+
+def test_set_shortcut_icon_single_delegates_and_returns_bool(tmp_path, monkeypatch):
+    sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""}})
+    assert fg.set_shortcut_icon(100, "/a/i.png") is True
+    assert _read_shortcuts(str(sc))["0"]["icon"] == "/a/i.png"
+    # No matching appid -> bool False.
+    assert fg.set_shortcut_icon(999, "/a/i.png") is False
+
+
+def test_write_shortcuts_atomic_no_temp_left(tmp_path, monkeypatch):
+    sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""}})
+    fg.set_shortcut_icons({100: "/a/i.png"})
+    # The temp file used for the atomic os.replace must not survive the write.
+    assert not os.path.exists(os.path.join(str(tmp_path), "shortcuts.vdf.tmp"))
+
+
+# ---------------------------------------------------------------------------
+# stop_steam / start_steam / restart_steam — sequencing + factoring
+# ---------------------------------------------------------------------------
+
+def test_restart_steam_calls_stop_sleep_start_in_order(monkeypatch):
+    calls = []
+    monkeypatch.setattr(fg, "stop_steam", lambda: calls.append("stop"))
+    monkeypatch.setattr(fg, "start_steam", lambda: calls.append("start"))
+    monkeypatch.setattr(fg.time, "sleep", lambda *_: calls.append("sleep"))
+    fg.restart_steam()
+    assert calls == ["stop", "sleep", "start"]
+
+
+def test_is_steam_running_force_bypasses_stale_true_cache(monkeypatch):
+    # A recent cache says Steam is running (True) but psutil now reports no steam
+    # process. Plain is_steam_running() must trust the fresh cache (stale True),
+    # while force=True bypasses it, rescans, returns False, AND refreshes the cache.
+    monkeypatch.setattr(fg, "PSUTIL_AVAILABLE", True)
+    monkeypatch.setattr(fg, "_steam_cache", (fg.time.monotonic(), True))
+    # psutil sees no processes named "steam".
+    monkeypatch.setattr(fg.psutil, "process_iter", lambda *_a, **_k: iter([]))
+
+    assert fg.is_steam_running() is True            # stale cache trusted
+    assert fg.is_steam_running(force=True) is False  # cache bypassed → real scan
+    # The forced scan refreshed the shared cache, so the next plain call sees False.
+    assert fg.is_steam_running() is False
+
+
+# ---------------------------------------------------------------------------
+# _version_tuple
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("s,expected", [
+    ("1.2.3",   (1, 2, 3)),
+    ("v1.2.5",  (1, 2, 5)),
+    ("2.0",     (2, 0)),
+    ("1.2.3-beta", (1, 2, 3)),   # non-numeric suffix stripped per part
+    ("0.0.1",   (0, 0, 1)),
+    ("10.0.0",  (10, 0, 0)),
+])
+def test_version_tuple_parses(s, expected):
+    assert fg._version_tuple(s) == expected
+
+
+def test_version_tuple_newer_beats_older():
+    assert fg._version_tuple("1.2.6") > fg._version_tuple("1.2.5")
+
+
+def test_version_tuple_major_beats_minor():
+    assert fg._version_tuple("2.0.0") > fg._version_tuple("1.99.99")
+
+
+def test_version_tuple_equal_versions():
+    assert fg._version_tuple("1.2.5") == fg._version_tuple("v1.2.5")
+
+
+# ---------------------------------------------------------------------------
+# check_for_update  (requests.get monkeypatched — no real network)
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+
+    def json(self):
+        return self._payload
+
+
+def _fake_release(tag, assets=None, html_url="https://github.com/example/release"):
+    return {
+        "tag_name": tag,
+        "html_url": html_url,
+        "assets": assets or [],
+    }
+
+
+def test_check_for_update_available(monkeypatch):
+    monkeypatch.setattr(fg.requests, "get",
+        lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0")))
+    result = fg.check_for_update("1.2.5")
+    assert result is not None
+    assert result["available"] is True
+    assert result["latest"] == "1.3.0"
+    assert result["current"] == "1.2.5"
+
+
+def test_check_for_update_up_to_date(monkeypatch):
+    monkeypatch.setattr(fg.requests, "get",
+        lambda *a, **kw: _FakeResponse(_fake_release("v1.2.5")))
+    result = fg.check_for_update("1.2.5")
+    assert result is not None
+    assert result["available"] is False
+
+
+def test_check_for_update_older_release_not_available(monkeypatch):
+    monkeypatch.setattr(fg.requests, "get",
+        lambda *a, **kw: _FakeResponse(_fake_release("v1.0.0")))
+    result = fg.check_for_update("1.2.5")
+    assert result["available"] is False
+
+
+def test_check_for_update_network_error_returns_error_dict(monkeypatch):
+    slept = []
+    def boom(*a, **kw):
+        raise fg.requests.exceptions.RequestException("no network")
+    monkeypatch.setattr(fg.requests, "get", boom)
+    monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
+    result = fg.check_for_update("1.2.5")
+    assert result is not None
+    assert result["available"] is False
+    assert result["error"] is not None
+    assert "network" in result["error"].lower()
+    assert slept == [1]  # retried once
+
+
+def test_check_for_update_picks_linux_asset(monkeypatch):
+    assets = [
+        {"name": "NonSteamScraper-linux", "browser_download_url": "https://dl/linux"},
+        {"name": "NonSteamScraper-win.zip", "browser_download_url": "https://dl/win.zip"},
+    ]
+    monkeypatch.setattr(fg.requests, "get",
+        lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
+    monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
+    result = fg.check_for_update("1.2.5")
+    assert result["url"] == "https://dl/linux"
+
+
+def test_check_for_update_picks_windows_asset(monkeypatch):
+    assets = [
+        {"name": "NonSteamScraper-linux", "browser_download_url": "https://dl/linux"},
+        {"name": "NonSteamScraper-win.zip", "browser_download_url": "https://dl/win.zip"},
+    ]
+    monkeypatch.setattr(fg.requests, "get",
+        lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
+    monkeypatch.setattr(fg.platform, "system", lambda: "Windows")
+    result = fg.check_for_update("1.2.5")
+    assert result["url"] == "https://dl/win.zip"
+
+
+def test_check_for_update_falls_back_to_html_url_when_no_matching_asset(monkeypatch):
+    assets = [{"name": "checksums.txt", "browser_download_url": "https://dl/chk"}]
+    release_page = "https://github.com/example/releases/tag/v1.3.0"
+    monkeypatch.setattr(fg.requests, "get",
+        lambda *a, **kw: _FakeResponse(
+            _fake_release("v1.3.0", assets=assets, html_url=release_page)))
+    monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
+    result = fg.check_for_update("1.2.5")
+    # "checksums.txt" has an extension ("txt") so bare-binary fallback doesn't
+    # match; the function should fall back to html_url.
+    assert result["url"] == release_page
+
+
+def test_check_for_update_linux_bare_binary_fallback(monkeypatch):
+    # A file with no extension is the bare binary fallback for Linux.
+    assets = [
+        {"name": "NonSteamScraper", "browser_download_url": "https://dl/bin"},
+        {"name": "checksums.txt", "browser_download_url": "https://dl/chk"},
+    ]
+    monkeypatch.setattr(fg.requests, "get",
+        lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
+    monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
+    result = fg.check_for_update("1.2.5")
+    assert result["url"] == "https://dl/bin"
+
+
+def test_check_for_update_empty_tag_returns_error_dict(monkeypatch):
+    monkeypatch.setattr(fg.requests, "get",
+        lambda *a, **kw: _FakeResponse({"tag_name": "", "html_url": "x", "assets": []}))
+    result = fg.check_for_update("1.2.5")
+    assert result is not None
+    assert result["available"] is False
+    assert result["error"] is not None
+
+
+def test_check_for_update_retry_on_request_exception_then_success(monkeypatch):
+    """First attempt raises RequestException; second attempt succeeds — retry works."""
+    calls = {"n": 0}
+    slept = []
+
+    def fake_get(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise fg.requests.exceptions.RequestException("blip")
+        return _FakeResponse(_fake_release("v1.3.0"))
+
+    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
+
+    result = fg.check_for_update("1.2.5")
+    assert result is not None
+    assert result["available"] is True
+    assert result["latest"] == "1.3.0"
+    assert calls["n"] == 2      # initial failure + one retry
+    assert slept == [1]         # 1 s inter-retry pause
+
+
+def test_check_for_update_exhausts_retries_returns_error_dict(monkeypatch):
+    """Both attempts raise RequestException — returns error dict (network reason)."""
+    slept = []
+
+    def fake_get(*a, **kw):
+        raise fg.requests.exceptions.RequestException("always down")
+
+    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
+
+    result = fg.check_for_update("1.2.5")
+    assert result is not None
+    assert result["available"] is False
+    assert result["error"] is not None
+    assert "network" in result["error"].lower()
+    assert slept == [1]     # slept once between the two attempts
+
+
+def test_check_for_update_non200_returns_error_immediately(monkeypatch):
+    """Non-200 (non-403) → error dict returned immediately; NOT retried."""
+    calls = {"n": 0}
+    slept = []
+
+    class _Non200:
+        status_code = 500
+
+    def fake_get(*a, **kw):
+        calls["n"] += 1
+        return _Non200()
+
+    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
+
+    result = fg.check_for_update("1.2.5")
+    assert result is not None
+    assert result["available"] is False
+    assert "500" in result["error"]
+    assert calls["n"] == 1   # called exactly once — no retry
+    assert slept == []        # no sleep because no retry
+
+
+def test_check_for_update_403_returns_rate_limit_error_no_retry(monkeypatch):
+    """403 → rate-limit error dict; NOT retried (conserves the 60/hr budget)."""
+    calls = {"n": 0}
+    slept = []
+
+    class _Forbidden:
+        status_code = 403
+
+    def fake_get(*a, **kw):
+        calls["n"] += 1
+        return _Forbidden()
+
+    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
+
+    result = fg.check_for_update("1.2.5")
+    assert result is not None
+    assert result["available"] is False
+    assert "rate limit" in result["error"].lower()
+    assert calls["n"] == 1   # called exactly once — no retry
+    assert slept == []        # no sleep because no retry
+
+
+def test_check_for_update_403_reports_minutes_until_reset(monkeypatch):
+    """A rate-limited 403 with X-RateLimit-Reset reports the minutes remaining."""
+    import re
+    import time as _time
+    calls = {"n": 0}
+    slept = []
+
+    class _Forbidden:
+        status_code = 403
+        # ~30 minutes from now (1799s rounds up to 30 via ceil)
+        headers = {"X-RateLimit-Reset": str(int(_time.time()) + 1799)}
+
+    def fake_get(*a, **kw):
+        calls["n"] += 1
+        return _Forbidden()
+
+    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
+
+    result = fg.check_for_update("1.2.5")
+    assert "rate limit" in result["error"].lower()
+    assert "try again in" in result["error"].lower()
+    # Parse the "~N min" figure out of the message and check it's ~30.
+    mins = int(re.search(r"~(\d+)\s*min", result["error"]).group(1))
+    assert 29 <= mins <= 31
+    assert calls["n"] == 1   # not retried
+    assert slept == []
+
+
+def test_check_for_update_403_without_reset_header_is_generic(monkeypatch):
+    """A 403 with no rate-limit headers falls back to the generic message."""
+    class _Forbidden:
+        status_code = 403
+        headers = {}
+
+    monkeypatch.setattr(fg.requests, "get", lambda *a, **kw: _Forbidden())
+    result = fg.check_for_update("1.2.5")
+    assert "rate limit" in result["error"].lower()
+    assert "try again later" in result["error"].lower()
+
+
+def test_check_for_update_sends_user_agent_header(monkeypatch):
+    """Verify the User-Agent header is present in every request."""
+    seen_headers = []
+
+    def fake_get(url, headers=None, **kw):
+        seen_headers.append(headers or {})
+        return _FakeResponse(_fake_release("v1.3.0"))
+
+    monkeypatch.setattr(fg.requests, "get", fake_get)
+    fg.check_for_update("1.2.5")
+    assert seen_headers, "requests.get was never called"
+    assert "User-Agent" in seen_headers[0]
+    assert seen_headers[0]["User-Agent"]   # non-empty
+
+
+def test_check_for_update_uses_10s_timeout(monkeypatch):
+    """Verify timeout=10 is passed to requests.get."""
+    seen_timeouts = []
+
+    def fake_get(url, timeout=None, **kw):
+        seen_timeouts.append(timeout)
+        return _FakeResponse(_fake_release("v1.3.0"))
+
+    monkeypatch.setattr(fg.requests, "get", fake_get)
+    fg.check_for_update("1.2.5")
+    assert seen_timeouts == [10]
+
+
+# ---------------------------------------------------------------------------
+# Consuming download_all_artwork results — applied_paths_from_results /
+# icon_write_from_results.
+#
+# REGRESSION GUARD: results mixes art-slot dicts with the icon_to_set TUPLE.
+# The old consumer did `for v in results.values(): v.get(...)`, which raised
+# AttributeError ('tuple' object has no attribute 'get') the moment a game had
+# an icon — and because run_fetch ran in a daemon thread with no try/except,
+# the UI hung on "Fetching…" forever. These tests pin the helper contracts AND
+# drive the real defer_icon=True assembly to prove the consumer survives it.
+# ---------------------------------------------------------------------------
+
+def _slot(applied_index, applied_path):
+    """Minimal art-slot dict shaped like download_all_artwork emits."""
+    return {
+        "applied_url": None, "applied_path": applied_path,
+        "applied_index": applied_index, "option_urls": [],
+        "option_meta": [], "thumb_paths": [], "current_index": 0,
+        "filename_base": "x",
+    }
+
+
+def test_applied_paths_from_results_collects_only_applied_slots():
+    results = {
+        "grids":      _slot(0, "/g/123p.png"),       # applied
+        "grids_wide": _slot(None, "/g/123.png"),     # not applied (animated)
+        "heroes":     None,                          # missing slot
+        "logos":      _slot(2, "/g/123_logo.png"),   # applied
+        "icons":      _slot(0, "/g/123_icon.png"),   # applied
+        "icon_to_set": (12345, "/g/12345_icon.png"), # the TUPLE hazard
+    }
+    paths = fg.applied_paths_from_results(results)
+    assert paths == ["/g/123p.png", "/g/123_logo.png", "/g/123_icon.png"]
+
+
+def test_applied_paths_from_results_does_not_raise_on_icon_tuple():
+    # The exact shape that crashed the old inline loop: an icon_to_set tuple
+    # alongside slots. Must NOT raise AttributeError.
+    results = {
+        "grids": _slot(0, "/g/p.png"),
+        "icon_to_set": (999, "/g/999_icon.png"),
+    }
+    assert fg.applied_paths_from_results(results) == ["/g/p.png"]
+
+
+def test_applied_paths_from_results_skips_applied_index_none_and_no_path():
+    results = {
+        "a": _slot(None, "/g/a.png"),  # index None -> skipped
+        "b": _slot(0, ""),             # no path    -> skipped
+        "icon_to_set": None,
+    }
+    assert fg.applied_paths_from_results(results) == []
+
+
+def test_icon_write_from_results_returns_tuple():
+    results = {"grids": _slot(0, "/g/p.png"),
+               "icon_to_set": (12345, "/g/12345_icon.png")}
+    assert fg.icon_write_from_results(results) == (12345, "/g/12345_icon.png")
+
+
+def test_icon_write_from_results_none_when_no_icon():
+    assert fg.icon_write_from_results({"grids": _slot(0, "/g/p.png"),
+                                       "icon_to_set": None}) is None
+
+
+def test_download_all_artwork_defer_icon_shape_consumable(tmp_path, monkeypatch):
+    """Drive the REAL defer_icon=True assembly with network mocked at the lowest
+    seam (get_artwork / download_artwork), then feed its return into the consumer
+    helpers. This is the regression test that would have caught the hang: a game
+    with an icon yields results['icon_to_set'] as a tuple, and the consumer must
+    not choke on it."""
+    monkeypatch.setattr(fg, "GRID_FOLDER", str(tmp_path / "grid"))
+    monkeypatch.setattr(fg, "CACHE_FOLDER", str(tmp_path / "cache"))
+    monkeypatch.setattr(fg, "BACKUP_FOLDER", str(tmp_path / "backup"))
+    os.makedirs(fg.GRID_FOLDER, exist_ok=True)
+
+    # Every slot returns one static PNG option so each slot auto-applies (incl.
+    # icons -> exercises the deferred icon_to_set tuple path).
+    def fake_get_artwork(sgdb_id, art_type, prefs=None, dimensions=None):
+        return [{"url": f"https://sgdb/{art_type}.png", "mime": "image/png"}]
+
+    written = []
+
+    def fake_download_artwork(url, save_path, register=True):
+        # Pretend the download succeeded; record the target so we can assert paths.
+        with open(save_path, "wb") as f:
+            f.write(b"x")
+        written.append(save_path)
+        return True
+
+    monkeypatch.setattr(fg, "get_artwork", fake_get_artwork)
+    monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
+    # set_shortcut_icon must NOT be called in defer mode; fail loudly if it is.
+    monkeypatch.setattr(fg, "set_shortcut_icon",
+                        lambda *a, **k: pytest.fail("icon write not deferred"))
+
+    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+
+    # 1) icon_to_set is present and is the deferred TUPLE, not a slot dict.
+    assert "icon_to_set" in results
+    assert results["icon_to_set"][0] == 12345
+    assert isinstance(results["icon_to_set"], tuple)
+
+    # 2) Feeding the real return into the consumer helpers must NOT raise.
+    paths = fg.applied_paths_from_results(results)         # would AttributeError pre-fix
+    assert all(isinstance(p, str) for p in paths)
+    # The auto-applied icon path is collected as an applied slot path.
+    icon_uid, icon_path = fg.icon_write_from_results(results)
+    assert icon_uid == 12345
+    assert icon_path in paths
+
+    # 3) Shape sanity: every art-slot key maps to a dict, icon_to_set to a tuple.
+    for slot in ("grids", "grids_wide", "heroes", "logos", "icons"):
+        assert isinstance(results[slot], dict)
+
+
+# ---------------------------------------------------------------------------
+# Pending (deferred) icon writes — defer & auto-apply
+# ---------------------------------------------------------------------------
+
+def test_save_pending_icons_merges_with_existing(tmp_path, monkeypatch):
+    pf = tmp_path / "pending"
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(pf))
+    fg.save_pending_icons({100: "/a/i100.png"})
+    fg.save_pending_icons({200: "/a/i200.png", 100: "/a/i100b.png"})  # 100 overwritten
+    loaded = fg.load_pending_icons()
+    assert loaded == {100: "/a/i100b.png", 200: "/a/i200.png"}
+
+
+def test_load_pending_icons_round_trips_int_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    fg.save_pending_icons({12345: "/a/i.png"})
+    loaded = fg.load_pending_icons()
+    assert loaded == {12345: "/a/i.png"}
+    assert all(isinstance(k, int) for k in loaded)  # keys back to int, not str
+
+
+def test_load_pending_icons_missing_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "nope"))
+    assert fg.load_pending_icons() == {}
+
+
+def test_has_and_clear_pending_icons_reflect_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    assert fg.has_pending_icons() is False
+    fg.save_pending_icons({100: "/a/i.png"})
+    assert fg.has_pending_icons() is True
+    fg.clear_pending_icons()
+    assert fg.has_pending_icons() is False
+    fg.clear_pending_icons()  # idempotent — must not raise when already gone
+
+
+def test_apply_pending_icons_skips_and_keeps_file_when_steam_running(tmp_path, monkeypatch):
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(tmp_path / "shortcuts.vdf"))
+    monkeypatch.setattr(fg, "is_steam_running", lambda: True)
+    called = []
+    monkeypatch.setattr(fg, "set_shortcut_icons", lambda m: called.append(m) or len(m))
+    fg.save_pending_icons({100: "/a/i.png"})
+    assert fg.apply_pending_icons() == 0
+    assert called == []                    # never wrote while Steam open
+    assert fg.has_pending_icons() is True  # pending file left intact for next time
+
+
+def test_apply_pending_icons_writes_and_clears_when_steam_closed(tmp_path, monkeypatch):
+    icon = tmp_path / "i.png"
+    _touch(icon)  # path must exist so it isn't filtered out
+    sc = tmp_path / "shortcuts.vdf"
+    sc.write_bytes(b"x")  # SHORTCUTS_PATH just needs to exist for the guard
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
+    monkeypatch.setattr(fg, "is_steam_running", lambda: False)
+    captured = {}
+    monkeypatch.setattr(fg, "set_shortcut_icons", lambda m: captured.update(m) or len(m))
+    fg.save_pending_icons({100: str(icon)})
+    assert fg.apply_pending_icons() == 1
+    assert captured == {100: str(icon)}    # right mapping passed through
+    assert fg.has_pending_icons() is False  # cleared after a real write attempt
+
+
+def test_apply_pending_icons_drops_missing_icon_paths(tmp_path, monkeypatch):
+    sc = tmp_path / "shortcuts.vdf"; sc.write_bytes(b"x")
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
+    monkeypatch.setattr(fg, "is_steam_running", lambda: False)
+    captured = []
+    monkeypatch.setattr(fg, "set_shortcut_icons", lambda m: captured.append(m) or len(m))
+    fg.save_pending_icons({100: str(tmp_path / "gone.png")})  # path does not exist
+    # Nothing valid to write -> set_shortcut_icons not called, but pending still cleared
+    # (those icon files are gone; nothing to retry).
+    assert fg.apply_pending_icons() == 0
+    assert captured == []
+    assert fg.has_pending_icons() is False

@@ -85,7 +85,7 @@ Art changes take effect after Steam restarts. The app will remind you.
 | Window persistence | Remembers window position between sessions |
 | Resizable | All windows resize and scroll |
 | Factory reset | One-click option to wipe all settings and start fresh |
-| Cross-platform | Linux (Steam Deck), Windows (macOS path support included, untested) |
+| Cross-platform | Linux (Steam Deck) and Windows are supported. macOS path code exists but is **untested and unsupported** — no macOS builds are shipped. |
 
 ---
 
@@ -207,7 +207,7 @@ binaries in a clean environment and attaches them to the matching GitHub Release
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.2.5** — main-window search/filter, faster (parallel) artwork fetching, and on-screen window clamping.
+See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.3.0** — multiple Steam accounts, in-app update check, and deferred auto-apply of icons (queued while Steam is open, applied when it closes).
 
 ---
 
