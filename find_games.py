@@ -1,4 +1,4 @@
-import os, re, sys, platform, shutil, subprocess, time, json, threading, vdf, requests
+import os, re, sys, platform, shutil, subprocess, time, json, threading, glob, vdf, requests
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote as _url_quote
 from datetime import datetime, timedelta, timezone
@@ -272,6 +272,12 @@ CACHE_FOLDER  = os.path.expanduser("~/.steamart_cache")
 BACKUP_FOLDER = os.path.expanduser("~/.steamart_backup")
 MANAGED_FILE  = os.path.expanduser("~/.steamart_managed")
 PREFS_FILE    = os.path.expanduser("~/.steamart_prefs")
+# Settings/state files cleared by full_reset (the UI-side app.py also references the
+# same paths). Defined as constants so full_reset is monkeypatch-testable.
+FIRSTRUN_FILE = os.path.expanduser("~/.steamart_firstrun")
+THEME_FILE    = os.path.expanduser("~/.steamart_theme")
+ACCENT_FILE   = os.path.expanduser("~/.steamart_accent")
+GEOMETRY_FILE = os.path.expanduser("~/.steamart_geometry")
 # Icons are only safe to write into shortcuts.vdf while Steam is CLOSED (Steam
 # rewrites the file on exit and would clobber our change). When a fetch finishes
 # with Steam open we therefore DEFER the icon writes to this file instead of
@@ -403,14 +409,22 @@ def clear_backup():
         if os.path.isfile(p): os.remove(p)
 
 def full_reset():
-    """Delete all app data — artwork, cache, prefs, API key, skip list, overrides."""
-    clear_managed_artwork()
+    """Reset the app to a first-launch state WITHOUT touching the user's fetched/
+    applied artwork. Clears SETTINGS only — API key, prefs, theme/accent, skip list,
+    name overrides, saved account, window geometry, first-run flag — plus the
+    regenerable thumbnail cache and any pending (un-applied) icon queue.
+
+    DELIBERATELY PRESERVES the applied grid artwork, the managed-file registry
+    (~/.steamart_managed), and the artwork backup so a settings reset can NEVER lose
+    the user's art collection. Removing art is the job of the separate
+    `clear_managed_artwork()` ("Clear All Artwork") action only — not this one."""
     clear_cache()
-    clear_backup()
-    for f in [APIKEY_FILE, PREFS_FILE, SKIP_FILE, NAMES_FILE, MANAGED_FILE,
-              os.path.expanduser("~/.steamart_firstrun"),
-              os.path.expanduser("~/.steamart_theme"),
-              os.path.expanduser("~/.steamart_geometry")]:
+    files = [APIKEY_FILE, PREFS_FILE, SKIP_FILE, NAMES_FILE, ACCOUNT_FILE,
+             FIRSTRUN_FILE, THEME_FILE, ACCENT_FILE, GEOMETRY_FILE]
+    # Pending-icon queues are per-account (namespaced), so sweep the whole family
+    # plus any legacy un-namespaced file. (Applied icons in shortcuts.vdf are kept.)
+    files += glob.glob(PENDING_ICONS_FILE + "*")
+    for f in files:
         try:
             if os.path.exists(f): os.remove(f)
         except Exception:
@@ -565,40 +579,67 @@ def set_shortcut_icon(unsigned_id, icon_path):
 
 # --- Pending (deferred) icon writes ----------------------------------------------
 # See PENDING_ICONS_FILE above for the design rationale (defer when Steam is open,
-# auto-apply when it closes — no dialog, no Steam restart by us). All five helpers
-# below are pure file I/O, tkinter-free, and never raise so the UI poll is safe.
+# auto-apply when it closes — no dialog, no Steam restart by us). All helpers below
+# are pure file I/O, tkinter-free, and never raise so the UI poll is safe.
+def _pending_path():
+    """Return the ACTIVE account's pending-icons path, migrating any legacy
+    un-namespaced file into it along the way (a deliberate one-time side effect, so
+    every caller observes a single consistent, migrated path).
+
+    WHY per-account: pending icons are written into the ACTIVE account's shortcuts.vdf,
+    so the queue MUST be namespaced per account. A single shared queue let account A's
+    icons be applied against account B's shortcuts.vdf (no matching appids) and then
+    cleared unconditionally — silently losing A's icons on any account switch. We read
+    the LIVE STEAM_USER_ID global so a set_active_user() switch is honored immediately,
+    and fall back to the un-namespaced base path when no account is resolved."""
+    base = PENDING_ICONS_FILE
+    if not STEAM_USER_ID:
+        return base
+    namespaced = f"{base}_{STEAM_USER_ID}"
+    # A v1.3.0 queue (un-namespaced) belongs to whichever account is active at upgrade
+    # time; move it under that account so it isn't orphaned forever. Best-effort.
+    try:
+        if os.path.exists(base) and not os.path.exists(namespaced):
+            os.replace(base, namespaced)
+    except Exception:
+        _debug("_pending_path migrate")
+    return namespaced
+
 def save_pending_icons(mapping):
-    """MERGE `mapping` ({unsigned_id:int -> icon_path:str}) into any existing pending
-    file and write it back as JSON (keys stored as strings). Never raises."""
+    """MERGE `mapping` ({unsigned_id:int -> icon_path:str}) into the active account's
+    pending file and write it back as JSON (keys stored as strings). Never raises."""
     if not mapping: return
     try:
         merged = {str(k): v for k, v in load_pending_icons().items()}
         merged.update({str(k): v for k, v in mapping.items()})
-        with open(PENDING_ICONS_FILE, "w", encoding="utf-8") as f:
+        with open(_pending_path(), "w", encoding="utf-8") as f:
             json.dump(merged, f)
     except Exception as e:
         print(f"Failed to save pending icons: {e}")
 
 def load_pending_icons():
-    """Return {int_uid: path} from the pending file. {} if missing/unparseable. Never raises."""
+    """Return {int_uid: path} from the active account's pending file. {} if
+    missing/unparseable. Never raises."""
     try:
-        with open(PENDING_ICONS_FILE, "r", encoding="utf-8") as f:
+        with open(_pending_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
         return {int(k): v for k, v in data.items()}
     except Exception:
         return {}
 
 def clear_pending_icons():
-    """Remove the pending-icons file if present. Never raises."""
+    """Remove the active account's pending-icons file if present. Never raises."""
     try:
-        if os.path.exists(PENDING_ICONS_FILE):
-            os.remove(PENDING_ICONS_FILE)
+        path = _pending_path()
+        if os.path.exists(path):
+            os.remove(path)
     except Exception as e:
         print(f"Failed to clear pending icons: {e}")
 
 def has_pending_icons():
-    """Cheap existence check so the UI poll can early-out without reading/parsing."""
-    return os.path.exists(PENDING_ICONS_FILE)
+    """Cheap existence check (active account) so the UI poll can early-out without
+    reading/parsing."""
+    return os.path.exists(_pending_path())
 
 def apply_pending_icons():
     """Safe flush of deferred icon writes. Returns the count written (0 if it did nothing).
@@ -787,6 +828,43 @@ def clear_slot_files(save_path, existing_files=None):
         if f.startswith(prefix):
             try: os.remove(os.path.join(folder, f))
             except OSError: pass
+
+def row_thumbnail_path(grid_folder, app_id):
+    """Return the best representative art file for `app_id` to show as a list-row
+    thumbnail, or None if the game has no cover art on disk.
+
+    Slot preference (Steam keys art off the filename base):
+      1. portrait cover  "{app_id}p.<ext>"   (preferred — rows are portrait-shaped)
+      2. wide grid       "{app_id}.<ext>"     (fallback)
+    Hero ("{app_id}_hero.*"), logo ("{app_id}_logo.*") and icon ("{app_id}_icon.*")
+    slots are intentionally ignored — they don't read well at row size.
+
+    Pure / tkinter-free so it can be unit-tested headless. Returns an absolute path
+    using whichever extension is present (png/jpg/webp/…); if several extensions
+    share a slot, the lexicographically-first is returned for determinism."""
+    try:
+        names = os.listdir(grid_folder)
+    except OSError:
+        return None
+
+    portrait_prefix = f"{app_id}p."
+    wide_prefix = f"{app_id}."
+
+    portrait, wide = [], []
+    for name in names:
+        if name.startswith(portrait_prefix):
+            portrait.append(name)
+        elif name.startswith(wide_prefix):
+            # Exclude hero/logo/icon slots — their base is "{app_id}_…", which does
+            # NOT start with "{app_id}." so they're already excluded here. This branch
+            # only catches the true wide slot "{app_id}.<ext>".
+            wide.append(name)
+
+    chosen = sorted(portrait)[0] if portrait else (sorted(wide)[0] if wide else None)
+    if chosen is None:
+        return None
+    return os.path.join(grid_folder, chosen)
+
 
 def is_animated_image(img):
     """True if an SGDB image record refers to animated artwork. SGDB serves animated

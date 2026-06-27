@@ -81,31 +81,38 @@ Art changes take effect after Steam restarts. The app will remind you.
 | Multi-account | Detects multiple Steam accounts and lets you switch between them |
 | Refresh | Reload the library mid-session after adding new shortcuts |
 | Cache | Thumbnails cached locally; auto-cleared after 30 days |
-| Themes | Dark mode (default) and light mode |
+| Themes | Dark (default) and light mode, plus four accent colors (blue / green / purple / teal) |
 | Window persistence | Remembers window position between sessions |
 | Resizable | All windows resize and scroll |
-| Factory reset | One-click option to wipe all settings and start fresh |
+| Factory reset | One-click reset of settings to first-launch state (your fetched artwork is preserved) |
 | Cross-platform | Linux (Steam Deck) and Windows are supported. macOS path code exists but is **untested and unsupported** — no macOS builds are shipped. |
 
 ---
 
 ## Art Style Preferences
 
-Click the 🎨 button to open Art Style Preferences. Each option has three states:
+Click the 🎨 button to open Art Style Preferences. Every filter — both content and visual style — uses the same three states:
 
 | State | Meaning |
 |---|---|
-| **Always** | Only fetch artwork matching this filter |
-| **OK** | Include this type if other results are scarce |
-| **Never** | Exclude this type entirely |
+| **Prefer** | Try this first |
+| **Allow** | Include normally (the neutral default) |
+| **Exclude** | Never use this |
 
-Available filters:
+You won't get zero results: "Prefer" is a soft preference — the app tries your preferred content/styles first and **automatically broadens** the search if too few matches are found (only "Exclude" is a hard filter). Hover any row for a short explanation.
+
+**Content filters:**
 
 - **Animated** — animated artwork (note: animated covers are not auto-applied; pick one in the results screen and click **Apply this one** to convert it to APNG — the only animated format Steam renders — with a progress popup. Files are large and conversion takes a while.)
 - **NSFW** — explicit adult content (confirmation required on first enable per session)
 - **Humor / Memes** — meme-style artwork
+
+**Style filters (per art type):**
+
 - **Cover:** No logo overlay, Alternate style, Blurred, Material design
 - **Hero:** Alternate art, Blurred
+- **Logo:** Official, White style, Black style
+- **Icon:** Official
 
 ---
 
@@ -120,7 +127,7 @@ Available filters:
 | Cache | View cache size and clear thumbnails |
 | Steam | See if Steam is running; restart it from the app |
 | Clear All Artwork | Remove only art added by this app — manual art is untouched |
-| Factory Reset | Wipe everything (key, art, prefs, cache) and restart as first launch |
+| Factory Reset | Reset settings to first-launch state (key, prefs, cache). Your fetched artwork is kept — use **Clear All Artwork** for that |
 
 ---
 
@@ -207,7 +214,7 @@ binaries in a clean environment and attaches them to the matching GitHub Release
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.3.0** — multiple Steam accounts, in-app update check, and deferred auto-apply of icons (queued while Steam is open, applied when it closes).
+See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.4.0** — a visual redesign: accent color themes, cover thumbnails in the game list, a prominent Fetch button, a collapsible activity log, first-run onboarding, and a Factory Reset that now preserves your artwork.
 
 ---
 

@@ -222,6 +222,48 @@ def test_clear_slot_files_missing_folder_no_error(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# row_thumbnail_path  (best row-cover selection by slot)
+# ---------------------------------------------------------------------------
+
+def test_row_thumbnail_prefers_portrait_over_wide(tmp_path):
+    _touch(tmp_path / "123p.png")   # portrait cover (preferred)
+    _touch(tmp_path / "123.jpg")    # wide grid
+    _touch(tmp_path / "123_hero.png")
+    assert fg.row_thumbnail_path(str(tmp_path), 123) == str(tmp_path / "123p.png")
+
+
+def test_row_thumbnail_falls_back_to_wide(tmp_path):
+    _touch(tmp_path / "123.webp")   # only the wide slot exists
+    _touch(tmp_path / "123_hero.png")
+    _touch(tmp_path / "123_logo.png")
+    assert fg.row_thumbnail_path(str(tmp_path), 123) == str(tmp_path / "123.webp")
+
+
+def test_row_thumbnail_ignores_hero_logo_icon_only(tmp_path):
+    # No portrait or wide cover — hero/logo/icon must NOT be chosen.
+    _touch(tmp_path / "123_hero.png")
+    _touch(tmp_path / "123_logo.png")
+    _touch(tmp_path / "123_icon.png")
+    assert fg.row_thumbnail_path(str(tmp_path), 123) is None
+
+
+def test_row_thumbnail_none_when_no_art(tmp_path):
+    _touch(tmp_path / "999p.png")   # different appid
+    assert fg.row_thumbnail_path(str(tmp_path), 123) is None
+
+
+def test_row_thumbnail_slot_isolation_no_prefix_bleed(tmp_path):
+    # "1234.png" must not be mistaken for app_id 123's wide slot.
+    _touch(tmp_path / "1234.png")
+    _touch(tmp_path / "1230.png")
+    assert fg.row_thumbnail_path(str(tmp_path), 123) is None
+
+
+def test_row_thumbnail_missing_folder_returns_none(tmp_path):
+    assert fg.row_thumbnail_path(str(tmp_path / "no_such_dir"), 123) is None
+
+
+# ---------------------------------------------------------------------------
 # Skip-list round-trip (with de-dup guard)
 # ---------------------------------------------------------------------------
 
@@ -1367,3 +1409,101 @@ def test_apply_pending_icons_drops_missing_icon_paths(tmp_path, monkeypatch):
     assert fg.apply_pending_icons() == 0
     assert captured == []
     assert fg.has_pending_icons() is False
+
+
+def test_pending_icons_are_namespaced_per_account(tmp_path, monkeypatch):
+    """Queues under different accounts must not see or overwrite each other — the
+    file path is derived from the live STEAM_USER_ID."""
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    fg.save_pending_icons({100: "/a/iA.png"})
+
+    # Switch to account B: B's queue is independent and starts empty.
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "BBB")
+    assert fg.load_pending_icons() == {}
+    assert fg.has_pending_icons() is False
+    fg.save_pending_icons({200: "/b/iB.png"})
+
+    # Back to A: its original queue is untouched by anything B did.
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    assert fg.load_pending_icons() == {100: "/a/iA.png"}
+    # And the two queues live in distinct files.
+    assert (tmp_path / "pending_AAA").exists()
+    assert (tmp_path / "pending_BBB").exists()
+
+
+def test_apply_pending_icons_does_not_clear_other_accounts_queue(tmp_path, monkeypatch):
+    """THE regression: applying while a DIFFERENT account is active must never touch
+    (let alone clear) another account's queued icons. Previously the queue was
+    account-agnostic, so applying under B wiped A's icons forever."""
+    sc = tmp_path / "shortcuts.vdf"; sc.write_bytes(b"x")
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
+    monkeypatch.setattr(fg, "is_steam_running", lambda: False)
+    monkeypatch.setattr(fg, "set_shortcut_icons", lambda m: len(m))
+
+    # Account A queues an icon.
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    fg.save_pending_icons({100: "/a/iA.png"})
+
+    # Account B is active when the poll fires with Steam closed.
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "BBB")
+    assert fg.apply_pending_icons() == 0      # B has nothing to write
+
+    # A's queue must still be intact (the old code cleared it here).
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    assert fg.load_pending_icons() == {100: "/a/iA.png"}
+
+
+def test_pending_icons_legacy_file_migrates_to_active_account(tmp_path, monkeypatch):
+    """A v1.3.0 un-namespaced queue is adopted by the account active at upgrade time,
+    not orphaned."""
+    base = tmp_path / "pending"
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(base))
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    # Simulate a leftover legacy (un-namespaced) queue from v1.3.0.
+    base.write_text('{"100": "/a/legacy.png"}', encoding="utf-8")
+
+    assert fg.load_pending_icons() == {100: "/a/legacy.png"}
+    assert (tmp_path / "pending_AAA").exists()  # moved under the active account
+    assert not base.exists()                    # legacy file consumed
+
+
+def test_full_reset_preserves_art_but_clears_settings(tmp_path, monkeypatch):
+    """Factory reset clears SETTINGS but must NEVER delete the user's fetched art:
+    clear_managed_artwork/clear_backup are not called, the managed registry survives,
+    and only the regenerable thumbnail cache + settings/pending files are removed."""
+    calls = []
+    monkeypatch.setattr(fg, "clear_cache", lambda: calls.append("cache"))
+    monkeypatch.setattr(fg, "clear_managed_artwork", lambda: calls.append("art"))
+    monkeypatch.setattr(fg, "clear_backup", lambda: calls.append("backup"))
+
+    # Settings/state files — these SHOULD be removed.
+    settings = {}
+    for name in ("APIKEY_FILE", "PREFS_FILE", "SKIP_FILE", "NAMES_FILE", "ACCOUNT_FILE",
+                 "FIRSTRUN_FILE", "THEME_FILE", "ACCENT_FILE", "GEOMETRY_FILE"):
+        p = tmp_path / name
+        p.write_text("x", encoding="utf-8")
+        monkeypatch.setattr(fg, name, str(p))
+        settings[name] = p
+
+    # Managed-file registry — must be PRESERVED so the art (and 'Clear All Artwork') survive.
+    managed = tmp_path / "managed"
+    managed.write_text("123p.png\n", encoding="utf-8")
+    monkeypatch.setattr(fg, "MANAGED_FILE", str(managed))
+
+    # A pending (un-applied) icon queue — should be swept.
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    fg.save_pending_icons({100: "/a/i.png"})
+
+    fg.full_reset()
+
+    assert "art" not in calls               # never deletes applied artwork
+    assert "backup" not in calls            # backup (art history) preserved
+    assert "cache" in calls                 # regenerable cache cleared
+    assert managed.exists()                 # managed registry preserved
+    for name, p in settings.items():
+        assert not p.exists(), f"{name} should have been cleared"
+    assert fg.has_pending_icons() is False  # pending queue swept

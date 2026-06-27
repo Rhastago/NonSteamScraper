@@ -4,6 +4,65 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.4.0] — 2026-06-27
+
+A broad visual redesign plus a few correctness fixes.
+
+### Added
+- **Accent color themes.** Settings → Appearance now offers four accent colors
+  (Steam Blue, Vibrant Green, Purple, Teal) on top of light/dark mode. The accent
+  threads through the whole UI — the primary buttons, the selected game row, the
+  progress bar, a title underline, section headings, focus rings, and links — so
+  the app feels themed rather than flat grey. Your choice persists between sessions.
+- **Cover thumbnails in the game list.** Each game row now shows a thumbnail of its
+  current cover art (or a clean "needs art" placeholder), decoded off the UI thread
+  and cached so scrolling and live-search stay smooth. Each game's row is wrapped
+  in a slim accent border.
+- **Sort the game list.** A sort control next to the search box orders games by
+  Name, Date added, Missing artwork, or Recently fetched artwork — ascending or
+  descending — and works together with the live search filter.
+- **First-run onboarding.** When no API key is set, a banner guides you straight to
+  Settings to add one; it disappears the moment a valid key is saved.
+
+### Changed
+- **Prominent primary action.** The "Fetch Missing Artwork" button — and the key
+  call-to-action in every other window — is now an accent-colored button instead of
+  another grey one.
+- **Cleaner typography.** Game names, search, and dialog text moved off the
+  monospace font to a proper UI font; the activity log and API-key field stay
+  monospace where it helps.
+- **Activity log tucked into a "Details" drawer.** It's collapsed by default (with a
+  dot when there's new activity) so the main window stays uncluttered; the status bar
+  and progress bar carry the everyday feedback. The window auto-sizes when the drawer
+  opens or closes so nothing is clipped.
+- **Clearer Art Style Preferences.** The three states were relabeled from
+  Always/OK/Never to **Prefer / Allow / Exclude** across every filter (content and
+  style alike) — matching how the fetch actually works (Prefer is a soft preference
+  that broadens automatically; only Exclude is a hard filter). The neutral "Allow"
+  default is no longer colored like a warning, and every row has a hover tooltip
+  explaining it.
+- **The main window now opens centered** on the screen each launch instead of
+  reopening at its last position.
+- **Bigger, touch-friendlier row buttons** (Re-fetch / Search / Reset Skip) for the
+  Steam Deck.
+- The "Reloading library…" status now reports when it's done.
+
+### Fixed
+- **Factory Reset no longer deletes your artwork.** "Reset App to Factory Defaults"
+  now clears only settings and the regenerable cache — your fetched/applied art and
+  the managed-file registry are preserved. Use "Clear All Artwork" if you also want
+  to remove art. (The confirmation dialog and docs were corrected to match.)
+- **Per-account pending icons.** Icons queued while Steam is open are now namespaced
+  per Steam account, so switching accounts can no longer apply or discard another
+  account's queued icons (a data-loss bug on multi-account setups). A legacy queue is
+  migrated to the active account on upgrade.
+- The two "Restart Steam" buttons no longer freeze the UI for a few seconds (the
+  restart runs off the UI thread).
+
+### Development
+- Expanded the test suite to 141 tests (added coverage for the per-account icon
+  queue, factory-reset art preservation, and cover-thumbnail path selection).
+
 ## [1.3.0] — 2026-06-27
 
 ### Added
