@@ -214,7 +214,7 @@ binaries in a clean environment and attaches them to the matching GitHub Release
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.4.2** — bug-fix release: icons applied while Steam is open now correctly read "Queued (close Steam)" until they're really written, failed swaps report instead of failing silently, artwork cycling is instant on revisit, and Windows popups no longer flash to their final size on open.
+See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.4.3** — bug-fix release: in-app links (results-screen thumbnails, the API-key link, the Releases link) now reliably open your browser from the packaged Steam Deck / Linux build.
 
 ---
 

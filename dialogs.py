@@ -9,11 +9,10 @@ thin wrapper method per function so existing `self.open_*()` call sites are unch
 import os
 import glob
 import threading
-import webbrowser
 import tkinter as tk
 from tkinter import messagebox
 
-from appcommon import VERSION
+from appcommon import VERSION, open_url
 from theming import FONT_UI
 import find_games as fg
 from find_games import (
@@ -108,7 +107,7 @@ def show_info(app):
                     font=(FONT_UI, 10, "underline"), fg=t["link"],
                     bg=t["bg"], cursor="hand2", anchor="w")
     link.pack(fill="x")
-    link.bind("<Button-1>", lambda e: webbrowser.open(
+    link.bind("<Button-1>", lambda e: open_url(
         "https://www.steamgriddb.com/profile/preferences/api"))
     section("2. Add your games to Steam", [
         "Add your non-Steam games as shortcuts in Steam first,",

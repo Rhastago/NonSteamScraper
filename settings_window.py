@@ -5,11 +5,10 @@ wrapper so `self.open_settings()` call sites are unchanged. All shared helpers
 (themed widgets, work-area fit, modal stack, logging) are reached through `app`."""
 
 import threading
-import webbrowser
 import tkinter as tk
 from tkinter import messagebox
 
-from appcommon import VERSION
+from appcommon import VERSION, open_url
 from theming import ACCENTS, PAD_XS, PAD_S, FONT_UI, FONT_MONO
 import find_games as fg
 from find_games import (
@@ -58,7 +57,7 @@ def open_settings(app):
     link = tk.Label(link_frame, text="SteamGridDB", font=(FONT_UI, 9, "underline"),
                     fg=t["link"], bg=t["bg"], cursor="hand2")
     link.pack(side="left")
-    link.bind("<Button-1>", lambda e: webbrowser.open(
+    link.bind("<Button-1>", lambda e: open_url(
         "https://www.steamgriddb.com/profile/preferences/api"))
     key_row = tk.Frame(api_frame, bg=t["bg"])
     key_row.pack(fill="x", pady=4)
@@ -267,7 +266,7 @@ def open_settings(app):
                         app._btn(
                             download_btn_holder,
                             f"Download v{result['latest']}",
-                            lambda url=result["url"]: webbrowser.open(url),
+                            lambda url=result["url"]: open_url(url),
                             font=(FONT_UI, 9),
                         ).pack(side="left")
                     else:
@@ -289,7 +288,7 @@ def open_settings(app):
                              font=(FONT_UI, 9, "underline"),
                              fg=t["link"], bg=t["bg"], cursor="hand2")
     releases_link.pack(anchor="w", pady=(4, 0))
-    releases_link.bind("<Button-1>", lambda e: webbrowser.open(fg.RELEASES_URL))
+    releases_link.bind("<Button-1>", lambda e: open_url(fg.RELEASES_URL))
 
     # Steam — status + restart. Kept directly above Steam Account so the two
     # Steam-related sections sit together at the bottom (Status above Account).

@@ -11,11 +11,11 @@ so the main window's pending-icon poll (fetch_mixin) stays in sync."""
 
 import time
 import threading
-import webbrowser
 import tkinter as tk
 from tkinter import ttk
 import requests
 
+from appcommon import open_url
 from theming import FONT_UI
 import find_games as fg
 from find_games import register_managed_file, set_shortcut_icon, clear_slot_files, download_apng
@@ -595,7 +595,7 @@ def build_game_result_section(app, parent, game_result):
 
         # Clicking the image or badge opens the full-size version in the browser
         for w in (img_frame, img_label, badge_label):
-            w.bind("<Button-1>", lambda e, s=state: webbrowser.open(s["option_urls"][s["index"]]))
+            w.bind("<Button-1>", lambda e, s=state: open_url(s["option_urls"][s["index"]]))
             w.config(cursor="hand2")
 
         def make_callbacks(s, il, cl, ab):

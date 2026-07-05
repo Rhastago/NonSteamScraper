@@ -4,6 +4,11 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.4.3] — 2026-06-28
+
+### Fixed
+- **In-app links now open your browser on the Steam Deck / Linux build.** Clicking a results-screen thumbnail to view the full-size image — as well as the SteamGridDB API-key link and the Releases link — did nothing in the packaged Linux binary: the bundled runtime's library path leaked into the launched browser and prevented it from starting. All in-app links now open reliably from the packaged build (via a platform-aware opener that restores the pre-bundle environment).
+
 ## [1.4.2] — 2026-06-28
 
 A round of bug fixes from a code-review pass, an icon-status consistency fix, and a Windows popup-flash fix.
