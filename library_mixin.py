@@ -4,7 +4,6 @@ and rendering / sorting / searching / row-building (including cover thumbnails a
 the Hidden section) plus per-game skip/reset/refetch. Mixed into SteamArtApp."""
 
 import os
-import glob
 import tkinter as tk
 from tkinter import ttk
 
@@ -208,7 +207,8 @@ class LibraryMixin:
                                        font=(FONT_UI, 13, "bold"), padx=PAD_M, pady=PAD_S)
         self.fetch_button.pack(pady=PAD_M)
 
-        # Undo button — enabled only after a successful fetch
+        # Undo button — enabled whenever a restore point exists on disk; its state
+        # is derived in _refresh_undo_button (called from load_games), never here.
         self.undo_button = self._btn(self.window, "Undo Last Fetch",
                                      self.undo_fetch, font=(FONT_UI, 10))
         self._iconify(self.undo_button, "undo", self.ICON_ACTION, compound="left")
@@ -298,6 +298,17 @@ class LibraryMixin:
             )
 
         self._render_list()
+        self._refresh_undo_button()
+
+
+    def _refresh_undo_button(self):
+        """The ONE place Undo's enabled state is derived: from the on-disk restore
+        point. has_restore_point() returns false when the manifest's grid_folder
+        no longer matches the live fg.GRID_FOLDER, so an account switch greys the
+        button out. Called from load_games(), which runs at startup, after a
+        fetch, after a Re-fetch, after an Undo and on account switch."""
+        self.undo_button.config(
+            state="normal" if fg.has_restore_point() else "disabled")
 
 
     def _render_list(self):
@@ -612,8 +623,22 @@ class LibraryMixin:
     def refetch_game(self, game):
         """Clear existing artwork and skip data so a game is fully reprocessed."""
         self._remove_from_skip(game["app_id"])
+        # Snapshot the current art FIRST — this delete loop is exactly the
+        # destructive action Undo exists to restore. pending=True: a Re-fetch,
+        # outside any fetch run.
+        fg.snapshot_for_restore(game["app_id"], pending=True)
         # fg.GRID_FOLDER (not the by-value import) so account switches are honored.
-        for f in glob.glob(os.path.join(fg.GRID_FOLDER, f"{game['app_id']}*")):
-            os.remove(f)
-        self.log(f"Reset artwork for: {game['name']} — will re-fetch on next run", icon="refresh")
+        # Leading-digit-run matching, NEVER glob(f"{app_id}*"): uid 12345 must not
+        # delete a neighbouring game's 123456p.png (see find_games._files_matching_id).
+        try:
+            fnames = os.listdir(fg.GRID_FOLDER)
+        except OSError:
+            fnames = []
+        for fname in fg._files_matching_id(fnames, game["app_id"]):
+            try:
+                os.remove(os.path.join(fg.GRID_FOLDER, fname))
+            except OSError:
+                pass
+        self.log(f"Artwork saved for: {game['name']} — will re-fetch on next run; "
+                 "use Undo to restore the previous art", icon="refresh")
         self.load_games()

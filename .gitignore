@@ -7,3 +7,5 @@ __pycache__/
 *.spec
 .env
 .claude/
+.plan/
+.plan-archives/

@@ -10,7 +10,7 @@ import sys
 import tkinter as tk
 from PIL import Image, ImageTk
 
-from appcommon import resource_path
+from appcommon import resource_path, relaunch_env
 from theming import ACCENTS, FONT_UI, save_theme, save_accent
 
 class UIMixin:
@@ -164,8 +164,9 @@ class UIMixin:
             # env vars. If the relaunched process inherits them it reuses the OLD temp
             # dir, which the exiting process then deletes — breaking compiled imports
             # like PIL._imaging on restart. Strip them so the new process re-extracts.
-            env = {k: v for k, v in os.environ.items()
-                   if not (k.startswith("_MEI") or k.startswith("_PYI"))}
+            # relaunch_env also undoes the bootloader's library-path injection, so the
+            # child presents the fresh-launch environment (SPEC.md S0/S1).
+            env = relaunch_env(os.environ)
             os.execve(sys.executable, [sys.executable], env)
         else:
             os.execv(sys.executable, [sys.executable] + sys.argv)

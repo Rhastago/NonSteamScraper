@@ -6,8 +6,8 @@ flush/poll that auto-applies queued icons once Steam closes. Mixed into SteamArt
 Threading: run_fetch and friends do their work on daemon threads and marshal every
 widget update back onto the Tk thread via self._ui / self.window.after."""
 
-import os
 import threading
+import time
 from tkinter import messagebox
 
 from theming import PAD_XS, PAD_L
@@ -31,23 +31,36 @@ class FetchMixin:
 
 
     def undo_fetch(self):
-        """Delete the files downloaded during the last fetch, reverting those games
-        back to needing artwork. Works even on a first-time fetch with no prior state."""
-        if not self.last_fetch_files:
+        """Restore the artwork that was present before the last fetch or Re-fetch,
+        delegating the work to find_games.undo_restore_point (deletion, restore,
+        icon writes). Runs on the Tk thread — it is a button command — so the
+        confirmation messagebox is safe here. Undo is destructive and cannot itself
+        be undone, and its state now comes from disk, so when the restore point was
+        inherited from a previous session and no fetch has run since, confirm first."""
+        if not fg.has_restore_point():
             self.log("Nothing to undo.", icon="warning")
             return
-        removed = 0
-        for path in self.last_fetch_files:
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-                    removed += 1
-            except Exception:
-                pass
-        self.last_fetch_files = []
-        self.undo_button.config(state="disabled")
-        self.log(f"Undo complete — removed {removed} file(s). Restart Steam to see changes.",
-                 icon="undo")
+        if self._restore_point_inherited and not self._fetched_this_session:
+            # Count comes from the live manifest (fg. reads rebound globals).
+            manifest = fg._load_restore_manifest()
+            count = len(manifest.get("entries", {}))
+            if not messagebox.askyesno(
+                "Undo Last Fetch",
+                f"Undo will restore the artwork for {count} game(s) from a "
+                "restore point saved by a previous session.\n\n"
+                "Undo is destructive and cannot itself be undone.\n\n"
+                "Are you sure?",
+                parent=self.window
+            ):
+                return
+        summary = fg.undo_restore_point()
+        if summary["games"] == 0:
+            self.log("Nothing to undo.", icon="warning")
+            return
+        queued = " Icons are queued and will apply when Steam closes." if summary["queued"] else ""
+        self.log(f"Undo complete — restored {summary['files']} file(s) for "
+                 f"{summary['games']} game(s), removed {summary['removed']} file(s)."
+                 f"{queued}", icon="undo")
         self.load_games()
 
 
@@ -156,7 +169,6 @@ class FetchMixin:
 
     def _run_fetch_body(self):
         """Background thread: search and download artwork for all games missing it."""
-        self.last_fetch_files = []
         prefs = load_prefs()
         needs_art = [g for g in self.games if not g["has_art"]]
         if not needs_art:
@@ -167,6 +179,9 @@ class FetchMixin:
             self._ui(lambda: self._refit_window_height())
             return
 
+        # AFTER the early return: a no-op fetch must not be able to destroy the
+        # previous restore point (it would drop every sealed entry and its copies).
+        fg.begin_restore_run()
         total = len(needs_art)
         fetch_results = []
         # Icon writes to shortcuts.vdf are deferred during the loop and batched into a
@@ -175,6 +190,7 @@ class FetchMixin:
         icons_to_set = {}
 
         for i, game in enumerate(needs_art):
+            start = time.monotonic()
             name   = game["name"]
             app_id = game["app_id"]
             short  = name[:32]
@@ -206,7 +222,8 @@ class FetchMixin:
                     progress_cb=make_cb(short, game_start, game_end, i, total),
                     defer_icon=True,
                 )
-                self.log(f"Artwork saved for {name}", icon="applied")
+                elapsed = time.monotonic() - start
+                self.log(f"Artwork saved for {name} ({elapsed:.1f}s)", icon="applied")
                 # Collect the deferred icon write (if any) for one batched apply later.
                 # NOTE: use the find_games helpers — results mixes slot dicts with the
                 # icon_to_set TUPLE, so a naive values()-loop with .get() crashes here
@@ -216,10 +233,15 @@ class FetchMixin:
                     uid, icon_path = icon_pair
                     icons_to_set[uid] = icon_path
                 fetch_results.append({"name": name, "app_id": app_id, "results": results})
-                self.last_fetch_files.extend(fg.applied_paths_from_results(results))
             else:
                 self.log("Not found on SteamGridDB — skipping permanently", icon="warning")
                 add_to_skip_list(app_id)
+
+        # End of the run: seal every entry so the operator's decision about this
+        # run's art is recorded, and mark the session as having fetched (this
+        # scopes undo_fetch's inherited-restore-point confirmation).
+        fg.seal_restore_point()
+        self._fetched_this_session = True
 
         # --- Batched icon write -------------------------------------------------
         # Only ICON writes (shortcuts.vdf) care about Steam being open; grid/hero/logo
@@ -242,7 +264,6 @@ class FetchMixin:
 
         if fetch_results:
             self.log("\nDone! Opening results screen...", icon="applied")
-            self._ui(lambda: self.undo_button.config(state="normal"))
         else:
             self.log("\nDone! No new artwork was fetched.", icon="applied")
 

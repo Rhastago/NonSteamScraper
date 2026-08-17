@@ -4,6 +4,47 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.5.0] — 2026-08-18
+
+### Fixed
+- **In-app links work again after you change the theme.** Changing the theme or accent
+  colour restarts the app, and after that restart nothing clickable worked — results
+  thumbnails wouldn't open the full-size image, and neither would the SteamGridDB API-key
+  link or the Releases link. The restarted app was passing the *previous* run's bundled
+  library path to your browser, which is the same thing that broke links before v1.4.3;
+  the restart now hands the browser exactly what a fresh launch does.
+
+### Changed
+- **Undo Last Fetch now restores your previous artwork, not just deletes the new.**
+  Before, undoing a fetch you didn't like left the game with no art at all — the art you
+  had was already gone. NonSteamScraper now saves a copy of a game's current artwork
+  before anything replaces it, including when you press **Re-fetch**, and Undo puts it
+  back exactly as it was — the images, and the icon in Steam's shortcuts file. Undoing a
+  fetch for a game that had no art still simply removes what the fetch added.
+- **Undo survives closing the app.** Its availability now comes from the saved restore
+  point rather than being forgotten on exit, so a theme change (which restarts the app) no
+  longer strands artwork you could have recovered. When the restore point is left over
+  from an earlier session, Undo asks for confirmation first — it can't itself be undone.
+- **Settings → Storage** shows how much space the saved Undo data uses, with a button to
+  clear it, alongside the older backup folder (which had no way to be cleared from inside
+  the app until now). Clearing only removes the app's own saved copies; artwork applied in
+  Steam is untouched. Both figures normally read close to zero — a copy is only kept when
+  something is about to replace artwork you already have, which in practice means
+  **Re-fetch**.
+- **The log says when SteamGridDB is throttling you.** A rate-limited fetch used to be
+  indistinguishable from a slow one — it now reports each wait, and every game's line
+  carries how long it took, so "the fetch was slow" becomes something you can point at.
+- **Fewer connections per fetch.** All artwork requests now share one pooled HTTP
+  connection instead of opening a new one for each of the ~25 requests a game can make.
+
+### Fixed (data safety)
+- **Re-fetch could delete a different game's artwork.** Re-fetching a game whose ID is a
+  prefix of another's (for example `12345` and `123456`) deleted the longer-ID game's art
+  too, with no way to get it back. Both Re-fetch and Undo now match IDs exactly.
+- A restored "this game has no icon" is no longer silently dropped when Steam is running.
+- Undo refuses to run after you switch Steam accounts, rather than restoring one account's
+  artwork into another's.
+
 ## [1.4.3] — 2026-06-28
 
 ### Fixed

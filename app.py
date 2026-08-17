@@ -64,7 +64,9 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self.selected_btn = None
         self.selected_rename_btn = None
         self.selected_name_lbl = None
-        self.last_fetch_files = []
+        self._restore_point_inherited = fg.has_restore_point()
+        self._fetched_this_session = False
+        fg.RATE_LIMIT_HOOK = lambda msg: self.log(msg, icon="warning")
         self._icon_cache = {}
         # Row-thumbnail cache: (app_id, path, mtime, size) -> ImageTk.PhotoImage.
         # Keyed including mtime+size so a re-fetch that swaps art invalidates the old

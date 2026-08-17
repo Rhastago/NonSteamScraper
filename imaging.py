@@ -8,7 +8,7 @@ are kept (on the widget and/or a cache) so they aren't garbage-collected to blan
 """
 
 import threading
-import requests
+import find_games as fg
 from PIL import Image, ImageTk
 
 
@@ -232,7 +232,7 @@ def update_view(state, img_label, counter_label):
 
         def fetch(expected=index, _on_anim=on_animated):
             try:
-                r = requests.get(url, stream=True, timeout=10)
+                r = fg._http_get(url, stream=True, timeout=10)
                 ext = url.split(".")[-1].split("?")[0]
                 cache_path = state["paths"][0].rsplit("_", 1)[0] + f"_{expected}.{ext}"
                 with open(cache_path, "wb") as f:
