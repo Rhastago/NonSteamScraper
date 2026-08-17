@@ -495,7 +495,7 @@ def test_sgdb_get_returns_immediately_on_200(monkeypatch):
         return _FakeResp(200)
 
     slept = []
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     r = fg._sgdb_get("http://x", headers={})
@@ -514,7 +514,7 @@ def test_sgdb_get_retries_once_on_429_then_200(monkeypatch):
         return r
 
     slept = []
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     r = fg._sgdb_get("http://x", headers={})
@@ -532,7 +532,7 @@ def test_sgdb_get_exhausts_retries_returns_last_429(monkeypatch):
         return _FakeResp(429)
 
     slept = []
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     r = fg._sgdb_get("http://x", headers={}, retries=2)
@@ -552,7 +552,7 @@ def test_sgdb_get_respects_retry_after_header_capped_at_5(monkeypatch):
         return r
 
     slept = []
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     r = fg._sgdb_get("http://x", headers={})
@@ -570,7 +570,7 @@ def test_sgdb_get_retry_after_under_cap_used_directly(monkeypatch):
         return r
 
     slept = []
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     fg._sgdb_get("http://x", headers={})
@@ -588,7 +588,7 @@ def test_sgdb_get_malformed_retry_after_falls_back_to_backoff(monkeypatch):
         return r
 
     slept = []
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     fg._sgdb_get("http://x", headers={})
@@ -765,7 +765,7 @@ def test_parse_net_workarea_negative_origin_reported_honestly():
 
 
 # ---------------------------------------------------------------------------
-# clear_slot_files / backup_artwork — shared listdir snapshot (existing_files)
+# clear_slot_files / snapshot_for_restore — shared listdir snapshot (existing_files)
 # ---------------------------------------------------------------------------
 
 def test_clear_slot_files_uses_provided_snapshot(tmp_path):
@@ -782,18 +782,20 @@ def test_clear_slot_files_uses_provided_snapshot(tmp_path):
     assert (tmp_path / "123p.jpg").exists()      # not in snapshot -> untouched
 
 
-def test_backup_artwork_uses_provided_snapshot(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "GRID_FOLDER", str(tmp_path / "grid"))
-    monkeypatch.setattr(fg, "BACKUP_FOLDER", str(tmp_path / "backup"))
-    monkeypatch.setattr(fg, "MANAGED_FILE", str(tmp_path / "managed"))
-    os.makedirs(fg.GRID_FOLDER)
-    art = os.path.join(fg.GRID_FOLDER, "123p.png")
-    _touch(art)
-    fg.register_managed_file(art)  # only managed files get backed up
+def test_snapshot_for_restore_uses_provided_snapshot(tmp_path, monkeypatch):
+    """When existing_files is provided, snapshot_for_restore uses it verbatim
+    instead of re-listdir'ing GRID_FOLDER — an on-disk file NOT in the snapshot
+    must not be copied into the store."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "123p.png"))
+    _touch(os.path.join(p["GRID_FOLDER"], "123p.jpg"))  # on disk but NOT in the snapshot
 
-    # Pass the snapshot explicitly; backup must not re-listdir GRID_FOLDER.
-    fg.backup_artwork(123, existing_files=["123p.png"])
-    assert os.path.exists(os.path.join(fg.BACKUP_FOLDER, "123p.png"))
+    fg.snapshot_for_restore(123, existing_files=["123p.png"])
+
+    entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["123"]
+    assert entry["files"] == ["123p.png"]
+    assert not os.path.exists(os.path.join(p["RESTORE_FOLDER"], "123", "123p.jpg"))
 
 
 # ---------------------------------------------------------------------------
@@ -965,7 +967,7 @@ def _fake_release(tag, assets=None, html_url="https://github.com/example/release
 
 
 def test_check_for_update_available(monkeypatch):
-    monkeypatch.setattr(fg.requests, "get",
+    monkeypatch.setattr(fg, "_http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0")))
     result = fg.check_for_update("1.2.5")
     assert result is not None
@@ -975,7 +977,7 @@ def test_check_for_update_available(monkeypatch):
 
 
 def test_check_for_update_up_to_date(monkeypatch):
-    monkeypatch.setattr(fg.requests, "get",
+    monkeypatch.setattr(fg, "_http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.2.5")))
     result = fg.check_for_update("1.2.5")
     assert result is not None
@@ -983,7 +985,7 @@ def test_check_for_update_up_to_date(monkeypatch):
 
 
 def test_check_for_update_older_release_not_available(monkeypatch):
-    monkeypatch.setattr(fg.requests, "get",
+    monkeypatch.setattr(fg, "_http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.0.0")))
     result = fg.check_for_update("1.2.5")
     assert result["available"] is False
@@ -993,7 +995,7 @@ def test_check_for_update_network_error_returns_error_dict(monkeypatch):
     slept = []
     def boom(*a, **kw):
         raise fg.requests.exceptions.RequestException("no network")
-    monkeypatch.setattr(fg.requests, "get", boom)
+    monkeypatch.setattr(fg, "_http_get", boom)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
     result = fg.check_for_update("1.2.5")
     assert result is not None
@@ -1008,7 +1010,7 @@ def test_check_for_update_picks_linux_asset(monkeypatch):
         {"name": "NonSteamScraper-linux", "browser_download_url": "https://dl/linux"},
         {"name": "NonSteamScraper-win.zip", "browser_download_url": "https://dl/win.zip"},
     ]
-    monkeypatch.setattr(fg.requests, "get",
+    monkeypatch.setattr(fg, "_http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
     result = fg.check_for_update("1.2.5")
@@ -1020,7 +1022,7 @@ def test_check_for_update_picks_windows_asset(monkeypatch):
         {"name": "NonSteamScraper-linux", "browser_download_url": "https://dl/linux"},
         {"name": "NonSteamScraper-win.zip", "browser_download_url": "https://dl/win.zip"},
     ]
-    monkeypatch.setattr(fg.requests, "get",
+    monkeypatch.setattr(fg, "_http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Windows")
     result = fg.check_for_update("1.2.5")
@@ -1030,7 +1032,7 @@ def test_check_for_update_picks_windows_asset(monkeypatch):
 def test_check_for_update_falls_back_to_html_url_when_no_matching_asset(monkeypatch):
     assets = [{"name": "checksums.txt", "browser_download_url": "https://dl/chk"}]
     release_page = "https://github.com/example/releases/tag/v1.3.0"
-    monkeypatch.setattr(fg.requests, "get",
+    monkeypatch.setattr(fg, "_http_get",
         lambda *a, **kw: _FakeResponse(
             _fake_release("v1.3.0", assets=assets, html_url=release_page)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
@@ -1046,7 +1048,7 @@ def test_check_for_update_linux_bare_binary_fallback(monkeypatch):
         {"name": "NonSteamScraper", "browser_download_url": "https://dl/bin"},
         {"name": "checksums.txt", "browser_download_url": "https://dl/chk"},
     ]
-    monkeypatch.setattr(fg.requests, "get",
+    monkeypatch.setattr(fg, "_http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
     result = fg.check_for_update("1.2.5")
@@ -1054,7 +1056,7 @@ def test_check_for_update_linux_bare_binary_fallback(monkeypatch):
 
 
 def test_check_for_update_empty_tag_returns_error_dict(monkeypatch):
-    monkeypatch.setattr(fg.requests, "get",
+    monkeypatch.setattr(fg, "_http_get",
         lambda *a, **kw: _FakeResponse({"tag_name": "", "html_url": "x", "assets": []}))
     result = fg.check_for_update("1.2.5")
     assert result is not None
@@ -1073,7 +1075,7 @@ def test_check_for_update_retry_on_request_exception_then_success(monkeypatch):
             raise fg.requests.exceptions.RequestException("blip")
         return _FakeResponse(_fake_release("v1.3.0"))
 
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     result = fg.check_for_update("1.2.5")
@@ -1091,7 +1093,7 @@ def test_check_for_update_exhausts_retries_returns_error_dict(monkeypatch):
     def fake_get(*a, **kw):
         raise fg.requests.exceptions.RequestException("always down")
 
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     result = fg.check_for_update("1.2.5")
@@ -1114,7 +1116,7 @@ def test_check_for_update_non200_returns_error_immediately(monkeypatch):
         calls["n"] += 1
         return _Non200()
 
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     result = fg.check_for_update("1.2.5")
@@ -1137,7 +1139,7 @@ def test_check_for_update_403_returns_rate_limit_error_no_retry(monkeypatch):
         calls["n"] += 1
         return _Forbidden()
 
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     result = fg.check_for_update("1.2.5")
@@ -1164,7 +1166,7 @@ def test_check_for_update_403_reports_minutes_until_reset(monkeypatch):
         calls["n"] += 1
         return _Forbidden()
 
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     result = fg.check_for_update("1.2.5")
@@ -1183,7 +1185,7 @@ def test_check_for_update_403_without_reset_header_is_generic(monkeypatch):
         status_code = 403
         headers = {}
 
-    monkeypatch.setattr(fg.requests, "get", lambda *a, **kw: _Forbidden())
+    monkeypatch.setattr(fg, "_http_get", lambda *a, **kw: _Forbidden())
     result = fg.check_for_update("1.2.5")
     assert "rate limit" in result["error"].lower()
     assert "try again later" in result["error"].lower()
@@ -1197,7 +1199,7 @@ def test_check_for_update_sends_user_agent_header(monkeypatch):
         seen_headers.append(headers or {})
         return _FakeResponse(_fake_release("v1.3.0"))
 
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     fg.check_for_update("1.2.5")
     assert seen_headers, "requests.get was never called"
     assert "User-Agent" in seen_headers[0]
@@ -1212,7 +1214,7 @@ def test_check_for_update_uses_10s_timeout(monkeypatch):
         seen_timeouts.append(timeout)
         return _FakeResponse(_fake_release("v1.3.0"))
 
-    monkeypatch.setattr(fg.requests, "get", fake_get)
+    monkeypatch.setattr(fg, "_http_get", fake_get)
     fg.check_for_update("1.2.5")
     assert seen_timeouts == [10]
 
@@ -1568,7 +1570,7 @@ def _install_fetch_mocks(monkeypatch, tmp_path, slot_assets,
     monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get)
     monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
     monkeypatch.setattr(fg, "register_managed_file", lambda *a, **k: None)
-    monkeypatch.setattr(fg, "backup_artwork", lambda *a, **k: None)
+    monkeypatch.setattr(fg, "snapshot_for_restore", lambda *a, **k: None)
     monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: False)
     monkeypatch.setattr(fg, "load_api_key", lambda *a, **k: "FAKEKEY")
     if record_icon:
@@ -1732,3 +1734,620 @@ def test_download_all_artwork_missing_slot_is_none_and_consumable(tmp_path, monk
     paths = fg.applied_paths_from_results(results)
     assert isinstance(paths, list)
     assert fg.icon_write_from_results(results)[0] == 12345
+
+
+# ---------------------------------------------------------------------------
+# S2 — the _http_get seam (T2): one GET path, one shared pooled session
+# ---------------------------------------------------------------------------
+
+class _FakeStreamResp:
+    """Minimal requests.Response stand-in with iter_content, for the seam gate
+    on download_artwork."""
+    def __init__(self, status_code, chunks=(), headers=None):
+        self.status_code = status_code
+        self._chunks = chunks
+        self.headers = headers or {}
+
+    def iter_content(self, chunk_size):
+        return iter(self._chunks)
+
+
+def _forbidden_get(*args, **kwargs):
+    raise AssertionError("bare requests.get called")
+
+
+def test_http_seam_get_exists_and_is_callable():
+    assert hasattr(fg, "_http_get"), "the _http_get seam does not exist yet"
+    assert callable(fg._http_get)
+
+
+def test_http_seam_session_accessor_returns_single_shared_session():
+    assert hasattr(fg, "_get_session"), "the _get_session accessor does not exist yet"
+    s1 = fg._get_session()
+    s2 = fg._get_session()
+    assert s1 is s2
+
+
+def test_http_seam_sgdb_get_does_not_bypass_the_seam(monkeypatch):
+    """_sgdb_get must route through _http_get; a bare requests.get call is the
+    failure being guarded against."""
+    assert hasattr(fg, "_http_get"), "the _http_get seam does not exist yet"
+    used = []
+
+    def fake_http_get(url, **kwargs):
+        used.append((url, kwargs))
+        return _FakeResp(200)
+
+    monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
+    monkeypatch.setattr(fg.requests, "get", _forbidden_get)
+
+    r = fg._sgdb_get("http://x", headers={})
+
+    assert r.status_code == 200
+    assert len(used) == 1
+    assert used[0][0] == "http://x"
+
+
+def test_http_seam_download_artwork_uses_seam_with_stream_and_timeout(monkeypatch, tmp_path):
+    """download_artwork must use the seam with stream=True and timeout=10,
+    matching today's call (find_games.py:820)."""
+    assert hasattr(fg, "_http_get"), "the _http_get seam does not exist yet"
+    seen = {}
+
+    def fake_http_get(url, **kwargs):
+        seen["url"] = url
+        seen.update(kwargs)
+        return _FakeStreamResp(200, [b"abc"], {"Content-Length": "3"})
+
+    monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
+    monkeypatch.setattr(fg.requests, "get", _forbidden_get)
+
+    save_path = str(tmp_path / "12345p.png")
+    assert fg.download_artwork("http://x/img.png", save_path) is True
+
+    assert seen["url"] == "http://x/img.png"
+    assert seen.get("stream") is True
+    assert seen.get("timeout") == 10
+    assert os.path.exists(save_path)
+
+
+# ---------------------------------------------------------------------------
+# S2 — rate-limit visibility hook (T3)
+# ---------------------------------------------------------------------------
+
+def test_rate_limit_hook_reports_retry_after_wait(monkeypatch):
+    """A 429 with Retry-After: 3 must call RATE_LIMIT_HOOK once with a message
+    mentioning the 3-second wait, so the wait shows up in the activity log."""
+    assert hasattr(fg, "RATE_LIMIT_HOOK"), "the RATE_LIMIT_HOOK module hook does not exist yet"
+    responses = [_FakeResp(429, headers={"Retry-After": "3"}), _FakeResp(200)]
+    calls = {"get": 0}
+
+    def fake_get(url, headers=None, params=None, timeout=None, **kw):
+        r = responses[calls["get"]]
+        calls["get"] += 1
+        return r
+
+    monkeypatch.setattr(fg, "_http_get", fake_get, raising=False)
+    monkeypatch.setattr(fg.time, "sleep", lambda s: None)
+    messages = []
+    monkeypatch.setattr(fg, "RATE_LIMIT_HOOK", messages.append, raising=False)
+
+    r = fg._sgdb_get("http://x", headers={})
+
+    assert r.status_code == 200
+    assert len(messages) == 1
+    assert "3" in messages[0]
+
+
+def test_rate_limit_hook_raising_never_breaks_sgdb_get(monkeypatch):
+    """A hook that raises must be swallowed — find_games stays UI-free and a
+    broken hook must never take a fetch down."""
+    assert hasattr(fg, "RATE_LIMIT_HOOK"), "the RATE_LIMIT_HOOK module hook does not exist yet"
+    responses = [_FakeResp(429, headers={"Retry-After": "1"}), _FakeResp(200)]
+    calls = {"get": 0}
+
+    def fake_get(url, headers=None, params=None, timeout=None, **kw):
+        r = responses[calls["get"]]
+        calls["get"] += 1
+        return r
+
+    monkeypatch.setattr(fg, "_http_get", fake_get, raising=False)
+    monkeypatch.setattr(fg.time, "sleep", lambda s: None)
+
+    def bad_hook(msg):
+        raise RuntimeError("hook exploded")
+
+    monkeypatch.setattr(fg, "RATE_LIMIT_HOOK", bad_hook, raising=False)
+
+    r = fg._sgdb_get("http://x", headers={})
+
+    assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# S3 — restore point: snapshot / run lifecycle / undo (T4)
+# ---------------------------------------------------------------------------
+# Store shape (SPEC.md S3): ~/.steamart_restore/manifest.json + <id>/<file>
+# copies. Every gate below points GRID_FOLDER, RESTORE_FOLDER, MANAGED_FILE,
+# BACKUP_FOLDER and SHORTCUTS_PATH at tmp_path and leads with a presence
+# assertion, so the missing product code fails by ASSERTION, never by
+# AttributeError.
+
+def _restore_setup(tmp_path, monkeypatch):
+    """Point every path constant a restore-point test touches at tmp_path and
+    create the grid folder. Returns the patched locations as a dict."""
+    grid = tmp_path / "grid"
+    grid.mkdir()
+    paths = {
+        "GRID_FOLDER": str(grid),
+        "RESTORE_FOLDER": str(tmp_path / "restore"),
+        "MANAGED_FILE": str(tmp_path / "managed"),
+        "BACKUP_FOLDER": str(tmp_path / "backup"),
+        "SHORTCUTS_PATH": str(tmp_path / "shortcuts.vdf"),
+    }
+    for name, value in paths.items():
+        monkeypatch.setattr(fg, name, value, raising=False)
+    return paths
+
+
+def _read_manifest(restore_folder):
+    """Load the restore store's manifest.json (SPEC.md S3 shape)."""
+    with open(os.path.join(restore_folder, "manifest.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_restore_snapshot_copies_files_and_writes_manifest(tmp_path, monkeypatch):
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    _touch(os.path.join(p["GRID_FOLDER"], "12345_hero.jpg"))
+    _touch(os.path.join(p["GRID_FOLDER"], "99999p.png"))  # a different game
+
+    fg.snapshot_for_restore(12345)
+
+    manifest = _read_manifest(p["RESTORE_FOLDER"])
+    entry = manifest["entries"]["12345"]
+    assert sorted(entry["files"]) == ["12345_hero.jpg", "12345p.png"]
+    assert os.path.exists(os.path.join(p["RESTORE_FOLDER"], "12345", "12345p.png"))
+    assert os.path.exists(os.path.join(p["RESTORE_FOLDER"], "12345", "12345_hero.jpg"))
+    assert not os.path.exists(os.path.join(p["RESTORE_FOLDER"], "12345", "99999p.png"))
+
+
+def test_restore_snapshot_records_unmanaged_files(tmp_path, monkeypatch):
+    """clear_slot_files deletes art this app never registered, so a managed-only
+    snapshot cannot restore what those paths destroy."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    managed_art = os.path.join(p["GRID_FOLDER"], "12345p.png")
+    unmanaged_art = os.path.join(p["GRID_FOLDER"], "12345_hero.jpg")
+    _touch(managed_art)
+    _touch(unmanaged_art)
+    fg.register_managed_file(managed_art)
+
+    fg.snapshot_for_restore(12345)
+
+    entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
+    assert "12345_hero.jpg" in entry["files"]
+    assert os.path.exists(os.path.join(p["RESTORE_FOLDER"], "12345", "12345_hero.jpg"))
+
+
+def test_restore_snapshot_records_managed_subset(tmp_path, monkeypatch):
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    managed_art = os.path.join(p["GRID_FOLDER"], "12345p.png")
+    unmanaged_art = os.path.join(p["GRID_FOLDER"], "12345_hero.jpg")
+    _touch(managed_art)
+    _touch(unmanaged_art)
+    fg.register_managed_file(managed_art)
+
+    fg.snapshot_for_restore(12345)
+
+    entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
+    assert set(entry["managed"]) == {"12345p.png"}
+
+
+def test_restore_snapshot_first_wins_while_unsealed(tmp_path, monkeypatch):
+    """A second snapshot for the same id while the first is UNSEALED leaves the
+    first snapshot's files unchanged — this is the double Re-fetch case."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    fg.snapshot_for_restore(12345)
+    os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))  # folder emptied by Re-fetch
+
+    fg.snapshot_for_restore(12345)
+
+    entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
+    assert entry["files"] == ["12345p.png"]
+
+
+def test_restore_sealed_snapshot_is_superseded(tmp_path, monkeypatch):
+    """A SEALED entry is superseded, not kept: Re-fetch → fetch → keep →
+    Re-fetch → fetch → Undo must restore the art the operator chose to keep."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    fg.snapshot_for_restore(12345)
+    fg.seal_restore_point()
+    os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.webp"))
+
+    fg.snapshot_for_restore(12345, pending=True)
+
+    entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
+    assert entry["files"] == ["12345p.webp"]
+    # The superseded snapshot's copies are gone from the store.
+    assert not os.path.exists(os.path.join(p["RESTORE_FOLDER"], "12345", "12345p.png"))
+    assert os.path.exists(os.path.join(p["RESTORE_FOLDER"], "12345", "12345p.webp"))
+
+
+def test_restore_snapshot_never_matches_a_neighbouring_game(tmp_path, monkeypatch):
+    """Leading-digit-run matching: uid 12345 must not capture 123456p.png."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    _touch(os.path.join(p["GRID_FOLDER"], "123456p.png"))
+
+    fg.snapshot_for_restore(12345)
+
+    entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
+    assert entry["files"] == ["12345p.png"]
+
+
+def test_restore_snapshot_records_icon_from_shortcuts_vdf(tmp_path, monkeypatch):
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/a/b.png"}})
+
+    fg.snapshot_for_restore(12345)
+
+    entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
+    assert entry["icon"] == "/a/b.png"
+
+
+def test_restore_snapshot_records_entry_for_game_without_art(tmp_path, monkeypatch):
+    """The common first-fetch case: no art, no icon — an entry must still be
+    recorded, or Undo silently stops working for new games."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "has_restore_point"), "fg.has_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+
+    fg.snapshot_for_restore(12345)
+
+    entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
+    assert entry["files"] == []
+    assert fg.has_restore_point() is True
+
+
+def test_restore_snapshot_wipes_store_on_grid_folder_change(tmp_path, monkeypatch):
+    """A manifest whose grid_folder differs from the live GRID_FOLDER (account
+    switch) wipes the store FIRST, before the first-wins check."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    fg.snapshot_for_restore(12345)  # unsealed entry under the first account
+    other_grid = tmp_path / "grid2"
+    other_grid.mkdir()
+    monkeypatch.setattr(fg, "GRID_FOLDER", str(other_grid))
+    _touch(os.path.join(str(other_grid), "12345p.webp"))
+
+    fg.snapshot_for_restore(12345)
+
+    manifest = _read_manifest(p["RESTORE_FOLDER"])
+    assert manifest["grid_folder"] == str(other_grid)
+    # Without the wipe, first-wins would have kept the OLD unsealed entry.
+    assert manifest["entries"]["12345"]["files"] == ["12345p.webp"]
+
+
+def test_restore_manifest_written_atomically(tmp_path, monkeypatch):
+    """The manifest write must be temp-file + os.replace, proved behaviourally
+    (not by grepping for os.replace in the source)."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    replaced = []
+    real_replace = os.replace
+
+    def recorder(src, dst):
+        replaced.append((src, dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(fg.os, "replace", recorder)
+
+    fg.snapshot_for_restore(12345)
+
+    manifest_path = os.path.join(p["RESTORE_FOLDER"], "manifest.json")
+    assert replaced, "snapshot_for_restore must write the manifest via os.replace"
+    src, dst = replaced[0]
+    assert dst == manifest_path
+    assert src != manifest_path  # a temp path, not a direct write
+
+
+def test_restore_begin_run_drops_sealed_keeps_unsealed_clears_pending(tmp_path, monkeypatch):
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
+    assert hasattr(fg, "begin_restore_run"), "fg.begin_restore_run does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "11111p.png"))
+    fg.snapshot_for_restore(11111)
+    _touch(os.path.join(p["GRID_FOLDER"], "22222p.png"))
+    fg.snapshot_for_restore(22222)
+    fg.seal_restore_point()          # both sealed
+    _touch(os.path.join(p["GRID_FOLDER"], "11111p.webp"))
+    fg.snapshot_for_restore(11111, pending=True)  # Re-fetch: supersedes, becomes unsealed
+
+    fg.begin_restore_run()
+
+    manifest = _read_manifest(p["RESTORE_FOLDER"])
+    assert "22222" not in manifest["entries"]          # sealed → dropped
+    assert "11111" in manifest["entries"]              # unsealed → kept
+    assert manifest["entries"]["11111"]["pending"] is False  # adopted into the run
+
+
+def test_restore_begin_run_deletes_dropped_copies_from_disk(tmp_path, monkeypatch):
+    """begin_restore_run deletes the dropped entries' copies from the store, not
+    just their manifest rows — otherwise the store leaks like ~/.steamart_backup."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
+    assert hasattr(fg, "begin_restore_run"), "fg.begin_restore_run does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "11111p.png"))
+    fg.snapshot_for_restore(11111)
+    _touch(os.path.join(p["GRID_FOLDER"], "22222p.png"))
+    fg.snapshot_for_restore(22222)
+    fg.seal_restore_point()
+    fg.snapshot_for_restore(11111, pending=True)
+    assert os.path.exists(os.path.join(p["RESTORE_FOLDER"], "22222"))  # copies exist pre-run
+
+    fg.begin_restore_run()
+
+    assert not os.path.exists(os.path.join(p["RESTORE_FOLDER"], "22222"))
+
+
+def test_restore_seal_marks_every_entry_sealed(tmp_path, monkeypatch):
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    fg.snapshot_for_restore(11111)
+    fg.snapshot_for_restore(22222)
+
+    fg.seal_restore_point()
+
+    manifest = _read_manifest(p["RESTORE_FOLDER"])
+    assert len(manifest["entries"]) == 2
+    assert all(e["sealed"] is True for e in manifest["entries"].values())
+
+
+def test_restore_has_restore_point_states(tmp_path, monkeypatch):
+    """False with no manifest, true with one entry, false when the manifest's
+    grid_folder differs from the live GRID_FOLDER (account switch)."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "has_restore_point"), "fg.has_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    assert fg.has_restore_point() is False          # no manifest
+    fg.snapshot_for_restore(12345)
+    assert fg.has_restore_point() is True           # one entry
+    monkeypatch.setattr(fg, "GRID_FOLDER", str(tmp_path / "other_grid"))  # account switch
+    assert fg.has_restore_point() is False          # grid-folder mismatch
+
+
+def test_restore_undo_refuses_account_switch(tmp_path, monkeypatch):
+    """A grid-folder mismatch must make undo_restore_point return a zero summary
+    and write nothing into the live grid folder."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    fg.snapshot_for_restore(12345)
+    os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    other_grid = tmp_path / "other_grid"
+    other_grid.mkdir()
+    monkeypatch.setattr(fg, "GRID_FOLDER", str(other_grid))
+
+    summary = fg.undo_restore_point()
+
+    assert isinstance(summary, dict)
+    assert summary.get("games", 0) == 0
+    assert summary.get("files", 0) == 0
+    assert os.listdir(fg.GRID_FOLDER) == []          # nothing written across accounts
+    assert os.path.exists(os.path.join(p["RESTORE_FOLDER"], "manifest.json"))  # store untouched
+
+
+def test_restore_undo_restores_byte_identical_files(tmp_path, monkeypatch):
+    """A game whose art was replaced ends up byte-identical to the snapshot."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    original = os.path.join(p["GRID_FOLDER"], "12345p.png")
+    with open(original, "wb") as f:
+        f.write(b"ORIGINAL-ART-BYTES")
+    fg.snapshot_for_restore(12345)
+    os.remove(original)
+    with open(original, "wb") as f:  # the fetch wrote something new
+        f.write(b"NEW-FETCHED-ART")
+    fg.register_managed_file(original)
+
+    fg.undo_restore_point()
+
+    with open(original, "rb") as f:
+        assert f.read() == b"ORIGINAL-ART-BYTES"
+    # A successful undo wipes the store, which is what makes a second press a
+    # no-op and greys the button (has_restore_point drives it). Untested, an
+    # implementation that skips the wipe re-restores on every press.
+    assert fg.has_restore_point() is False
+    # ...and the restored file is registered again, so Clear All Artwork still
+    # covers it.
+    assert original in fg.load_managed_files()
+
+
+def test_restore_undo_removes_fetched_file_with_different_extension(tmp_path, monkeypatch):
+    """The results-window 'apply an alternative' case: 1234p.webp written over a
+    snapshot of 1234p.png — after undo only the .png exists."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "1234p.png"))
+    fg.snapshot_for_restore(1234)
+    os.remove(os.path.join(p["GRID_FOLDER"], "1234p.png"))
+    webp = os.path.join(p["GRID_FOLDER"], "1234p.webp")
+    _touch(webp)
+    fg.register_managed_file(webp)  # the fetch's file is managed
+
+    fg.undo_restore_point()
+
+    assert os.path.exists(os.path.join(p["GRID_FOLDER"], "1234p.png"))
+    assert not os.path.exists(webp)
+
+
+def test_restore_undo_never_deletes_an_unmanaged_current_file(tmp_path, monkeypatch):
+    """Undo must never delete a current file this app did not write."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    fg.snapshot_for_restore(12345)
+    os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    unmanaged = os.path.join(p["GRID_FOLDER"], "12345p.webp")
+    _touch(unmanaged)  # written by something other than this app — NOT registered
+
+    fg.undo_restore_point()
+
+    assert os.path.exists(unmanaged)  # untouched
+    assert os.path.exists(os.path.join(p["GRID_FOLDER"], "12345p.png"))  # restored
+
+
+def test_restore_undo_never_deletes_a_neighbouring_games_file(tmp_path, monkeypatch):
+    """123456p.png (a different game, even though managed) must survive undoing
+    12345."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    fg.snapshot_for_restore(12345)
+    os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    neighbour = os.path.join(p["GRID_FOLDER"], "123456p.png")
+    _touch(neighbour)
+    fg.register_managed_file(neighbour)
+
+    fg.undo_restore_point()
+
+    assert os.path.exists(neighbour)
+
+
+def test_restore_undo_writes_icon_back_when_steam_closed(tmp_path, monkeypatch):
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/old/icon.png"}})
+    fg.snapshot_for_restore(12345)
+    # The fetch then set a DIFFERENT icon. Without this the assertion below is
+    # vacuous: the value would still be "/old/icon.png" simply because nothing
+    # ever disturbed it, so an undo that skips icons entirely would pass.
+    _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/new/icon.png"}})
+    monkeypatch.setattr(fg, "is_steam_running", lambda: False)
+
+    fg.undo_restore_point()
+
+    out = _read_shortcuts(p["SHORTCUTS_PATH"])
+    assert out["0"]["icon"] == "/old/icon.png"
+
+
+def test_restore_undo_queues_icon_when_steam_running(tmp_path, monkeypatch):
+    """Steam running → the icon restore goes through save_pending_icons, not a
+    direct vdf write."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/old/icon.png"}})
+    fg.snapshot_for_restore(12345)
+    monkeypatch.setattr(fg, "is_steam_running", lambda: True)
+
+    fg.undo_restore_point()
+
+    assert fg.load_pending_icons() == {12345: "/old/icon.png"}
+
+
+def test_restore_queued_empty_icon_survives_apply(tmp_path, monkeypatch):
+    """A 'no icon' restore queued while Steam was running must survive the queue:
+    apply_pending_icons filters on os.path.exists(path) today, and
+    os.path.exists('') is False (find_games.py:658), so the restore is silently
+    dropped — this gate forces the one-line fix (path == '' or exists)."""
+    p = _restore_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/a/current.png"}})
+    fg.save_pending_icons({12345: ""})  # queued while Steam was running
+    monkeypatch.setattr(fg, "is_steam_running", lambda: False)
+
+    n = fg.apply_pending_icons()
+
+    assert n == 1
+    out = _read_shortcuts(p["SHORTCUTS_PATH"])
+    assert out["0"]["icon"] == ""  # the icon really was cleared
+
+
+def test_restore_undo_with_no_restore_point_is_a_noop(tmp_path, monkeypatch):
+    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+
+    summary = fg.undo_restore_point()  # must not raise
+
+    assert isinstance(summary, dict)
+    assert summary.get("games", 0) == 0
+    assert summary.get("files", 0) == 0
+
+
+def test_restore_clear_restore_point_empties_store_and_size_is_float(tmp_path, monkeypatch):
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(fg, "clear_restore_point"), "fg.clear_restore_point does not exist yet"
+    assert hasattr(fg, "restore_point_size"), "fg.restore_point_size does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    fg.snapshot_for_restore(12345)
+
+    assert isinstance(fg.restore_point_size(), float)
+    fg.clear_restore_point()
+
+    assert not os.path.exists(os.path.join(p["RESTORE_FOLDER"], "manifest.json"))
+    assert fg.restore_point_size() == 0.0
+
+
+def test_restore_legacy_backup_size_reports_the_old_pile(tmp_path, monkeypatch):
+    """The Settings Storage row shows the legacy ~/.steamart_backup pile as well
+    as the restore point — clear_backup() has never had a caller, so that folder
+    has grown on every fetch since the feature shipped. Without this gate the
+    'Older backups: Y MB' half of the row cannot be built. shortcuts.vdf.bak is
+    never deleted (the only pre-app shortcut-list copy), so it must NOT count
+    toward the figure the clear button is expected to zero out."""
+    assert hasattr(fg, "legacy_backup_size"), "fg.legacy_backup_size does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    os.makedirs(p["BACKUP_FOLDER"], exist_ok=True)
+    assert fg.legacy_backup_size() == 0.0
+    # shortcuts.vdf.bak is preserved forever (never cleared); it must not
+    # inflate the reported size or the clear button could never zero the row.
+    with open(os.path.join(p["BACKUP_FOLDER"], "shortcuts.vdf.bak"), "wb") as f:
+        f.write(b"x" * (300 * 1024))
+    assert fg.legacy_backup_size() == 0.0
+    with open(os.path.join(p["BACKUP_FOLDER"], "12345p.png"), "wb") as f:
+        f.write(b"x" * (300 * 1024))
+
+    size = fg.legacy_backup_size()
+
+    assert isinstance(size, float)
+    assert size > 0.0, "a 300 KB backup file must register as a non-zero MB figure"
+
+
+def test_restore_clear_managed_artwork_wipes_restore_point(tmp_path, monkeypatch):
+    """Clear All Artwork must wipe the restore point, or a later Undo silently
+    re-copies and re-registers everything the operator just cleared."""
+    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    p = _restore_setup(tmp_path, monkeypatch)
+    _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
+    fg.snapshot_for_restore(12345)
+    manifest_path = os.path.join(p["RESTORE_FOLDER"], "manifest.json")
+    assert os.path.exists(manifest_path)
+
+    fg.clear_managed_artwork()
+
+    assert not os.path.exists(manifest_path)

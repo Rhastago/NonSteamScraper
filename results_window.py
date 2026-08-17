@@ -13,7 +13,6 @@ import time
 import threading
 import tkinter as tk
 from tkinter import ttk
-import requests
 
 from appcommon import open_url
 from theming import FONT_UI
@@ -624,7 +623,7 @@ def build_game_result_section(app, parent, game_result):
                     return
                 new_path = f"{base_noext}.{url.split('.')[-1].split('?')[0]}"
                 try:
-                    r = requests.get(url, stream=True, timeout=10)
+                    r = fg._http_get(url, stream=True, timeout=10)
                     if r.status_code == 200:
                         # Remove the previously-applied file in this slot first, so
                         # an extension change (e.g. animated .png -> static .jpg)

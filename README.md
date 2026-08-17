@@ -214,7 +214,7 @@ binaries in a clean environment and attaches them to the matching GitHub Release
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.4.3** — bug-fix release: in-app links (results-screen thumbnails, the API-key link, the Releases link) now reliably open your browser from the packaged Steam Deck / Linux build.
+See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.5.0** — Undo now restores the artwork a fetch replaced (including after Re-fetch, icon and all) instead of just deleting what it added; in-app links work again after a theme change restarts the app; and the fetch log reports SteamGridDB rate-limiting and per-game timings.
 
 ---
 

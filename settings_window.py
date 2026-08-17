@@ -173,6 +173,39 @@ def open_settings(app):
 
     app._btn(cache_frame, "Clear Cache", do_clear_cache, font=(FONT_UI, 9)).pack(side="right")
 
+    # Storage — the Undo restore point plus the legacy ~/.steamart_backup pile
+    # from past fetches (which had no caller until this button). shortcuts.vdf.bak
+    # is never deleted — clear_backup already skips it.
+    storage_frame = tk.LabelFrame(body, text="Storage", padx=10, pady=8,
+                                  bg=t["bg"], fg=t["link"])
+    storage_frame.pack(fill="x", padx=15, pady=5)
+    storage_label = tk.Label(
+        storage_frame,
+        text=(f"Undo restore point: {fg.restore_point_size()} MB   ·   "
+              f"Older backups: {fg.legacy_backup_size()} MB"),
+        font=(FONT_UI, 10), bg=t["bg"], fg=t["fg"])
+    storage_label.pack(side="left")
+
+    def do_clear_restore():
+        if messagebox.askyesno(
+            "Clear Saved Undo Data",
+            "This only removes the app's own saved copies — the Undo restore "
+            "point and the older-artwork backup folder.\n\n"
+            "Artwork currently applied in Steam is untouched.\n\n"
+            "Undo will no longer be able to restore anything.\n\n"
+            "Are you sure?",
+            parent=settings
+        ):
+            fg.clear_restore_point()
+            fg.clear_backup()
+            storage_label.config(
+                text="Undo restore point: 0.0 MB   ·   Older backups: 0.0 MB")
+            app.log("Saved Undo data cleared.", icon="trash")
+            app.load_games()  # greys out the Undo button in the main window
+
+    app._btn(storage_frame, "Clear saved undo data", do_clear_restore,
+             font=(FONT_UI, 9)).pack(side="right")
+
     # Artwork
     artwork_frame = tk.LabelFrame(body, text="Artwork", padx=10, pady=8,
                                    bg=t["bg"], fg=t["link"])
@@ -183,6 +216,7 @@ def open_settings(app):
             "Clear All Artwork",
             "This will remove all artwork fetched by NonSteamScraper.\n\n"
             "Artwork you set manually in Steam will NOT be affected.\n\n"
+            "The saved Undo data is also cleared.\n\n"
             "Are you sure?",
             parent=settings
         ):
