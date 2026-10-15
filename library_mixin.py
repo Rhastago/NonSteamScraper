@@ -1,7 +1,7 @@
 """Main-window construction + the game-library list for NonSteamScraper:
 build_ui, the onboarding banner, the activity-log drawer toggle, loading games,
 and rendering / sorting / searching / row-building (including cover thumbnails and
-the Hidden section) plus per-game skip/reset/refetch. Mixed into SteamArtApp."""
+the Hidden section) plus per-game ignore/restore/refetch. Mixed into SteamArtApp."""
 
 import os
 import tkinter as tk
@@ -11,7 +11,7 @@ from theming import PAD_XS, PAD_S, PAD_M, PAD_L, FONT_UI, FONT_MONO
 from appcommon import FIRST_RUN_FILE
 from imaging import _decode_row_thumb
 import find_games as fg
-from find_games import get_non_steam_games, load_api_key, SKIP_FILE
+from find_games import get_non_steam_games, load_api_key, add_to_skip_list, SKIP_FILE
 
 class LibraryMixin:
 
@@ -318,6 +318,7 @@ class LibraryMixin:
         self.selected_row = None
         self.selected_btn = None
         self.selected_rename_btn = None
+        self.selected_ignore_btn = None
         self.selected_name_lbl = None
 
         for widget in self.list_frame.winfo_children():
@@ -525,13 +526,16 @@ class LibraryMixin:
 
         refetch_btn = self._btn(row, "Re-fetch", lambda g=game: self.refetch_game(g), font=(FONT_UI, 13), padx=PAD_S, pady=PAD_XS)
         rename_btn  = self._btn(row, "Search", lambda g=game: self.open_sgdb_search(g), font=(FONT_UI, 13), padx=PAD_S, pady=PAD_XS)
+        ignore_btn  = self._btn(row, "Ignore", lambda g=game: self.ignore_game(g), font=(FONT_UI, 13), padx=PAD_S, pady=PAD_XS)
 
-        def on_click(e, r=row, btn=refetch_btn, rbtn=rename_btn, lbl=label):
+        def on_click(e, r=row, btn=refetch_btn, rbtn=rename_btn, ibtn=ignore_btn, lbl=label):
             # Deselect any previously selected row
             if self.selected_btn and self.selected_btn != btn:
                 self.selected_btn.pack_forget()
                 if self.selected_rename_btn:
                     self.selected_rename_btn.pack_forget()
+                if self.selected_ignore_btn:
+                    self.selected_ignore_btn.pack_forget()
                 if self.selected_row:
                     self.selected_row.config(bg=t["bg"])
                     for child in self.selected_row.winfo_children():
@@ -544,16 +548,19 @@ class LibraryMixin:
                 # Toggle off if already selected
                 btn.pack_forget()
                 rbtn.pack_forget()
+                ibtn.pack_forget()
                 r.config(bg=t["bg"])
                 for child in r.winfo_children():
                     child.config(bg=t["bg"])
                 lbl.config(fg=t["fg"])
                 self.selected_row = self.selected_btn = self.selected_rename_btn = None
+                self.selected_ignore_btn = None
                 self.selected_name_lbl = None
             else:
                 # Select this row and show action buttons
                 btn.pack(side="right", padx=PAD_XS)
                 rbtn.pack(side="right", padx=PAD_XS)
+                ibtn.pack(side="right", padx=PAD_XS)
                 r.config(bg=t["select_bg"])
                 for child in r.winfo_children():
                     child.config(bg=t["select_bg"])
@@ -562,6 +569,7 @@ class LibraryMixin:
                 self.selected_row = r
                 self.selected_btn = btn
                 self.selected_rename_btn = rbtn
+                self.selected_ignore_btn = ibtn
                 self.selected_name_lbl = lbl
 
         row.bind("<Button-1>", on_click)
@@ -574,7 +582,8 @@ class LibraryMixin:
 
 
     def build_hidden_section(self, skipped_games):
-        """Build the collapsible section for games that were permanently skipped."""
+        """Build the collapsible section for hidden games: those skipped because
+        SteamGridDB didn't find them, and those the operator chose to Ignore."""
         self.toggle_btn = self._flat_btn(
             self.list_frame, f"▶  Hidden ({len(skipped_games)})",
             self.toggle_hidden, font=(FONT_UI, 11), anchor="w")
@@ -587,7 +596,7 @@ class LibraryMixin:
 
 
     def build_skipped_row(self, game):
-        """Build a row for a skipped game with reset and rename options."""
+        """Build a row for a hidden game with Restore and Search options."""
         t = self.theme
         row = tk.Frame(self.hidden_frame, pady=2, bg=t["bg"])
         row.pack(fill="x", padx=15)
@@ -597,7 +606,7 @@ class LibraryMixin:
         skip_lbl.pack(side="left", fill="x", expand=True)
         self._btn(row, "Search", lambda g=game: self.open_sgdb_search(g),
                   font=(FONT_UI, 13), padx=PAD_S, pady=PAD_XS).pack(side="right", padx=PAD_XS)
-        self._btn(row, "Reset Skip", lambda g=game: self.reset_skip(g),
+        self._btn(row, "Restore", lambda g=game: self.restore_game(g),
                   font=(FONT_UI, 13), padx=PAD_S, pady=PAD_XS).pack(side="right", padx=PAD_XS)
 
 
@@ -613,10 +622,21 @@ class LibraryMixin:
             self.hidden_visible = True
 
 
-    def reset_skip(self, game):
-        """Remove a game from the skip list so it will be retried on the next fetch."""
+    def ignore_game(self, game):
+        """Hide a game from fetching: it moves to the Hidden section and fetches pass
+        it by. Uses the same skip list as "not found on SteamGridDB", so Restore
+        brings back either kind. Touches only our skip file — any art the game
+        already has stays in place."""
+        add_to_skip_list(game["app_id"])
+        self.log(f"Ignored: {game['name']} — moved to Hidden", icon="offline")
+        self.load_games()
+
+
+    def restore_game(self, game):
+        """Move a hidden game (skipped or ignored) back to the main list. The next
+        fetch picks it up only if it has no art; one that has art needs Re-fetch."""
         self._remove_from_skip(game["app_id"])
-        self.log(f"Reset skip for: {game['name']}", icon="undo")
+        self.log(f"Restored: {game['name']}", icon="undo")
         self.load_games()
 
 

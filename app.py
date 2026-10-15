@@ -63,6 +63,7 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self.selected_row = None
         self.selected_btn = None
         self.selected_rename_btn = None
+        self.selected_ignore_btn = None
         self.selected_name_lbl = None
         self._restore_point_inherited = fg.has_restore_point()
         self._fetched_this_session = False

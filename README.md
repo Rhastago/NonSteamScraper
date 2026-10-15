@@ -72,12 +72,13 @@ Art changes take effect after Steam restarts. The app will remind you.
 |---|---|
 | Art types | Cover, Wide Cover, Hero, Logo, Icon |
 | Alternatives | Up to 5 per art type, swappable after fetch |
+| Official Steam art | When the game is on the Steam store, its own Steam artwork is the first (applied) option, tagged STEAM |
 | Icon support | Written into `shortcuts.vdf` so Steam actually reads it |
 | Undo | Restores the previous fetch's artwork in one click |
 | Re-fetch | Reset a single game's art and fetch fresh results |
 | SGDB Search | Live search dialog with autocomplete — find the right match if auto-search misses it |
 | Art Style Preferences | Per-type filters for animated art, NSFW, humor, style variants, and more |
-| Skip list | Games not found on SGDB are hidden; reset individually or all at once |
+| Hidden list | Games not found on SGDB, and games you **Ignore**, are hidden; **Restore** brings one back, Factory reset clears all |
 | Multi-account | Detects multiple Steam accounts and lets you switch between them |
 | Refresh | Reload the library mid-session after adding new shortcuts |
 | Cache | Thumbnails cached locally; auto-cleared after 30 days |
@@ -151,7 +152,7 @@ All state is stored in your home directory:
 | `~/.steamart_prefs` | Art style preferences |
 | `~/.steamart_theme` | Dark or light mode preference |
 | `~/.steamart_geometry` | Saved window position |
-| `~/.steamart_skip` | Games permanently skipped (not found on SGDB) |
+| `~/.steamart_skip` | Hidden games — not found on SGDB, or ignored by you |
 | `~/.steamart_names` | Custom search name overrides per game |
 | `~/.steamart_managed` | Tracks which files this app created (for safe cleanup) |
 | `~/.steamart_cache/` | Thumbnail cache |
@@ -214,7 +215,7 @@ binaries in a clean environment and attaches them to the matching GitHub Release
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.5.0** — Undo now restores the artwork a fetch replaced (including after Re-fetch, icon and all) instead of just deleting what it added; in-app links work again after a theme change restarts the app; and the fetch log reports SteamGridDB rate-limiting and per-game timings.
+See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.5.1** — official Steam store artwork is now the first, applied option whenever SteamGridDB links the game to Steam (tagged STEAM); a new **Ignore** button hides a game from fetching, and **Restore** (formerly Reset Skip) brings any hidden game back.
 
 ---
 

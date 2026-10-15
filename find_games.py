@@ -1106,7 +1106,13 @@ def download_artwork(url, save_path, register=True):
             for chunk in r.iter_content(1024):
                 f.write(chunk); written += len(chunk)
         expected = r.headers.get("Content-Length")
-        if expected and expected.isdigit() and written != int(expected):
+        # A compressed response (Steam's icon CDN gzips .ico files) states the
+        # COMPRESSED length while iter_content yields decoded bytes, so the byte
+        # count only means something for an unencoded body. A short compressed body
+        # is still caught: urllib3 enforces Content-Length on the raw stream and
+        # raises IncompleteRead (enforce_content_length defaults to True).
+        encoded = r.headers.get("Content-Encoding", "identity").lower() not in ("", "identity")
+        if not encoded and expected and expected.isdigit() and written != int(expected):
             raise IOError(f"incomplete download: {written}/{expected} bytes")
         os.replace(tmp, save_path)  # atomic within the same folder
         if register:
@@ -1249,6 +1255,82 @@ def download_apng(url, out_path, progress_cb=None, status_cb=None, register=True
 # workers gets the latency win without tripping that throttle.
 SGDB_MAX_WORKERS = 5
 
+# --- Official Steam store assets ----------------------------------------------
+# SGDB links a game to its Steam app and serves that app's asset metadata via
+# GET /games/id/{id}?platformdata=steam -> data.external_platform_data.steam[0]
+# = {"id": "<steam appid>", "metadata": {...}}. The URL templates below are the
+# ones SGDB's own game page ("Steam" tab) builds from that metadata. Filenames may
+# carry a hash folder on newer apps ("<hash>/library_capsule_2x.jpg") — they're
+# joined verbatim, so both layouts work.
+STEAM_STORE_CDN = "https://shared.steamstatic.com/store_item_assets/steam/apps"
+STEAM_COMMUNITY_CDN = "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps"
+
+def get_steam_platform_data(sgdb_id):
+    """Return (steam_appid, metadata) for the Steam app SGDB links to `sgdb_id`, or
+    None when there's no Steam link or the request fails. Never raises — a miss just
+    means the fetch proceeds with SGDB art only."""
+    try:
+        headers = {"Authorization": f"Bearer {load_api_key()}"}
+        d = _sgdb_get(f"https://www.steamgriddb.com/api/v2/games/id/{sgdb_id}",
+                      headers=headers, params={"platformdata": "steam"}, timeout=5).json()
+        entries = ((d.get("data") or {}).get("external_platform_data") or {}).get("steam") or []
+        if entries and entries[0].get("id") and isinstance(entries[0].get("metadata"), dict):
+            return str(entries[0]["id"]), entries[0]["metadata"]
+    except Exception:
+        _debug("get_steam_platform_data")
+    return None
+
+def _steam_lang_pick(by_lang):
+    """From a {language: filename} dict pick English, else the first listed."""
+    if not isinstance(by_lang, dict) or not by_lang:
+        return None
+    return by_lang.get("english") or next(iter(by_lang.values()), None)
+
+def steam_official_images(steam_appid, metadata):
+    """Map Steam store metadata to {slot: image_record} for every slot Steam has art
+    for. Records look like SGDB image records (url/mime/style/nsfw/humor) plus
+    "steam_official": True, so download_all_artwork can put them first unchanged.
+    style is "official" so a Logo/Icon "Official = Exclude" pref drops them via
+    _strip_never. Pure — no network.
+
+    Size picks: cover 2x (600x900, Steam's grid size), hero 1x (1920 wide; the 2x is
+    3840), logo 2x, header 1x (Steam serves no header_2x), icon = the 256px
+    clienticon .ico (the .jpg icon is 32x32), falling back to the .jpg."""
+    mtime = metadata.get("store_asset_mtime")
+    suffix = f"?t={mtime}" if mtime else ""
+
+    def store(field, prefer):
+        full = metadata.get(field) or {}
+        if field == "header_image_full":
+            fname = _steam_lang_pick(full)
+        else:
+            order = ("image2x", "image") if prefer == "2x" else ("image", "image2x")
+            fname = next((f for f in (_steam_lang_pick(full.get(k)) for k in order) if f), None)
+        if not fname:
+            return None
+        return f"{STEAM_STORE_CDN}/{steam_appid}/{fname}{suffix}"
+
+    urls = {
+        "grids":      store("library_capsule_full", "2x"),
+        "grids_wide": store("header_image_full", "1x"),
+        "heroes":     store("library_hero_full", "1x"),
+        "logos":      store("library_logo_full", "2x"),
+    }
+    if metadata.get("clienticon"):
+        urls["icons"] = f"{STEAM_COMMUNITY_CDN}/{steam_appid}/{metadata['clienticon']}.ico"
+    elif metadata.get("icon"):
+        urls["icons"] = f"{STEAM_COMMUNITY_CDN}/{steam_appid}/{metadata['icon']}.jpg"
+
+    mimes = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "ico": "image/x-icon"}
+    out = {}
+    for slot, url in urls.items():
+        if not url:
+            continue
+        ext = url.split(".")[-1].split("?")[0].lower()
+        out[slot] = {"url": url, "mime": mimes.get(ext, "image/" + ext), "style": "official",
+                     "nsfw": False, "humor": False, "steam_official": True}
+    return out
+
 def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, defer_icon=False):
     if prefs is None:
         prefs = load_prefs()
@@ -1296,13 +1378,23 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
         slot, (art_label, endpoint, base, dimensions) = item
         return slot, get_artwork(sgdb_id, endpoint, prefs, dimensions=dimensions)
 
+    # The Steam-link lookup is one more independent round-trip, so it rides in the
+    # same pool as the five slot fetches.
     with ThreadPoolExecutor(max_workers=SGDB_MAX_WORKERS) as ex:
+        steam_future = ex.submit(get_steam_platform_data, sgdb_id)
         slot_images = dict(ex.map(fetch_slot, slots.items()))
+        steam_link = steam_future.result()
+    steam_images = steam_official_images(*steam_link) if steam_link else {}
 
     # --- Phase 2: per slot (declared order, so results/progress stay deterministic),
     # download the applied art then the previews (previews run concurrently) -----
     for slot, (art_label, endpoint, base, dimensions) in slots.items():
-        images = slot_images.get(slot)
+        images = list(slot_images.get(slot) or [])
+        # Steam's own store asset always goes FIRST (so it is the auto-applied pick),
+        # even when SGDB has nothing for this slot. The only thing that drops it is a
+        # Logo/Icon "Official = Exclude" pref (_strip_never on its "official" style).
+        official = _strip_never([steam_images[slot]], endpoint, prefs) if slot in steam_images else []
+        images = official + images
         if not images:
             # A missing slot still consumes its 1 main + 3 preview steps so the bar
             # reaches 100% exactly (same accounting as the serial version).
@@ -1371,6 +1463,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
                                       "animated": is_animated_image(img),
                                       "nsfw":     bool(img.get("nsfw", False)),
                                       "humor":    bool(img.get("humor", False)),
+                                      "steam":    bool(img.get("steam_official", False)),
                                   }
                                   for img in options
                               ],

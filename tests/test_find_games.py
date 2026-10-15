@@ -2351,3 +2351,318 @@ def test_restore_clear_managed_artwork_wipes_restore_point(tmp_path, monkeypatch
     fg.clear_managed_artwork()
 
     assert not os.path.exists(manifest_path)
+
+
+# ---------------------------------------------------------------------------
+# Official Steam store assets (steam_official_images / get_steam_platform_data)
+# and Steam-first download_all_artwork wiring.
+# ---------------------------------------------------------------------------
+
+_STEAM_META_PORTAL2 = {
+    "store_asset_mtime": 1745362999,
+    "clienticon": "25a5a16b2423bf7487ac5340b5b0948cef48c5f8",
+    "icon": "25a5a16b2423bf7487ac5340b5b0948cef48c5f8",
+    "header_image_full": {"english": "header.jpg"},
+    "library_capsule_full": {"image": {"english": "library_600x900.jpg"},
+                             "image2x": {"english": "library_600x900_2x.jpg"}},
+    "library_hero_full": {"image": {"english": "library_hero.jpg"}},
+    "library_logo_full": {"image": {"english": "logo.png"}, "image2x": {"english": "logo_2x.png"}},
+}
+
+
+def test_steam_official_images_old_layout_urls():
+    out = fg.steam_official_images("620", _STEAM_META_PORTAL2)
+    store = fg.STEAM_STORE_CDN
+    community = fg.STEAM_COMMUNITY_CDN
+    t = "?t=1745362999"
+
+    assert out["grids"]["url"] == store + "/620/library_600x900_2x.jpg" + t
+    assert out["grids_wide"]["url"] == store + "/620/header.jpg" + t
+    assert out["heroes"]["url"] == store + "/620/library_hero.jpg" + t
+    assert out["logos"]["url"] == store + "/620/logo_2x.png" + t
+    assert out["icons"]["url"] == community + "/620/25a5a16b2423bf7487ac5340b5b0948cef48c5f8.ico"
+
+    for slot, record in out.items():
+        assert record["steam_official"] is True, slot
+        assert record["style"] == "official", slot
+        assert record["nsfw"] is False, slot
+        assert record["humor"] is False, slot
+        assert fg.is_animated_image(record) is False, slot
+
+
+def test_steam_official_images_fallbacks():
+    meta = {
+        "icon": "abc123",
+        "header_image_full": {"english": "header.jpg"},
+        "library_capsule_full": {"image": {"english": "library_600x900.jpg"}},
+        "library_hero_full": {"image2x": {"english": "library_hero_2x.jpg"}},
+        "library_logo_full": {"image": {"english": "logo.png"}},
+    }
+    out = fg.steam_official_images("7", meta)
+    store = fg.STEAM_STORE_CDN
+    community = fg.STEAM_COMMUNITY_CDN
+
+    assert out["grids"]["url"] == store + "/7/library_600x900.jpg"
+    assert out["grids_wide"]["url"] == store + "/7/header.jpg"
+    assert out["heroes"]["url"] == store + "/7/library_hero_2x.jpg"
+    assert out["logos"]["url"] == store + "/7/logo.png"
+    assert out["icons"]["url"] == community + "/7/abc123.jpg"
+    assert out["icons"]["url"].endswith(".jpg")
+
+    for record in out.values():
+        assert "?t=" not in record["url"]
+
+    assert fg.steam_official_images("7", {}) == {}
+
+
+def test_steam_official_images_hashed_layout_and_language():
+    hashed = "2ba105370a00877459144db0dd68af5f2d338429/library_capsule_2x.jpg"
+    meta = {
+        "library_capsule_full": {"image2x": {"english": hashed}},
+        "library_hero_full": {"image": {"german": "hero_de.jpg"}},
+        "library_logo_full": {"image2x": {"english": "logo_en.png", "german": "logo_de.png"}},
+    }
+    out = fg.steam_official_images("9", meta)
+    store = fg.STEAM_STORE_CDN
+
+    assert out["grids"]["url"] == store + "/9/" + hashed
+    assert out["heroes"]["url"] == store + "/9/hero_de.jpg"
+    assert out["logos"]["url"] == store + "/9/logo_en.png"
+
+
+def test_get_steam_platform_data_parses_link(monkeypatch):
+    recorded = {}
+
+    def fake_sgdb_get(url, headers=None, params=None, timeout=None, retries=3):
+        recorded["url"] = url
+        recorded["params"] = params
+        payload = {"success": True, "data": {
+            "id": 17830,
+            "external_platform_data": {"steam": [{"id": "620", "metadata": _STEAM_META_PORTAL2}]},
+        }}
+        return types.SimpleNamespace(json=lambda p=payload: p)
+
+    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get)
+    monkeypatch.setattr(fg, "load_api_key", lambda *a, **k: "K")
+
+    assert fg.get_steam_platform_data(17830) == ("620", _STEAM_META_PORTAL2)
+    assert recorded["url"].endswith("/games/id/17830")
+    assert recorded["params"] == {"platformdata": "steam"}
+
+
+def test_get_steam_platform_data_none_on_missing_or_error(monkeypatch):
+    monkeypatch.setattr(fg, "load_api_key", lambda *a, **k: "K")
+
+    def fake_sgdb_get_no_platform(url, headers=None, params=None, timeout=None, retries=3):
+        payload = {"success": True, "data": {"id": 17830}}
+        return types.SimpleNamespace(json=lambda p=payload: p)
+
+    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get_no_platform)
+    assert fg.get_steam_platform_data(17830) is None
+
+    def fake_sgdb_get_empty_steam(url, headers=None, params=None, timeout=None, retries=3):
+        payload = {"success": True, "data": {"external_platform_data": {"steam": []}}}
+        return types.SimpleNamespace(json=lambda p=payload: p)
+
+    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get_empty_steam)
+    assert fg.get_steam_platform_data(17830) is None
+
+    def fake_sgdb_get_raises(url, headers=None, params=None, timeout=None, retries=3):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get_raises)
+    assert fg.get_steam_platform_data(17830) is None
+
+    def fake_sgdb_get_bad_json(url, headers=None, params=None, timeout=None, retries=3):
+        def bad_json():
+            raise ValueError("no json")
+        return types.SimpleNamespace(json=bad_json)
+
+    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get_bad_json)
+    assert fg.get_steam_platform_data(17830) is None
+
+
+def _five_static(prefix):
+    return [_static(f"https://sgdb/{prefix}{i}.png") for i in range(5)]
+
+
+def _steam_link_patch(monkeypatch):
+    monkeypatch.setattr(fg, "get_steam_platform_data",
+                        lambda sgdb_id, m=_STEAM_META_PORTAL2: ("620", m))
+
+
+def test_download_all_artwork_steam_first_and_applied(tmp_path, monkeypatch):
+    slot_assets = {
+        "grids":  _five_static("g"),
+        "heroes": _five_static("h"),
+        "logos":  _five_static("l"),
+        "icons":  _five_static("i"),
+    }
+    _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
+    _steam_link_patch(monkeypatch)
+    steam_images = fg.steam_official_images("620", _STEAM_META_PORTAL2)
+
+    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+
+    for slot in ("grids", "grids_wide", "heroes", "logos", "icons"):
+        sd = results[slot]
+        assert sd["option_urls"][0] == steam_images[slot]["url"], slot
+        assert len(sd["option_urls"]) == 5, slot
+        assert sd["applied_index"] == 0, slot
+        assert sd["option_meta"][0]["steam"] is True, slot
+        assert all(m["steam"] is False for m in sd["option_meta"][1:]), slot
+
+    assert results["grids"]["applied_path"].endswith("12345p.jpg")
+    icon_uid, icon_path = results["icon_to_set"]
+    assert icon_uid == 12345
+    assert icon_path.endswith("12345_icon.ico")
+
+
+def test_download_all_artwork_steam_fills_empty_slot(tmp_path, monkeypatch):
+    _install_fetch_mocks(monkeypatch, tmp_path, {})
+    _steam_link_patch(monkeypatch)
+    steam_images = fg.steam_official_images("620", _STEAM_META_PORTAL2)
+
+    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+
+    for slot in ("grids", "grids_wide", "heroes", "logos", "icons"):
+        sd = results[slot]
+        assert isinstance(sd, dict), slot
+        assert sd["option_urls"] == [steam_images[slot]["url"]], slot
+        assert sd["applied_index"] == 0, slot
+
+
+def test_download_all_artwork_steam_excluded_by_official_never(tmp_path, monkeypatch):
+    slot_assets = {
+        "grids":  _five_static("g"),
+        "heroes": _five_static("h"),
+        "logos":  _five_static("l"),
+        "icons":  _five_static("i"),
+    }
+    _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
+    _steam_link_patch(monkeypatch)
+    steam_images = fg.steam_official_images("620", _STEAM_META_PORTAL2)
+
+    prefs = {"logo_official": "never", "icon_official": "never", "grid_no_logo": "never"}
+    results = fg.download_all_artwork(42, 12345, prefs=prefs, defer_icon=True)
+
+    for slot in ("logos", "icons"):
+        sd = results[slot]
+        assert steam_images[slot]["url"] not in sd["option_urls"], slot
+        assert sd["option_meta"][0]["steam"] is False, slot
+
+    for slot in ("grids", "grids_wide", "heroes"):
+        sd = results[slot]
+        assert sd["option_urls"][0] == steam_images[slot]["url"], slot
+
+
+def test_download_all_artwork_no_steam_link_unchanged(tmp_path, monkeypatch):
+    slot_assets = {
+        "grids":  _five_static("g"),
+        "heroes": _five_static("h"),
+        "logos":  _five_static("l"),
+        "icons":  _five_static("i"),
+    }
+    _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
+    monkeypatch.setattr(fg, "get_steam_platform_data", lambda sgdb_id: None)
+
+    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+
+    expected = {"grids": slot_assets["grids"], "grids_wide": slot_assets["grids"],
+                "heroes": slot_assets["heroes"], "logos": slot_assets["logos"],
+                "icons": slot_assets["icons"]}
+    for slot, assets in expected.items():
+        sd = results[slot]
+        assert sd["option_urls"] == [a["url"] for a in assets[:5]], slot
+        assert all(m["steam"] is False for m in sd["option_meta"]), slot
+
+
+def _find_game(games, app_id):
+    for g in games:
+        if g["app_id"] == app_id:
+            return g
+    return None
+
+
+def test_ignored_game_lands_in_hidden(tmp_path, monkeypatch):
+    skip_file = tmp_path / "skip"
+    grid = tmp_path / "grid"
+    os.makedirs(grid, exist_ok=True)
+    sc = tmp_path / "shortcuts.vdf"
+    _write_shortcuts(str(sc), {
+        "0": {"appid": 100, "AppName": "Game One"},
+        "1": {"appid": 200, "AppName": "Game Two"},
+    })
+    monkeypatch.setattr(fg, "SKIP_FILE", str(skip_file))
+    monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
+    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
+
+    before = fg.get_non_steam_games()
+    assert _find_game(before, 100)["skipped"] is False
+    assert _find_game(before, 200)["skipped"] is False
+
+    fg.add_to_skip_list(100)
+
+    after = fg.get_non_steam_games()
+    assert _find_game(after, 100)["skipped"] is True
+    assert _find_game(after, 100)["has_art"] is True
+    assert _find_game(after, 200)["skipped"] is False
+    assert _find_game(after, 200)["has_art"] is False
+
+    # Restore button: drop 100's line and re-read.
+    with open(skip_file, "w", encoding="utf-8") as f:
+        f.write("")
+
+    restored = fg.get_non_steam_games()
+    assert _find_game(restored, 100)["skipped"] is False
+
+
+# ---------------------------------------------------------------------------
+# download_artwork — the compressed-response length check (T6)
+# ---------------------------------------------------------------------------
+
+def test_download_artwork_gzip_length_mismatch_still_saves(tmp_path, monkeypatch):
+    """A gzipped response states the COMPRESSED length while iter_content yields
+    decoded bytes, so a byte-count mismatch on an encoded body must not fail the
+    download — the decoded bytes are still written and swapped into place."""
+    def fake_http_get(url, **kwargs):
+        return _FakeStreamResp(200, [b"abcd", b"efgh"],
+                               {"Content-Length": "3", "Content-Encoding": "gzip"})
+
+    monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
+
+    save_path = tmp_path / "a.ico"
+    assert fg.download_artwork("https://x/icon.ico", str(save_path), register=False) is True
+
+    with open(save_path, "rb") as f:
+        assert f.read() == b"abcdefgh"
+    assert not (tmp_path / "a.ico.part").exists()
+
+
+def test_download_artwork_unencoded_length_mismatch_fails(tmp_path, monkeypatch):
+    """An unencoded body whose byte count disagrees with Content-Length is a
+    truncated download: the .part is removed and the call returns False."""
+    def fake_http_get(url, **kwargs):
+        return _FakeStreamResp(200, [b"abc"], {"Content-Length": "10"})
+
+    monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
+
+    save_path = tmp_path / "b.png"
+    assert fg.download_artwork("https://x/b.png", str(save_path), register=False) is False
+    assert not save_path.exists()
+    assert not (tmp_path / "b.png.part").exists()
+
+
+def test_download_artwork_identity_encoding_length_mismatch_fails(tmp_path, monkeypatch):
+    """Content-Encoding: identity is an unencoded body, so the length check still
+    applies: a mismatch fails the download and leaves no file behind."""
+    def fake_http_get(url, **kwargs):
+        return _FakeStreamResp(200, [b"abc"],
+                               {"Content-Length": "10", "Content-Encoding": "identity"})
+
+    monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
+
+    save_path = tmp_path / "c.png"
+    assert fg.download_artwork("https://x/c.png", str(save_path), register=False) is False
+    assert not save_path.exists()
+    assert not (tmp_path / "c.png.part").exists()
