@@ -123,7 +123,11 @@ def show_info(app):
         "  SteamGridDB and pick the right match.",
         "• 'Re-fetch' clears a game's current art so it's re-downloaded",
         "  on your next fetch.",
-        "• Skipped games are tucked into the 'Hidden' section.",
+        "• 'Ignore' tucks a game you never want fetched into the",
+        "  'Hidden' section, along with games SteamGridDB can't",
+        "  find. 'Restore' brings either kind back.",
+        "• When a game is on the Steam store, its official Steam",
+        "  artwork is the first option (tagged STEAM).",
         "• Toggle dark/light mode anytime in Settings.",
         "• 'Undo Last Fetch' restores the previous artwork.",
     ])

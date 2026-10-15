@@ -30,6 +30,7 @@ def _run_animation(lbl, img, frame):
 def _update_badge(badge_label, meta):
     """Show or hide the top-left badge overlay based on image metadata."""
     parts = []
+    if meta.get("steam"):    parts.append("STEAM")
     if meta.get("animated"): parts.append("▶")
     if meta.get("nsfw"):     parts.append("18+")
     if meta.get("humor"):    parts.append("MEME")

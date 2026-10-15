@@ -4,6 +4,23 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.5.1] — 2026-10-15
+
+### Added
+- **Official Steam artwork comes first.** When SteamGridDB links a game to its Steam store
+  page, the game's own Steam artwork — cover, wide cover, hero, logo and icon — is now the
+  first option in every slot of the results screen, tagged **STEAM**, and is the one the
+  fetch applies. The community art is still there as the alternatives. It shows up even
+  when SteamGridDB has no community art for that slot. The only setting that leaves it out
+  is **Logo → Official** or **Icon → Official** set to *Exclude*. Games SteamGridDB doesn't
+  link to Steam (emulated console games, homebrew) fetch exactly as before.
+- **Ignore a game.** Select a game and press **Ignore** to move it into the Hidden section
+  so fetches leave it alone. Its existing artwork is not touched.
+
+### Changed
+- **Reset Skip is now Restore.** It moves a hidden game back to the main list whether it
+  was hidden because SteamGridDB couldn't find it or because you ignored it.
+
 ## [1.5.0] — 2026-08-18
 
 ### Fixed
