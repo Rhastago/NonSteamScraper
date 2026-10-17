@@ -8,10 +8,11 @@ BACKUP_FOLDER) to *real* paths under the user's home and may even create the
 Steam grid folder. This machine has Steam installed, so those constants point
 at the user's real data.
 
-To guarantee we never touch real user files, this module sets HOME to a throw-
-away temp directory *before* importing find_games (see the import block below),
-so every ``os.path.expanduser("~/...")`` constant is rebased into that temp dir
-at import time. On top of that, every test that exercises a function reading one
+To guarantee we never touch real user files, tests/conftest.py sets HOME to a
+throw-away temp directory *before* this module imports find_games, so every
+``os.path.expanduser("~/...")`` constant is rebased into that temp dir at import
+time; conftest removes it when the session ends, and its G-HOME guard fails any
+test that writes into it. On top of that, every test that exercises a function reading one
 of the module-level path constants ALSO monkeypatches that specific constant
 onto a pytest ``tmp_path`` so each test is fully isolated and deterministic.
 
@@ -23,16 +24,14 @@ import os
 import sys
 import json
 import types
-import tempfile
 
 import pytest
 
-# --- Import find_games with a sandboxed HOME so module-level path constants
-# --- never resolve to the real user's ~/.steamart_* files. ----------------
-_SANDBOX_HOME = tempfile.mkdtemp(prefix="steamart_test_home_")
-os.environ["HOME"] = _SANDBOX_HOME
-# Also neutralise Windows-style home resolution just in case.
-os.environ["USERPROFILE"] = _SANDBOX_HOME
+# --- find_games is imported under the sandbox HOME that conftest.py creates
+# --- (and removes), so module-level path constants never resolve to the real
+# --- user's ~/.steamart_* files. Refuse to run if that ever stops being true.
+assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
+    "tests/conftest.py must sandbox HOME before find_games is imported")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1568,6 +1567,8 @@ def test_download_all_artwork_defer_icon_shape_consumable(tmp_path, monkeypatch)
     monkeypatch.setattr(fg, "GRID_FOLDER", str(tmp_path / "grid"))
     monkeypatch.setattr(fg, "CACHE_FOLDER", str(tmp_path / "cache"))
     monkeypatch.setattr(fg, "BACKUP_FOLDER", str(tmp_path / "backup"))
+    monkeypatch.setattr(fg, "MANAGED_FILE", str(tmp_path / "managed"))
+    monkeypatch.setattr(fg, "RESTORE_FOLDER", str(tmp_path / "restore"))
     os.makedirs(fg.GRID_FOLDER, exist_ok=True)
 
     # Every slot returns one static PNG option so each slot auto-applies (incl.
@@ -2268,6 +2269,7 @@ def test_http_seam_download_artwork_uses_seam_with_stream_and_timeout(monkeypatc
 
     monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
     monkeypatch.setattr(fg.requests, "get", _forbidden_get)
+    monkeypatch.setattr(fg, "MANAGED_FILE", str(tmp_path / "managed"))
 
     save_path = str(tmp_path / "12345p.png")
     assert fg.download_artwork("http://x/img.png", save_path) is True

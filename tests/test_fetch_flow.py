@@ -9,25 +9,21 @@ state and the skip-list decisions all run for real.
 The stand-in modules are installed into sys.modules for this file only and removed
 again afterwards, so no other test can pick them up.
 
-Like test_find_games.py, HOME is sandboxed before find_games is imported (importing
-it creates folders under HOME). If another test file imported it first, its sandbox
-is already in place and is reused.
+HOME is sandboxed by tests/conftest.py before find_games is imported (importing it
+binds every ~/.steamart_* path to HOME).
 """
 
 import os
 import sys
 import types
-import tempfile
 
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-if "find_games" not in sys.modules:
-    _SANDBOX_HOME = tempfile.mkdtemp(prefix="steamart_test_home_")
-    os.environ["HOME"] = _SANDBOX_HOME
-    os.environ["USERPROFILE"] = _SANDBOX_HOME
+assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
+    "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
 
