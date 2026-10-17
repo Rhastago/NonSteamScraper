@@ -267,6 +267,7 @@ def make_app(ui, games=()):
             self._fetch_run = None
             self._closing = False
             self._settings_on_fetch_end = None
+            self._results_view = None
             self._thumb_executor = types.SimpleNamespace(shutdown=lambda wait=True: None)
             self.theme = {"warn": "#d17a00", "fg": "#000000"}
             self.theme_name = "dark"
@@ -318,7 +319,7 @@ def make_settings_app(ui, monkeypatch, busy=False, users=("111",)):
     app._modal_stack = []
     app.ICON_BTN = app.ICON_INLINE = app.ICON_ACTION = app.ICON_NAV = 24
     app._icon = lambda name, size=18: None
-    app._fit_window_to_workarea = lambda win, w, h: (w, h)
+    app._fit_window_to_workarea = lambda win, desired_w, desired_h: (desired_w, desired_h)
     app._fetch_busy = busy
     return app
 
@@ -841,11 +842,9 @@ def results_env(ui, fetch_env, monkeypatch):
     monkeypatch.setattr(fg, "load_pending_icons", lambda: {})
     monkeypatch.setattr(fg, "has_pending_icons", lambda: False)
     app = make_settings_app(ui, monkeypatch)
-    app._queued_apply_btns = []
-    app._build_pending_icons = {}
-    app._results_widgets = None
-    app.results_window = StandInWidget()
     rec.app = app
+    rec.view = rw.ResultsWindow(app)
+    rec.view.top = StandInWidget()
     return rec
 
 
@@ -860,10 +859,10 @@ def _slot_data(base, urls, animated, applied_index):
             "filename_base": base}
 
 
-def build_results_section(ui, app, app_id, slots):
+def build_results_section(env, app_id, slots):
     StandInWidget.created = []
-    ui.results_window.build_game_result_section(
-        app, StandInWidget(), {"name": "G", "app_id": app_id, "results": slots})
+    env.view.build_game_result_section(
+        StandInWidget(), {"name": "G", "app_id": app_id, "results": slots})
     return list(StandInWidget.created)
 
 
@@ -881,7 +880,7 @@ def test_results_animated_icon_apply_writes_or_queues_the_icon(ui, results_env, 
     app = results_env.app
     results_env.steam_running = steam_running
     data = _slot_data("7_icon", ["https://x/anim.png"], [True], applied_index=None)
-    btn = _apply_button(build_results_section(ui, app, 7, {"icons": data}))
+    btn = _apply_button(build_results_section(results_env, 7, {"icons": data}))
 
     btn.opts["command"]()
     assert results_env.installed == [], "the encode must not run on the Tk thread"
@@ -902,7 +901,7 @@ def test_results_animated_icon_apply_writes_or_queues_the_icon(ui, results_env, 
 def test_results_animated_cover_apply_writes_no_icon(ui, results_env):
     app = results_env.app
     data = _slot_data("7p", ["https://x/anim.webp"], [True], applied_index=None)
-    btn = _apply_button(build_results_section(ui, app, 7, {"grids": data}))
+    btn = _apply_button(build_results_section(results_env, 7, {"grids": data}))
     btn.opts["command"]()
     results_env.threads.run_all()
     assert results_env.installed == [("/grid/7p.png", "https://x/anim.webp", True)]
@@ -918,7 +917,7 @@ def test_results_static_apply_installs_on_a_worker_then_shows_the_outcome(ui, re
     results_env.install_ok = ok
     data = _slot_data("7p", ["https://x/a.png", "https://x/b.jpg"], [False, False],
                       applied_index=0)
-    widgets = build_results_section(ui, app, 7, {"grids": data})
+    widgets = build_results_section(results_env, 7, {"grids": data})
     btn = _apply_button(widgets)
     next_btn = [w for w in widgets if w.opts.get("text") == "▶"][0]
     next_btn.opts["command"]()           # view option 2
@@ -1080,3 +1079,58 @@ def test_revisiting_an_option_while_it_downloads_starts_no_second_download(ui, p
     _view(ui, env, 2)
     _view(ui, env, 3)
     assert len(env.threads.started) == 1
+
+
+# ---------------------------------------------------------------------------
+# T-A4 — the results window owns its state; the poll/apply race guard holds
+# ---------------------------------------------------------------------------
+
+def test_main_poll_holds_off_while_the_results_apply_flow_runs(ui, results_env, monkeypatch):
+    """Icons were queued (Steam open). The user presses "Close Steam & Apply
+    Icons" in the results window; while that flow runs, the main window's 4 s
+    pending-icon poll must not apply the queue too (they would race over the
+    file). After the flow ends, the poll works again."""
+    app = results_env.app
+    world = types.SimpleNamespace(steam=True, pending={7: "/grid/7_icon.png"}, applied=[])
+    monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: world.steam)
+    monkeypatch.setattr(fg, "has_pending_icons", lambda: bool(world.pending))
+    monkeypatch.setattr(fg, "load_pending_icons", lambda: dict(world.pending))
+    monkeypatch.setattr(fg, "stop_steam", lambda: setattr(world, "steam", False))
+
+    def apply_pending():
+        world.applied.append(dict(world.pending))
+        n = len(world.pending)
+        world.pending = {}
+        return n
+    monkeypatch.setattr(fg, "apply_pending_icons", apply_pending)
+
+    view = ui.results_window.ResultsWindow(app)
+    app._results_view = view
+    StandInWidget.created = []
+    view.show([{"name": "G", "app_id": 7, "results": {
+        "icons": _slot_data("7_icon", ["https://x/i.png"], [False], applied_index=0)}}])
+    widgets = list(StandInWidget.created)
+
+    widget_by_text(widgets, "Close Steam & Apply Icons").opts["command"]()
+    assert view.is_applying() is True
+    world.steam = False            # Steam is closing; the main poll ticks now
+    app._flush_pending_icons()
+    assert world.applied == [], "the main poll must hold off while the results flow runs"
+
+    results_env.threads.run_all()  # the flow's worker: close Steam, apply, on_success
+    assert world.applied == [{7: "/grid/7_icon.png"}]
+    assert view.is_applying() is False
+
+    world.pending = {8: "/grid/8_icon.png"}
+    app._flush_pending_icons()
+    assert world.applied[-1] == {8: "/grid/8_icon.png"}, "the poll works again afterwards"
+
+
+def test_results_window_state_lives_on_the_window_not_the_app(ui, results_env):
+    app = results_env.app
+    view = ui.results_window.ResultsWindow(app)
+    view.show([])
+    for name in ("_results_widgets", "_results_applying", "_queued_apply_btns",
+                 "_results_steam_state", "results_window", "_build_pending_icons"):
+        assert not hasattr(app, name), f"app.{name} must not exist (T-A4)"
+    assert view.widgets["window"] is view.top

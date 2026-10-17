@@ -90,7 +90,8 @@ class FetchMixin:
         # Skip while the results window's explicit "Close Steam & Apply Icons" flow is
         # mid-run — it applies the queue itself; letting the poll also fire is harmless
         # (idempotent) but this avoids the two racing over the same file.
-        if getattr(self, "_results_applying", False):
+        view = self._results_view
+        if view is not None and view.is_applying():
             return
         if fg.has_pending_icons() and not fg.is_steam_running():
             n = fg.apply_pending_icons()

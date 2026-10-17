@@ -78,6 +78,8 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self._closing = False
         # Set by a Settings window opened during a fetch; _end_fetch calls it (S2).
         self._settings_on_fetch_end = None
+        # The open results window (results_window.ResultsWindow), or None.
+        self._results_view = None
         fg.RATE_LIMIT_HOOK = lambda msg: self.log(msg, icon="warning")
         self._icon_cache = {}
         # Row-thumbnail cache: (app_id, path, mtime, size) -> ImageTk.PhotoImage.
@@ -122,7 +124,8 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         return settings_window.open_settings(self)
 
     def show_results(self, fetch_results):
-        return results_window.show_results(self, fetch_results)
+        self._results_view = results_window.ResultsWindow(self)
+        self._results_view.show(fetch_results)
 
 
 
