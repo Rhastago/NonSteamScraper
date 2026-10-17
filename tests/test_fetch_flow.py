@@ -161,6 +161,7 @@ def make_app(ui, games=()):
             self._fetched_this_session = False
             self._restore_point_inherited = False
             self._fetch_busy = False
+            self.theme = {"warn": "#d17a00", "fg": "#000000"}
 
         # widget-layer stand-ins
         def log(self, message, icon=None):
@@ -203,7 +204,7 @@ def fetch_env(ui, tmp_path, monkeypatch):
 
     def fake_search(name, app_id=None):
         rec.searched.append(app_id)
-        return rec.outcomes.get(app_id, 4242)
+        return rec.outcomes.get(app_id, (fg.SEARCH_FOUND, 4242))
 
     def fake_download(sgdb_id, app_id, prefs, progress_cb=None, defer_icon=False):
         rec.downloaded.append(app_id)
@@ -214,6 +215,7 @@ def fetch_env(ui, tmp_path, monkeypatch):
     monkeypatch.setattr(fm, "add_to_skip_list", lambda app_id: rec.skipped.append(app_id))
     monkeypatch.setattr(fm, "load_prefs", lambda: {})
     monkeypatch.setattr(fm, "load_api_key", lambda: "KEY")
+    monkeypatch.setattr(fg, "check_api_key", lambda key=None: fg.KEY_ACCEPTED)
     monkeypatch.setattr(fg, "begin_restore_run", lambda: rec.calls.append("begin"))
     monkeypatch.setattr(fg, "seal_restore_point", lambda: rec.calls.append("seal"))
     monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: False)
@@ -245,3 +247,77 @@ def test_fetch_body_without_games_fetches_every_game_missing_art(ui, fetch_env):
     app._run_fetch_body()
 
     assert fetch_env.searched == [1, 3]
+
+
+# ---------------------------------------------------------------------------
+# T2 / Q2 — the key is checked before the run; a refusal never hides a game
+# ---------------------------------------------------------------------------
+
+def test_rejected_key_runs_nothing_and_opens_settings(ui, fetch_env, monkeypatch):
+    monkeypatch.setattr(fg, "check_api_key", lambda key=None: fg.KEY_REJECTED)
+    app = make_app(ui, [_game(1), _game(2)])
+
+    app._run_fetch_body()
+
+    assert "begin" not in fetch_env.calls, "begin_restore_run must not run"
+    assert fetch_env.searched == [] and fetch_env.skipped == []
+    popups = [c for c in ui.mb.calls if c[0] == "showwarning"]
+    assert len(popups) == 1
+    _kind, args, _kw = popups[0]
+    assert args[0] == "API Key Rejected"
+    assert args[1] == ("SteamGridDB rejected your API key, so nothing was fetched."
+                       "\n\nOpen Settings to check or replace it.")
+    assert app.settings_opened == 1
+    assert app.fetch_button.opts["state"] == "normal"
+
+
+def test_unreachable_key_check_runs_nothing_and_blames_no_key(ui, fetch_env, monkeypatch):
+    monkeypatch.setattr(fg, "check_api_key", lambda key=None: fg.KEY_UNREACHABLE)
+    app = make_app(ui, [_game(1)])
+
+    app._run_fetch_body()
+
+    assert "begin" not in fetch_env.calls
+    assert fetch_env.searched == [] and fetch_env.skipped == []
+    assert ui.mb.calls == [], "no popup when SteamGridDB cannot be reached"
+    assert app.settings_opened == 0
+    assert app.status[-1] == ("Couldn't reach SteamGridDB — nothing was fetched. "
+                              "Check your connection and try again.")
+
+
+def test_key_check_runs_before_begin_restore_run(ui, fetch_env, monkeypatch):
+    monkeypatch.setattr(fg, "check_api_key",
+                        lambda key=None: fetch_env.calls.append("check") or fg.KEY_ACCEPTED)
+    app = make_app(ui, [_game(1)])
+
+    app._run_fetch_body()
+
+    assert fetch_env.calls[:2] == ["check", "begin"]
+
+
+def test_refused_search_is_not_skip_listed_and_stops_the_run(ui, fetch_env):
+    """Safety net (Q2): a refusal mid-run stops the loop at that game, hides
+    nothing, and still seals the games already done."""
+    fetch_env.outcomes = {2: (fg.SEARCH_REFUSED, None)}
+    app = make_app(ui, [_game(1), _game(2), _game(3)])
+
+    app._run_fetch_body()
+
+    assert fetch_env.searched == [1, 2], "game 3 must never be searched"
+    assert fetch_env.downloaded == [1]
+    assert fetch_env.skipped == []
+    assert ("SteamGridDB rejected the API key — fetch stopped. No games were hidden."
+            in app.logged)
+    assert "seal" in fetch_env.calls
+    assert app.status[-1] == "Fetch stopped — SteamGridDB rejected the API key."
+
+
+def test_not_found_is_skip_listed_but_a_network_error_is_not(ui, fetch_env):
+    fetch_env.outcomes = {1: (fg.SEARCH_NOT_FOUND, None), 2: (fg.SEARCH_ERROR, None)}
+    app = make_app(ui, [_game(1), _game(2), _game(3)])
+
+    app._run_fetch_body()
+
+    assert fetch_env.skipped == [1]
+    assert fetch_env.searched == [1, 2, 3]
+    assert fetch_env.downloaded == [3]

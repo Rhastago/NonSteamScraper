@@ -596,6 +596,151 @@ def test_sgdb_get_malformed_retry_after_falls_back_to_backoff(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# check_api_key / verify_api_key / search_game — explicit outcomes (B3, Q2)
+# The 401 body below is the one SGDB really returned for a bad key on
+# 2026-10-17 (TRIAGE evidence run).
+# ---------------------------------------------------------------------------
+
+class _JsonResp:
+    def __init__(self, status_code, body=None, headers=None):
+        self.status_code = status_code
+        self._body = body
+        self.headers = headers or {}
+
+    def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+_SGDB_401 = {"success": False, "errors": ["Invalid key format"]}
+
+
+def _serve(monkeypatch, *responses):
+    """Patch the HTTP seam to hand out `responses` in order (an Exception
+    instance is raised instead). Returns the list of URLs requested."""
+    queue = list(responses)
+    urls = []
+
+    def fake_get(url, headers=None, params=None, timeout=None, stream=False):
+        urls.append(url)
+        r = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(r, Exception):
+            raise r
+        return r
+    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(fg.time, "sleep", lambda s: None)
+    return urls
+
+
+def test_check_api_key_401_is_rejected(monkeypatch):
+    _serve(monkeypatch, _JsonResp(401, _SGDB_401))
+    assert fg.check_api_key("bad-key") == fg.KEY_REJECTED
+
+
+def test_check_api_key_403_is_rejected(monkeypatch):
+    _serve(monkeypatch, _JsonResp(403, {"success": False}))
+    assert fg.check_api_key("bad-key") == fg.KEY_REJECTED
+
+
+def test_check_api_key_connection_error_is_unreachable(monkeypatch):
+    _serve(monkeypatch, fg.requests.exceptions.ConnectionError("no route"))
+    assert fg.check_api_key("good-key") == fg.KEY_UNREACHABLE
+
+
+@pytest.mark.parametrize("resp", [
+    _JsonResp(500, {"success": False}),
+    _JsonResp(429, {"success": False}),
+    _JsonResp(200, ValueError("not json")),
+])
+def test_check_api_key_server_trouble_is_unreachable_not_rejected(monkeypatch, resp):
+    """A 5xx, a 429 that outlasts the retries or a garbled body says nothing
+    about the key, so it must never be reported as a rejection."""
+    _serve(monkeypatch, resp)
+    assert fg.check_api_key("good-key") == fg.KEY_UNREACHABLE
+
+
+def test_check_api_key_200_is_accepted(monkeypatch):
+    _serve(monkeypatch, _JsonResp(200, {"success": True, "data": []}))
+    assert fg.check_api_key("good-key") == fg.KEY_ACCEPTED
+
+
+def test_check_api_key_defaults_to_the_saved_key(monkeypatch):
+    seen = []
+
+    def fake_get(url, headers=None, params=None, timeout=None, stream=False):
+        seen.append(headers["Authorization"])
+        return _JsonResp(200, {"success": True})
+    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(fg, "load_api_key", lambda: "SAVED")
+    assert fg.check_api_key() == fg.KEY_ACCEPTED
+    assert seen == ["Bearer SAVED"]
+
+
+def test_verify_api_key_keeps_its_bool_contract(monkeypatch):
+    _serve(monkeypatch, _JsonResp(200, {"success": True}))
+    assert fg.verify_api_key("k") is True
+    _serve(monkeypatch, _JsonResp(401, _SGDB_401))
+    assert fg.verify_api_key("k") is False
+    _serve(monkeypatch, fg.requests.exceptions.ConnectionError("x"))
+    assert fg.verify_api_key("k") is False
+    assert fg.verify_api_key("   ") is False
+
+
+def _search_setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(fg, "NAMES_FILE", str(tmp_path / "names"))
+    monkeypatch.setattr(fg, "load_api_key", lambda: "KEY")
+
+
+def test_search_game_401_is_refused(tmp_path, monkeypatch):
+    """B3: a refused key used to come back as None — 'not found' — and the
+    fetch hid the game for good."""
+    _search_setup(tmp_path, monkeypatch)
+    _serve(monkeypatch, _JsonResp(401, _SGDB_401))
+    assert fg.search_game("Doom Eternal", 1) == (fg.SEARCH_REFUSED, None)
+
+
+def test_search_game_403_is_refused(tmp_path, monkeypatch):
+    _search_setup(tmp_path, monkeypatch)
+    _serve(monkeypatch, _JsonResp(403, {"success": False}))
+    assert fg.search_game("Doom", 1) == (fg.SEARCH_REFUSED, None)
+
+
+def test_search_game_empty_data_is_not_found_after_every_query(tmp_path, monkeypatch):
+    _search_setup(tmp_path, monkeypatch)
+    urls = _serve(monkeypatch, _JsonResp(200, {"success": True, "data": []}))
+    assert fg.search_game("Some Long Game Title", 1) == (fg.SEARCH_NOT_FOUND, None)
+    assert len(urls) == 2, "both the full and the 3-word query must come back empty"
+
+
+def test_search_game_network_error_is_error(tmp_path, monkeypatch):
+    _search_setup(tmp_path, monkeypatch)
+    _serve(monkeypatch, fg.requests.exceptions.ConnectionError("down"))
+    assert fg.search_game("Doom", 1) == (fg.SEARCH_ERROR, None)
+
+
+@pytest.mark.parametrize("resp", [
+    _JsonResp(200, {"success": False, "errors": ["x"]}),
+    _JsonResp(500, {"success": False}),
+    _JsonResp(429, {"success": False}),
+    _JsonResp(200, ValueError("not json")),
+    _JsonResp(200, {"success": True}),
+])
+def test_search_game_anything_but_genuine_empty_is_error(tmp_path, monkeypatch, resp):
+    """Only {"success": true, "data": []} may count as not-found."""
+    _search_setup(tmp_path, monkeypatch)
+    _serve(monkeypatch, resp)
+    assert fg.search_game("Doom", 1) == (fg.SEARCH_ERROR, None)
+
+
+def test_search_game_found_returns_first_hit(tmp_path, monkeypatch):
+    _search_setup(tmp_path, monkeypatch)
+    _serve(monkeypatch, _JsonResp(200, {"success": True, "data": [
+        {"id": 77, "name": "Doom"}, {"id": 78, "name": "Doom II"}]}))
+    assert fg.search_game("Doom", 1) == (fg.SEARCH_FOUND, 77)
+
+
+# ---------------------------------------------------------------------------
 # parse_net_workarea
 # ---------------------------------------------------------------------------
 

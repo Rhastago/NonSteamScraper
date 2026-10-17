@@ -89,11 +89,13 @@ def open_settings(app):
     app._iconify(eye_btn, "eye", app.ICON_BTN)
     eye_btn.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
 
-    # Status line shows whether a verified key is on file
+    # Status line shows whether a key is on file. It does NOT claim the key is
+    # valid: a key can be revoked on the SGDB site after it was saved, and every
+    # fetch checks it first (B17).
     key_status = tk.Label(api_frame, text="", font=(FONT_UI, 9), bg=t["bg"], anchor="w")
     key_status.pack(fill="x", pady=2)
     if load_api_key():
-        key_status.config(text="✓ A valid API Key is saved", fg=t["ok"])
+        key_status.config(text="✓ A key is saved", fg=t["ok"])
 
     def do_save_key():
         candidate = api_var.get().strip()

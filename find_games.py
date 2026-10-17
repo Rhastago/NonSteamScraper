@@ -77,13 +77,38 @@ def save_api_key(key):
             mtime = None
         _apikey_cache = (APIKEY_FILE, mtime, key.strip())
 
-def verify_api_key(key):
-    if not key or not key.strip(): return False
+# The three answers to "will SteamGridDB take this key?" (check_api_key). Only a
+# refusal blames the key; "unreachable" means we could not ask.
+KEY_ACCEPTED    = "accepted"
+KEY_REJECTED    = "rejected"
+KEY_UNREACHABLE = "unreachable"
+
+def check_api_key(key=None):
+    """Ask SteamGridDB whether `key` (default: the saved key) is accepted.
+    Returns KEY_ACCEPTED (HTTP 200 with success true), KEY_REJECTED (HTTP 401 or
+    403: SGDB refused the key itself, e.g. {"success":false,"errors":["Invalid key
+    format"]}; also an empty key) or KEY_UNREACHABLE (anything else: no network,
+    a timeout, a 5xx, a 429 that outlasted _sgdb_get's retries). Every fetch runs
+    this before it changes anything on disk. Never raises."""
+    if key is None:
+        key = load_api_key()
+    if not key or not key.strip():
+        return KEY_REJECTED
     try:
-        r = _http_get("https://www.steamgriddb.com/api/v2/search/autocomplete/test",
-                       headers={"Authorization": f"Bearer {key.strip()}"}, timeout=8)
-        return r.status_code == 200 and bool(r.json().get("success"))
-    except Exception: return False
+        r = _sgdb_get("https://www.steamgriddb.com/api/v2/search/autocomplete/test",
+                      headers={"Authorization": f"Bearer {key.strip()}"}, timeout=8)
+        if r.status_code in (401, 403):
+            return KEY_REJECTED
+        if r.status_code == 200 and r.json().get("success") is True:
+            return KEY_ACCEPTED
+    except Exception:
+        _debug("check_api_key")
+    return KEY_UNREACHABLE
+
+def verify_api_key(key):
+    """True only when SteamGridDB accepts `key` (the Settings Save check)."""
+    if not key or not key.strip(): return False
+    return check_api_key(key) == KEY_ACCEPTED
 
 # One HTTP seam for the whole app: every outbound GET goes through _http_get,
 # which draws from a single lazily-built, pooled requests.Session.  The app
@@ -995,7 +1020,17 @@ def apply_pending_icons():
     except Exception as e:
         print(f"Failed to apply pending icons: {e}"); return 0
 
+# search_game outcomes. Only SEARCH_NOT_FOUND may put a game on the skip list: a
+# refusal or an error says nothing about the game (B3 — a revoked key used to hide
+# the whole library, one game at a time).
+SEARCH_FOUND     = "found"       # sgdb_id is the first autocomplete hit
+SEARCH_NOT_FOUND = "not_found"   # every query got a genuine {"success": true, "data": []}
+SEARCH_REFUSED   = "refused"     # HTTP 401/403: SGDB refused the API key
+SEARCH_ERROR     = "error"       # network, timeout, 5xx, 429 after retries, bad body
+
 def search_game(name, app_id=None):
+    """Search SGDB for `name` (or the saved name override for app_id). Returns
+    (outcome, sgdb_id); sgdb_id is set only when outcome is SEARCH_FOUND."""
     key = load_api_key(); headers = {"Authorization": f"Bearer {key}"}
     if app_id:
         o = load_name_overrides()
@@ -1005,14 +1040,23 @@ def search_game(name, app_id=None):
     # dict.fromkeys preserves insertion order and deduplicates (e.g. short titles)
     for q in dict.fromkeys(q for q in [clean, short] if q):
         try:
-            d = _sgdb_get(f"https://www.steamgriddb.com/api/v2/search/autocomplete/{_url_quote(q)}",
-                          headers=headers, timeout=5).json()
-            if d["success"] and d["data"]:
-                g = d["data"][0]; print(f"  Found: {g['name']} (ID: {g['id']})"); return g["id"]
-        except (requests.exceptions.RequestException, ValueError):
-            return False  # transient network/parse error — caller should not skip permanently
-        except Exception: _debug("search_game")
-    print(f"  No results for: {clean}"); return None
+            r = _sgdb_get(f"https://www.steamgriddb.com/api/v2/search/autocomplete/{_url_quote(q)}",
+                          headers=headers, timeout=5)
+            if r.status_code in (401, 403):
+                return SEARCH_REFUSED, None
+            if r.status_code != 200:
+                return SEARCH_ERROR, None
+            d = r.json()
+            if not isinstance(d, dict) or d.get("success") is not True \
+                    or not isinstance(d.get("data"), list):
+                return SEARCH_ERROR, None
+            if d["data"]:
+                g = d["data"][0]; print(f"  Found: {g['name']} (ID: {g['id']})")
+                return SEARCH_FOUND, g["id"]
+        except Exception:
+            _debug("search_game")
+            return SEARCH_ERROR, None  # transient — the caller must not skip permanently
+    print(f"  No results for: {clean}"); return SEARCH_NOT_FOUND, None
 
 def _pref_params(prefs):
     params = {}
@@ -1738,8 +1782,8 @@ if __name__ == "__main__":
     print(f"Found {len(games)} games, {len(needs)} need artwork\n")
     for game in needs:
         print(f"🎮 {game['name']}")
-        sid = search_game(game["name"], game["app_id"])
-        if sid: download_all_artwork(sid, game["app_id"])
+        outcome, sid = search_game(game["name"], game["app_id"])
+        if outcome == SEARCH_FOUND: download_all_artwork(sid, game["app_id"])
         else: print("  ⚠️ Not found")
         print()
     print("✅ Done! Restart Steam.")

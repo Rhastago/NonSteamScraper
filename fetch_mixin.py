@@ -161,12 +161,30 @@ class FetchMixin:
             self.log(f"Fetch failed: {e}", icon="error")
             if fg.DEBUG:
                 traceback.print_exc()
-            # Reset the UI from this background thread via the _ui marshaling helper.
-            self._ui(lambda: self.fetch_button.config(state="normal", text="Fetch Missing Artwork"))
-            self._ui(lambda: self.progress_label.pack_forget())
-            self._ui(lambda: self.progress_bar.pack_forget())
-            self._ui(lambda: self._refit_window_height())
-            self._ui(lambda: self._set_status("Fetch failed — see log."))
+            self._reset_fetch_ui("Fetch failed — see log.")
+
+
+    def _reset_fetch_ui(self, status, color=None, icon=None):
+        """Worker thread: put the window back to idle after a run that ended
+        without results — Fetch enabled, progress hidden, `status` on the status
+        line. Every widget call is marshalled through self._ui."""
+        self._ui(lambda: self.fetch_button.config(state="normal", text="Fetch Missing Artwork"))
+        self._ui(lambda: self.progress_label.pack_forget())
+        self._ui(lambda: self.progress_bar.pack_forget())
+        self._ui(lambda: self._refit_window_height())
+        self._ui(lambda: self._set_status(status, color, icon=icon))
+
+
+    def _show_key_rejected(self):
+        """Tk thread: SteamGridDB refused the saved key before a fetch, so nothing
+        ran. Say so, then open Settings — the same pattern as the no-key popup."""
+        messagebox.showwarning(
+            "API Key Rejected",
+            "SteamGridDB rejected your API key, so nothing was fetched.\n\n"
+            "Open Settings to check or replace it.",
+            parent=self.window
+        )
+        self.open_settings()
 
 
     def _run_fetch_body(self, games=None):
@@ -185,6 +203,23 @@ class FetchMixin:
             self._ui(lambda: self._refit_window_height())
             return
 
+        # Check the key BEFORE anything changes on disk (Q2). A revoked key used to
+        # come back as "not found" for every game and hide the whole library. This
+        # is the worker thread, so a slow network never freezes the window.
+        key_state = fg.check_api_key()
+        if key_state == fg.KEY_REJECTED:
+            self.log("SteamGridDB rejected your API key — nothing was fetched.", icon="error")
+            self._reset_fetch_ui("API key rejected — nothing was fetched.",
+                                 self.theme["warn"], icon="warning")
+            self._ui(self._show_key_rejected)
+            return
+        if key_state != fg.KEY_ACCEPTED:
+            msg = ("Couldn't reach SteamGridDB — nothing was fetched. "
+                   "Check your connection and try again.")
+            self.log(msg, icon="error")
+            self._reset_fetch_ui(msg, self.theme["warn"], icon="warning")
+            return
+
         # AFTER the early return: a no-op fetch must not be able to destroy the
         # previous restore point (it would drop every sealed entry and its copies).
         fg.begin_restore_run()
@@ -194,6 +229,8 @@ class FetchMixin:
         # single atomic write after it (one read+parse+write instead of N), done while
         # Steam is closed so it can't clobber them. {unsigned_id: icon_path}.
         icons_to_set = {}
+        # Set when SteamGridDB refuses the key mid-run: the loop stops there.
+        stopped = None
 
         for i, game in enumerate(needs_art):
             start = time.monotonic()
@@ -209,11 +246,17 @@ class FetchMixin:
             self._ui(lambda i=i, total=total, short=short:
                      self.progress_label.config(text=f"[{i+1}/{total}] {short} — Searching SteamGridDB..."))
 
-            sgdb_id = search_game(name, app_id)
-            if sgdb_id is False:
+            outcome, sgdb_id = search_game(name, app_id)
+            if outcome == fg.SEARCH_REFUSED:
+                # Safety net for a key revoked after the check: stop, hide nothing.
+                self.log("SteamGridDB rejected the API key — fetch stopped. "
+                         "No games were hidden.", icon="error")
+                stopped = "Fetch stopped — SteamGridDB rejected the API key."
+                break
+            if outcome == fg.SEARCH_ERROR:
                 self.log("Network error — will retry on next fetch", icon="error")
                 continue
-            if sgdb_id:
+            if outcome == fg.SEARCH_FOUND:
                 def make_cb(_short, _start, _end, _i, _tot):
                     def cb(label, step, total_steps):
                         pct = _start + (step / total_steps) * (_end - _start)
@@ -240,6 +283,7 @@ class FetchMixin:
                     icons_to_set[uid] = icon_path
                 fetch_results.append({"name": name, "app_id": app_id, "results": results})
             else:
+                # Only a genuine "no results" (SEARCH_NOT_FOUND) reaches here.
                 self.log("Not found on SteamGridDB — skipping permanently", icon="warning")
                 add_to_skip_list(app_id)
 
@@ -265,15 +309,16 @@ class FetchMixin:
                 self.log(f"Applied {n} icon(s) to shortcuts.vdf.", icon="applied")
 
         self._ui(lambda: self.progress_var.set(100))
-        self._ui(lambda n=len(fetch_results), total=total:
-                 self.progress_label.config(text=f"Done! Fetched artwork for {n} of {total} game(s)."))
+        head = "Stopped —" if stopped else "Done!"
+        self._ui(lambda n=len(fetch_results), total=total, head=head:
+                 self.progress_label.config(text=f"{head} Fetched artwork for {n} of {total} game(s)."))
 
         if fetch_results:
             self.log("\nDone! Opening results screen...", icon="applied")
         else:
             self.log("\nDone! No new artwork was fetched.", icon="applied")
 
-        self._ui(lambda: self._set_status("Done!"))
+        self._ui(lambda: self._set_status(stopped or "Done!"))
         self._ui(lambda: self.fetch_button.config(state="normal", text="Fetch Missing Artwork"))
         self._ui(lambda: self.load_games())
         self._ui(lambda: self.check_steam_running())
