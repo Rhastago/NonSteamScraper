@@ -6,8 +6,6 @@ Each is a function taking the SteamArtApp instance as `app`; it reaches the shar
 themed-widget helpers, modal stack, and logging through `app`. SteamArtApp keeps a
 thin wrapper method per function so existing `self.open_*()` call sites are unchanged."""
 
-import os
-import glob
 import threading
 import tkinter as tk
 from tkinter import messagebox
@@ -202,17 +200,15 @@ def open_sgdb_search(app, game):
         chosen = results[sel[0]]
         save_name_override(game["app_id"], chosen["name"])
         app._remove_from_skip(game["app_id"])
-        # fg.GRID_FOLDER (not the by-value import) so account switches are honored.
-        for f in glob.glob(os.path.join(fg.GRID_FOLDER, f"{game['app_id']}*")):
-            try:
-                os.remove(f)
-            except Exception:
-                pass
+        # The same snapshot + exact-id delete as Re-fetch: Undo can restore the
+        # art, and a neighbouring game (12345 vs 123456) is never touched.
+        fg.clear_game_art(game["app_id"])
         app.log(f"Matched '{game['name']}' → '{chosen['name']}' (SGDB #{chosen['id']})",
                  icon="search")
         _close_dlg()
         app.load_games()
-        app.start_fetch()
+        # Fetch only the game the user matched, not every game missing art (Q1).
+        app.start_fetch(games=[game])
 
     def _do_search(query):
         status_lbl.config(text="Searching…")

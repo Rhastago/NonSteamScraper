@@ -558,6 +558,27 @@ def snapshot_for_restore(unsigned_id, existing_files=None, pending=False):
     except Exception:
         _debug("snapshot_for_restore")
 
+def clear_game_art(unsigned_id):
+    """Clear ONE game's art from the live GRID_FOLDER so it is fetched again: the
+    one deletion behind Re-fetch and Search → Select. Snapshots first (pending=True:
+    outside any fetch run), so Undo can put the art back, then deletes only the
+    files whose leading digit run equals this id — NEVER glob(f"{uid}*"), which
+    would also delete game 123456's art when clearing 12345. Returns the number
+    of files removed. Never raises."""
+    snapshot_for_restore(unsigned_id, pending=True)
+    removed = 0
+    try:
+        fnames = os.listdir(GRID_FOLDER)
+    except OSError:
+        return 0
+    for fname in _files_matching_id(fnames, unsigned_id):
+        try:
+            os.remove(os.path.join(GRID_FOLDER, fname))
+            removed += 1
+        except OSError:
+            _debug("clear_game_art remove")
+    return removed
+
 def begin_restore_run():
     """Start of a fetch run: drop every SEALED entry (deleting its copies from
     disk as well as its manifest row, so the store cannot leak like the old

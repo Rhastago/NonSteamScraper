@@ -120,8 +120,10 @@ class FetchMixin:
         self.window.after(0, append)
 
 
-    def start_fetch(self):
-        """Disable the fetch button, show progress UI, and start the fetch thread."""
+    def start_fetch(self, games=None):
+        """Disable the fetch button, show progress UI, and start the fetch thread.
+        games: the game dicts to fetch (Search → Select passes the one matched game);
+        None fetches every game missing art."""
         if not load_api_key():
             messagebox.showinfo(
                 "API Key Required",
@@ -142,18 +144,18 @@ class FetchMixin:
         # Make sure the just-added progress widgets are visible (grow the window
         # if needed) rather than getting pushed off the bottom.
         self._refit_window_height()
-        thread = threading.Thread(target=self.run_fetch)
+        thread = threading.Thread(target=self.run_fetch, args=(games,))
         thread.daemon = True
         thread.start()
 
 
-    def run_fetch(self):
+    def run_fetch(self, games=None):
         """Background-thread entry point. Wraps the real work so that ANY exception
         is logged and the UI is reset to a usable state instead of silently hanging
         on "Fetching…" forever (this thread has no Tk event loop to recover it).
         See the icon_to_set/tuple hazard in find_games for the bug this guards."""
         try:
-            self._run_fetch_body()
+            self._run_fetch_body(games)
         except Exception as e:
             import traceback
             self.log(f"Fetch failed: {e}", icon="error")
@@ -167,10 +169,14 @@ class FetchMixin:
             self._ui(lambda: self._set_status("Fetch failed — see log."))
 
 
-    def _run_fetch_body(self):
-        """Background thread: search and download artwork for all games missing it."""
+    def _run_fetch_body(self, games=None):
+        """Background thread: search and download artwork for `games`, or for all
+        games missing it when games is None."""
         prefs = load_prefs()
-        needs_art = [g for g in self.games if not g["has_art"]]
+        if games is not None:
+            needs_art = list(games)
+        else:
+            needs_art = [g for g in self.games if not g["has_art"]]
         if not needs_art:
             self.log("All games already have artwork!", icon="applied")
             self._ui(lambda: self.fetch_button.config(state="disabled", text="Nothing to fetch"))

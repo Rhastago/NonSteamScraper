@@ -643,22 +643,9 @@ class LibraryMixin:
     def refetch_game(self, game):
         """Clear existing artwork and skip data so a game is fully reprocessed."""
         self._remove_from_skip(game["app_id"])
-        # Snapshot the current art FIRST — this delete loop is exactly the
-        # destructive action Undo exists to restore. pending=True: a Re-fetch,
-        # outside any fetch run.
-        fg.snapshot_for_restore(game["app_id"], pending=True)
-        # fg.GRID_FOLDER (not the by-value import) so account switches are honored.
-        # Leading-digit-run matching, NEVER glob(f"{app_id}*"): uid 12345 must not
-        # delete a neighbouring game's 123456p.png (see find_games._files_matching_id).
-        try:
-            fnames = os.listdir(fg.GRID_FOLDER)
-        except OSError:
-            fnames = []
-        for fname in fg._files_matching_id(fnames, game["app_id"]):
-            try:
-                os.remove(os.path.join(fg.GRID_FOLDER, fname))
-            except OSError:
-                pass
+        # Snapshot + exact-id delete live in ONE find_games function, shared with
+        # Search → Select, so a fix to the deletion rule reaches both.
+        fg.clear_game_art(game["app_id"])
         self.log(f"Artwork saved for: {game['name']} — will re-fetch on next run; "
                  "use Undo to restore the previous art", icon="refresh")
         self.load_games()

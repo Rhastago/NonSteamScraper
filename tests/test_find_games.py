@@ -2020,6 +2020,31 @@ def test_restore_snapshot_records_entry_for_game_without_art(tmp_path, monkeypat
     assert fg.has_restore_point() is True
 
 
+def test_clear_game_art_never_touches_a_prefix_neighbour(tmp_path, monkeypatch):
+    """B1: clearing game 12345 must not delete game 123456's art (the old
+    Search → Select glob(f"{id}*") did), and every 12345 file it deletes must
+    first be copied into the restore point so Undo can bring it back."""
+    p = _restore_setup(tmp_path, monkeypatch)
+    mine = ["12345p.png", "12345.jpg", "12345_hero.png", "12345_logo.png", "12345_icon.ico"]
+    neighbour = ["123456p.png", "123456.jpg", "123456_hero.png", "123456_icon.png"]
+    for f in mine + neighbour:
+        with open(os.path.join(p["GRID_FOLDER"], f), "wb") as fh:
+            fh.write(f.encode())
+
+    removed = fg.clear_game_art(12345)
+
+    left = sorted(os.listdir(p["GRID_FOLDER"]))
+    assert left == sorted(neighbour), "every 123456 file must survive, every 12345 file must go"
+    assert removed == len(mine)
+    m = _read_manifest(p["RESTORE_FOLDER"])
+    assert sorted(m["entries"]["12345"]["files"]) == sorted(mine)
+    assert m["entries"]["12345"]["pending"] is True
+    assert "123456" not in m["entries"]
+    for f in mine:
+        with open(os.path.join(p["RESTORE_FOLDER"], "12345", f), "rb") as fh:
+            assert fh.read() == f.encode(), "the restore copy must be the pre-delete bytes"
+
+
 def test_restore_snapshot_wipes_store_on_grid_folder_change(tmp_path, monkeypatch):
     """A manifest whose grid_folder differs from the live GRID_FOLDER (account
     switch) wipes the store FIRST, before the first-wins check."""

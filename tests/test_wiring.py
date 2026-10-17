@@ -70,19 +70,59 @@ def _references_name(node, name):
     return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
 
 
-def test_wiring_refetch_game_snapshots_before_it_deletes():
-    """snapshot_for_restore must run BEFORE os.remove in refetch_game —
-    reversed, it snapshots an already-empty folder and Undo restores nothing."""
+def test_wiring_refetch_game_clears_through_clear_game_art():
+    """refetch_game must delegate the snapshot + exact-id delete to
+    find_games.clear_game_art (whose order and matching are tested by behaviour
+    in test_find_games) and keep no delete loop of its own — a second copy is
+    how B1 survived in dialogs.py after Re-fetch was fixed."""
     tree = _module("library_mixin.py")
     fn = _func(tree, "refetch_game")
     assert fn is not None, "library_mixin.refetch_game does not exist"
-    snaps = _calls_named(fn, "snapshot_for_restore")
-    assert snaps, "library_mixin.refetch_game must call snapshot_for_restore before deleting"
-    removes = _unlink_calls(fn)
-    assert removes, "library_mixin.refetch_game must delete files (os.remove/os.unlink)"
-    assert snaps[0].lineno < min(r.lineno for r in removes), (
-        "snapshot_for_restore must run BEFORE the delete loop (a reversed order "
-        "snapshots an empty folder)")
+    assert _calls_named(fn, "clear_game_art"), (
+        "library_mixin.refetch_game must call fg.clear_game_art")
+    assert not _unlink_calls(fn), (
+        "library_mixin.refetch_game must not delete files itself — "
+        "deletion lives in find_games.clear_game_art")
+
+
+def _glob_calls(node):
+    return [n for n in ast.walk(node)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "glob" and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "glob"]
+
+
+def test_wiring_search_select_clears_through_clear_game_art():
+    """B1: Search → Select (dialogs.open_sgdb_search._apply) deleted with
+    glob(f"{app_id}*") — game 12345 took 123456's art with it — and took no
+    snapshot, so Undo could not restore it. It must use clear_game_art and keep
+    no glob and no delete of its own anywhere in dialogs.py."""
+    tree = _module("dialogs.py")
+    fn = _func(tree, "_apply")
+    assert fn is not None, "dialogs._apply (Search → Select) does not exist"
+    assert _calls_named(fn, "clear_game_art"), (
+        "Search → Select must clear the game's art through fg.clear_game_art")
+    assert not _glob_calls(tree), "dialogs.py must not glob the grid folder"
+    assert not _unlink_calls(fn), (
+        "Search → Select must not delete files itself — deletion lives in "
+        "find_games.clear_game_art")
+
+
+def test_wiring_search_select_fetches_only_the_matched_game():
+    """Q1: after the match, Search → Select starts a fetch of THAT game only —
+    start_fetch(games=[game]), not a bare start_fetch() over every game."""
+    tree = _module("dialogs.py")
+    fn = _func(tree, "_apply")
+    assert fn is not None, "dialogs._apply (Search → Select) does not exist"
+    calls = _calls_named(fn, "start_fetch")
+    assert calls, "Search → Select must start a fetch"
+    for c in calls:
+        kw = {k.arg: k.value for k in c.keywords}
+        assert "games" in kw, "start_fetch must be given games=[game]"
+        val = kw["games"]
+        assert isinstance(val, ast.List) and len(val.elts) == 1 and \
+            isinstance(val.elts[0], ast.Name) and val.elts[0].id == "game", (
+            "start_fetch must be given exactly the matched game: games=[game]")
 
 
 def test_wiring_begin_restore_run_before_fetch_loop():
