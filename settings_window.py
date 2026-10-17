@@ -35,9 +35,10 @@ def open_settings(app):
     tk.Label(settings, text="Settings", font=(FONT_UI, 16, "bold"),
               bg=t["bg"], fg=t["fg"]).pack(pady=10)
     # While a fetch runs, every control that writes to disk is built disabled
-    # (Q3); the API key, update check, cache and Steam status still work. Settings
-    # is modal, so a fetch can end while it is open but cannot start: reopening
-    # it re-enables them. Each command also refuses on its own (_refuse_if_busy).
+    # (Q3, and Clear Cache by S1); the API key, update check, cache size and Steam
+    # status still work. Settings is modal, so a fetch can end while it is open but
+    # cannot start: reopening it re-enables them. Each command also refuses on its
+    # own (_refuse_if_busy).
     busy = app._fetch_busy
     if busy:
         tk.Label(settings, text="Fetch in progress — options that change your files "
@@ -181,11 +182,16 @@ def open_settings(app):
     cache_label.pack(side="left")
 
     def do_clear_cache():
+        # S1: the previews a running fetch just downloaded live in the cache.
+        if app._refuse_if_busy():
+            return
         clear_cache()
         cache_label.config(text="Cache size: 0.0 MB")
         app.log("Cache cleared.", icon="trash")
 
-    app._btn(cache_frame, "Clear Cache", do_clear_cache, font=(FONT_UI, 9)).pack(side="right")
+    clear_cache_btn = app._btn(cache_frame, "Clear Cache", do_clear_cache, font=(FONT_UI, 9))
+    clear_cache_btn.config(state=busy_state)
+    clear_cache_btn.pack(side="right")
 
     # Storage — the Undo restore point plus the legacy ~/.steamart_backup pile
     # from past fetches (which had no caller until this button). The shortcuts.vdf

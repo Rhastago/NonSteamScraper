@@ -36,17 +36,72 @@ import find_games as fg  # noqa: E402
 # Stand-in tkinter
 # ---------------------------------------------------------------------------
 
-class _Dummy:
-    """Any tkinter class the mixins name at import time or in an untested path."""
-    def __init__(self, *a, **k):
-        pass
+class StandInWidget:
+    """Every tkinter class (Toplevel, Button, Label, StringVar, OptionMenu, …).
+    Records its constructor options and every config() in .opts, so a window
+    function such as open_settings can be BUILT headless and its controls found
+    and pressed. Any other Tk method is a no-op. Every instance lands in
+    StandInWidget.created (reset per test by the fixtures that use it)."""
+    created = []
+
+    def __init__(self, *args, **opts):
+        self.args = args
+        self.opts = dict(opts)
+        self.destroyed = False
+        StandInWidget.created.append(self)
+
+    def config(self, **kw):
+        self.opts.update(kw)
+    configure = config
+
+    def cget(self, key):
+        return self.opts.get(key)
+
+    def get(self):
+        return self.opts.get("value")
+
+    def set(self, value):
+        self.opts["value"] = value
+
+    def destroy(self):
+        self.destroyed = True
+
+    def winfo_exists(self):
+        return not self.destroyed
+
+    def winfo_children(self):
+        return []
+
+    def winfo_reqheight(self):
+        return 100
+
+    def winfo_reqwidth(self):
+        return 100
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return lambda *a, **k: None
+
+
+_Dummy = StandInWidget
 
 
 def _fake_tk_modules():
     """Build the stand-in tkinter, tkinter.messagebox and tkinter.ttk modules.
     messagebox records every call in .calls and answers askyesno with .answer."""
     tk = types.ModuleType("tkinter")
-    tk.__getattr__ = lambda name: _Dummy
+    kinds = {}
+
+    def widget_class(name):
+        # One StandInWidget subclass per tkinter name, so a test can tell an
+        # OptionMenu from a Button by type(w).__name__.
+        if name.startswith("__"):
+            raise AttributeError(name)
+        if name not in kinds:
+            kinds[name] = type(name, (StandInWidget,), {})
+        return kinds[name]
+    tk.__getattr__ = widget_class
     tk.TclError = type("TclError", (Exception,), {})
     mb = types.ModuleType("tkinter.messagebox")
     mb.calls = []
@@ -70,7 +125,7 @@ def _fake_tk_modules():
 
 
 _UI_MODULES = ("fetch_mixin", "library_mixin", "geometry_mixin", "ui_mixin",
-               "imaging", "PIL.ImageTk")
+               "settings_window", "imaging", "PIL.ImageTk")
 
 
 @pytest.fixture(scope="module")
@@ -88,9 +143,11 @@ def ui():
         import library_mixin
         import geometry_mixin
         import ui_mixin
+        import settings_window
         yield types.SimpleNamespace(
             fetch_mixin=fetch_mixin, library_mixin=library_mixin,
             geometry_mixin=geometry_mixin, ui_mixin=ui_mixin,
+            settings_window=settings_window,
             mb=fakes["tkinter.messagebox"])
     finally:
         for name, mod in saved.items():
@@ -199,6 +256,44 @@ def make_app(ui, games=()):
             pass
 
     return FakeApp()
+
+
+def make_settings_app(ui, monkeypatch, busy=False, users=("111",)):
+    """A fake app that can BUILD the real settings_window.open_settings under the
+    stand-in tkinter: real UIMixin widget helpers and modal stack, a full theme,
+    no icons, no work-area probing. find_games reads are patched in settings_window."""
+    from theming import resolve_theme
+    sw = ui.settings_window
+    monkeypatch.setattr(sw, "get_all_steam_users", lambda: list(users))
+    monkeypatch.setattr(sw, "is_steam_running", lambda *a, **k: False)
+    monkeypatch.setattr(sw, "get_cache_size", lambda: 1.5)
+    monkeypatch.setattr(sw, "load_api_key", lambda: "KEY")
+    monkeypatch.setattr(fg, "get_steam_user_personas", lambda: {})
+    monkeypatch.setattr(fg, "get_active_user", lambda: users[0])
+    monkeypatch.setattr(fg, "restore_point_size", lambda: 0.0)
+    monkeypatch.setattr(fg, "legacy_backup_size", lambda: 0.0)
+    app = make_app(ui)
+    app.theme = resolve_theme("dark", "blue")
+    app._icon_cache = {}
+    app._modal_stack = []
+    app.ICON_BTN = app.ICON_INLINE = app.ICON_ACTION = 24
+    app._icon = lambda name, size=18: None
+    app._fit_window_to_workarea = lambda win, w, h: (w, h)
+    app._fetch_busy = busy
+    return app
+
+
+def open_settings_headless(ui, app):
+    """Build Settings for `app`; return the widgets it created."""
+    StandInWidget.created = []
+    ui.settings_window.open_settings(app)
+    return list(StandInWidget.created)
+
+
+def widget_by_text(widgets, text):
+    hits = [w for w in widgets if w.opts.get("text") == text]
+    assert len(hits) == 1, f"expected one widget reading {text!r}, found {len(hits)}"
+    return hits[0]
 
 
 def _game(app_id, name=None, has_art=False):
@@ -562,3 +657,32 @@ def test_close_yes_after_the_fetch_ended_under_the_question_closes_at_once(
     assert app.window.destroyed, "Yes must close at once when the fetch already ended"
     assert not any(ms == app.CLOSE_FALLBACK_MS for ms, _fn in app.window.delayed), (
         "no fallback timer for a run that is already over")
+
+
+# ---------------------------------------------------------------------------
+# C2 / S1 — Settings → Clear Cache joins the busy list
+# ---------------------------------------------------------------------------
+
+def test_settings_clear_cache_is_greyed_and_refuses_during_a_fetch(ui, fetch_env, monkeypatch):
+    cleared = []
+    monkeypatch.setattr(ui.settings_window, "clear_cache", lambda: cleared.append(1))
+    app = make_settings_app(ui, monkeypatch, busy=True)
+
+    btn = widget_by_text(open_settings_headless(ui, app), "Clear Cache")
+
+    assert btn.opts.get("state") == "disabled", "Clear Cache must be greyed out during a fetch"
+    btn.opts["command"]()   # invoked anyway (a keyboard path, a race)
+    assert cleared == [], "Clear Cache must refuse while a fetch runs"
+    assert app.status[-1] == ui.fetch_mixin.FetchMixin.BUSY_MESSAGE
+
+
+def test_settings_clear_cache_works_when_idle(ui, fetch_env, monkeypatch):
+    cleared = []
+    monkeypatch.setattr(ui.settings_window, "clear_cache", lambda: cleared.append(1))
+    app = make_settings_app(ui, monkeypatch, busy=False)
+
+    btn = widget_by_text(open_settings_headless(ui, app), "Clear Cache")
+
+    assert btn.opts.get("state") in (None, "normal")
+    btn.opts["command"]()
+    assert cleared == [1]
