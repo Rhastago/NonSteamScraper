@@ -272,7 +272,18 @@ class FetchMixin:
                     defer_icon=True,
                 )
                 elapsed = time.monotonic() - start
-                self.log(f"Artwork saved for {name} ({elapsed:.1f}s)", icon="applied")
+                # Never say "saved" for a slot whose download failed (B5): name the
+                # failed slots, whose previous art was kept.
+                failed = fg.failed_slots_from_results(results)
+                if not failed:
+                    self.log(f"Artwork saved for {name} ({elapsed:.1f}s)", icon="applied")
+                elif fg.applied_paths_from_results(results):
+                    self.log(f"Artwork saved for {name} ({elapsed:.1f}s) — download failed "
+                             f"for {', '.join(failed)}; the previous art was kept",
+                             icon="warning")
+                else:
+                    self.log(f"Download failed for {name} ({elapsed:.1f}s) — "
+                             f"{', '.join(failed)}; the previous art was kept", icon="error")
                 # Collect the deferred icon write (if any) for one batched apply later.
                 # NOTE: use the find_games helpers — results mixes slot dicts with the
                 # icon_to_set TUPLE, so a naive values()-loop with .get() crashes here

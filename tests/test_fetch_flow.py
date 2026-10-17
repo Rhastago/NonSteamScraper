@@ -321,3 +321,34 @@ def test_not_found_is_skip_listed_but_a_network_error_is_not(ui, fetch_env):
     assert fetch_env.skipped == [1]
     assert fetch_env.searched == [1, 2, 3]
     assert fetch_env.downloaded == [3]
+
+
+# ---------------------------------------------------------------------------
+# T3 / B5 — the fetch log never says "saved" for a slot that failed
+# ---------------------------------------------------------------------------
+
+def _slot(label, failed, applied=True):
+    return {"label": label, "failed": failed,
+            "applied_index": 0 if applied and not failed else None,
+            "applied_path": f"/g/{label}.png"}
+
+
+@pytest.mark.parametrize("slots,expect_start,expect_in", [
+    ({"grids": _slot("Cover", False)}, "Artwork saved for G", None),
+    ({"grids": _slot("Cover", True), "heroes": _slot("Hero/Background", False)},
+     "Artwork saved for G", "download failed for Cover; the previous art was kept"),
+    ({"grids": _slot("Cover", True), "icons": _slot("Icon", True)},
+     "Download failed for G", "Cover, Icon; the previous art was kept"),
+])
+def test_fetch_log_reports_failed_slots(ui, fetch_env, monkeypatch, slots, expect_start, expect_in):
+    def fake_download(sgdb_id, app_id, prefs, progress_cb=None, defer_icon=False):
+        return dict(slots, icon_to_set=None)
+    monkeypatch.setattr(ui.fetch_mixin, "download_all_artwork", fake_download)
+    app = make_app(ui, [_game(1, name="G")])
+
+    app._run_fetch_body()
+
+    line = next(m for m in app.logged if m.startswith(("Artwork saved", "Download failed")))
+    assert line.startswith(expect_start)
+    if expect_in:
+        assert expect_in in line

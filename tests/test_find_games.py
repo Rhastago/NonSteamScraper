@@ -1832,6 +1832,94 @@ def test_download_all_artwork_non_defer_writes_icon(tmp_path, monkeypatch):
     assert icon_calls == [(12345, results["icons"]["applied_path"])]
 
 
+def _failing_downloads(monkeypatch, bad_urls):
+    """Replace the fetch mocks' download with one that fails for `bad_urls` and
+    writes b"NEW" for every other URL. Returns the list of attempted save paths."""
+    attempted = []
+
+    def fake_download_artwork(url, save_path, register=True):
+        attempted.append(save_path)
+        if url in bad_urls:
+            return False
+        with open(save_path, "wb") as f:
+            f.write(b"NEW")
+        return True
+    monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
+    return attempted
+
+
+_ALL_STATIC = {
+    "grids":  [_static("https://sgdb/grids.png")],
+    "heroes": [_static("https://sgdb/heroes.png")],
+    "logos":  [_static("https://sgdb/logos.png")],
+    "icons":  [_static("https://sgdb/icons.png")],
+}
+
+
+def test_download_all_artwork_failed_download_keeps_the_old_file(tmp_path, monkeypatch):
+    """B5: the old cover was deleted BEFORE the download, so a CDN timeout left
+    the slot empty while the results said "Applied!". The old file must survive
+    a failed download, whatever its extension, and the slot must report failure."""
+    _install_fetch_mocks(monkeypatch, tmp_path, _ALL_STATIC)
+    grid = tmp_path / "grid"
+    (grid / "12345p.jpg").write_bytes(b"OLD-JPG")
+    (grid / "12345p.png").write_bytes(b"OLD-PNG")
+    _failing_downloads(monkeypatch, {"https://sgdb/grids.png"})
+
+    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+
+    assert (grid / "12345p.jpg").read_bytes() == b"OLD-JPG"
+    assert (grid / "12345p.png").read_bytes() == b"OLD-PNG"
+    assert results["grids"]["failed"] is True
+    assert results["grids"]["applied_index"] is None
+    assert results["grids"]["applied_path"] not in fg.applied_paths_from_results(results)
+    # The mocks serve grids.png to the wide cover too, so it fails the same way.
+    assert fg.failed_slots_from_results(results) == ["Cover", "Wide Cover"]
+
+
+def test_download_all_artwork_failed_icon_makes_no_icon_write(tmp_path, monkeypatch):
+    _install_fetch_mocks(monkeypatch, tmp_path, _ALL_STATIC, record_icon=False)
+    _failing_downloads(monkeypatch, {"https://sgdb/icons.png"})
+
+    deferred = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+    assert deferred["icon_to_set"] is None
+    assert fg.icon_write_from_results(deferred) is None
+    # Non-defer mode: record_icon=False fails the test if set_shortcut_icon runs.
+    direct = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
+    assert direct["icons"]["failed"] is True
+
+
+def test_download_all_artwork_success_replaces_a_different_extension(tmp_path, monkeypatch):
+    _install_fetch_mocks(monkeypatch, tmp_path, _ALL_STATIC)
+    grid = tmp_path / "grid"
+    (grid / "12345p.jpg").write_bytes(b"OLD-JPG")
+    (grid / "123456p.jpg").write_bytes(b"NEIGHBOUR")
+    _failing_downloads(monkeypatch, set())
+
+    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+
+    assert not (grid / "12345p.jpg").exists(), "the old extension must be cleared"
+    assert (grid / "12345p.png").read_bytes() == b"NEW"
+    assert (grid / "123456p.jpg").read_bytes() == b"NEIGHBOUR"
+    assert results["grids"]["failed"] is False
+    assert fg.failed_slots_from_results(results) == []
+
+
+def test_install_into_slot_same_extension_success_keeps_the_new_file(tmp_path, monkeypatch):
+    """The listing taken before the download names the OLD 12345p.png; after a
+    successful download that name is the NEW file and must not be cleared."""
+    grid = tmp_path / "grid"
+    grid.mkdir()
+    (grid / "12345p.png").write_bytes(b"OLD")
+    listing = os.listdir(grid)
+    monkeypatch.setattr(fg, "register_managed_file", lambda p: None)
+    _failing_downloads(monkeypatch, set())
+
+    assert fg.install_into_slot(str(grid / "12345p.png"), "https://x/a.png",
+                                existing_files=listing) is True
+    assert (grid / "12345p.png").read_bytes() == b"NEW"
+
+
 def test_download_all_artwork_all_animated_slot_not_auto_applied(tmp_path, monkeypatch):
     """A slot whose every option is animated -> applied_index is None,
     applied_path falls back to the .png target (committed on demand later), and

@@ -1190,7 +1190,7 @@ def download_artwork(url, save_path, register=True):
         except OSError: pass
         print(f"    ❌ Network error: {e}"); return False
 
-def clear_slot_files(save_path, existing_files=None):
+def clear_slot_files(save_path, existing_files=None, keep=None):
     """Delete any existing artwork sharing `save_path`'s grid slot but using a
     different extension. Steam keys art off the filename base (e.g. '12345p'), so a
     leftover '12345p.png' would keep displaying instead of a new '12345p.webp' —
@@ -1199,7 +1199,9 @@ def clear_slot_files(save_path, existing_files=None):
 
     existing_files: optional pre-listed folder snapshot to avoid a redundant listdir
     (download_all_artwork shares ONE snapshot across this game's slots — safe because
-    each slot has a distinct filename base). Standalone callers leave it None."""
+    each slot has a distinct filename base). Standalone callers leave it None.
+    keep: a filename to leave alone — install_into_slot passes the file it has just
+    installed, which an older snapshot lists under the same name as the old art."""
     folder = os.path.dirname(save_path)
     prefix = os.path.basename(save_path).rsplit(".", 1)[0] + "."
     if existing_files is None:
@@ -1208,9 +1210,23 @@ def clear_slot_files(save_path, existing_files=None):
         except OSError:
             return
     for f in existing_files:
-        if f.startswith(prefix):
+        if f.startswith(prefix) and f != keep:
             try: os.remove(os.path.join(folder, f))
             except OSError: pass
+
+def install_into_slot(save_path, url, existing_files=None):
+    """Put the image at `url` into the grid slot `save_path`. Download FIRST
+    (download_artwork: a .part file, a length check, then os.replace onto save_path),
+    and only when that succeeded clear the slot's other extensions and register the
+    file. A failed download changes nothing in the grid folder: the old art stays
+    (B5 — clearing first used to delete it even when the download then failed).
+    Returns True when the new file is in place."""
+    if not download_artwork(url, save_path, register=False):
+        return False
+    clear_slot_files(save_path, existing_files=existing_files,
+                     keep=os.path.basename(save_path))
+    register_managed_file(save_path)
+    return True
 
 def row_thumbnail_path(grid_folder, app_id):
     """Return the best representative art file for `app_id` to show as a list-row
@@ -1479,14 +1495,19 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
         # Target path: the auto-applied static file keeps its own extension; if there
         # is nothing to auto-apply (all options animated), the slot stays empty until
         # the user applies one, which will be written as APNG (.png).
+        failed = False
         if applied_index is not None:
             top = options[applied_index]
             ext = top["url"].split(".")[-1].split("?")[0]
             save_path = os.path.join(GRID_FOLDER, f"{base}.{ext}")
             bump(f"Downloading {art_label}")
-            clear_slot_files(save_path, existing_files=existing_files)
-            download_artwork(top["url"], save_path)
-            if slot == "icons":
+            if not install_into_slot(save_path, top["url"], existing_files=existing_files):
+                # The download failed and the old art is untouched. Nothing was
+                # applied, so applied_index is None (applied_paths_from_results skips
+                # the slot) and no icon write may point Steam at a missing file.
+                failed = True
+                applied_index = None
+            elif slot == "icons":
                 if defer_icon:
                     # Defer the shortcuts.vdf write so the caller can batch + write all
                     # icons in ONE atomic pass (and while Steam is closed).
@@ -1522,6 +1543,8 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
 
         results[slot] = {"applied_path": save_path,
                               "applied_index": applied_index,
+                              "failed": failed,
+                              "label": art_label,
                               "option_urls": [img["url"] for img in options],
                               "option_meta": [
                                   {
@@ -1564,6 +1587,17 @@ def icon_write_from_results(results):
     """Return the deferred icon write (unsigned_id, path) tuple, or None. This is
     the ONLY value in results that is a tuple rather than a slot dict."""
     return results.get(ICON_TO_SET_KEY)
+
+def failed_slots_from_results(results):
+    """Return the label ("Cover", "Icon", …) of every ART SLOT whose download
+    failed, in slot order. Skips the icon_to_set tuple like the helpers above."""
+    labels = []
+    for key, art_data in results.items():
+        if key == ICON_TO_SET_KEY or not isinstance(art_data, dict):
+            continue
+        if art_data.get("failed"):
+            labels.append(art_data.get("label") or key)
+    return labels
 
 
 # ---------------------------------------------------------------------------
