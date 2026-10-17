@@ -17,7 +17,7 @@ from tkinter import ttk
 from appcommon import open_url
 from theming import FONT_UI
 import find_games as fg
-from find_games import register_managed_file, set_shortcut_icon, clear_slot_files, download_apng
+from find_games import set_shortcut_icon
 from imaging import _update_badge, _display_image_on_label, update_view
 
 
@@ -622,52 +622,71 @@ def build_game_result_section(app, parent, game_result):
                     apply_animated_art(app, s, ab, url, base_noext + ".png", idx)
                     return
                 new_path = f"{base_noext}.{url.split('.')[-1].split('?')[0]}"
-                try:
-                    r = fg._http_get(url, stream=True, timeout=10)
-                    if r.status_code == 200:
-                        # Remove the previously-applied file in this slot first, so
-                        # an extension change (e.g. animated .png -> static .jpg)
-                        # doesn't leave a duplicate that Steam keeps showing.
-                        clear_slot_files(new_path)
-                        with open(new_path, "wb") as f:
-                            for chunk in r.iter_content(1024):
-                                f.write(chunk)
-                        register_managed_file(new_path)
+                is_icon = s["art_type"] == "icons"
+                # The download runs on a worker (B6: it used to freeze the window for
+                # the whole download); the button is locked until finish() runs.
+                ab.config(text="Applying…", image="", compound="none", state="disabled")
+
+                def worker():
+                    # OFF the Tk thread: no widget calls here, only the file work.
+                    # install_into_slot: .part + verify + os.replace, THEN clear the
+                    # slot's other extensions, so an extension change (e.g. animated
+                    # .png -> static .jpg) leaves no duplicate Steam keeps showing,
+                    # and a failed download leaves the old file in place.
+                    ok, queued = False, False
+                    try:
+                        ok = fg.install_into_slot(new_path, url)
                         # Icons must also be registered in shortcuts.vdf to apply.
                         # BUT Steam clobbers shortcuts.vdf on exit, so a write while
                         # Steam is running is silently lost. If Steam is up, DEFER:
-                        # queue the icon (auto-applies when Steam closes) and surface
-                        # the results-window pending action; only write immediately
-                        # when Steam is closed. (s["app_id"] is the int uid.)
-                        if s["art_type"] == "icons" and fg.is_steam_running():
-                            # DEFERRED: the icon isn't written yet, so this is intent,
-                            # not application. Mark queued_index (NOT applied_index) so
-                            # the slot shows "Queued (close Steam)" with NO border; the
-                            # border + "Applied!" only land once the write happens.
-                            fg.save_pending_icons({s["app_id"]: new_path})
-                            s["queued_index"] = idx
-                            _sync_apply_ui(app, s, ab)
-                            # Track enough to finish the job later: _mark_queued_icons_applied
-                            # promotes queued_index -> applied_index and re-syncs this slot
-                            # once the icons are actually written.
-                            app._queued_apply_btns.append(
-                                {"state": s, "index": idx, "btn": ab, "il": il, "cl": cl})
-                            # Make the pending warning + "Close Steam & Apply Icons"
-                            # action (re)appear/refresh right away.
-                            _refresh_results_steam_ui(app)
-                        else:
-                            # Immediate write succeeded — NOW it's truly applied, so set
-                            # applied_index and let _sync_apply_ui draw the border + label.
-                            if s["art_type"] == "icons":
+                        # queue the icon (auto-applies when Steam closes); only write
+                        # immediately when Steam is closed. (s["app_id"] is the int uid.)
+                        if ok and is_icon:
+                            if fg.is_steam_running():
+                                fg.save_pending_icons({s["app_id"]: new_path})
+                                queued = True
+                            else:
                                 set_shortcut_icon(s["app_id"], new_path)
-                            s["applied_index"] = idx
-                            _sync_apply_ui(app, s, ab)
-                    else:
-                        # stream=True does NOT raise on 4xx/5xx, so the except below
-                        # never catches a non-200 — give the same explicit feedback.
+                    except Exception:
+                        fg._debug("results apply")
+                        ok = False
+                    try:
+                        app.window.after(0, lambda: finish(ok, queued))
+                    except Exception:
+                        pass  # the main window is gone; nothing left to update
+
+                def finish(ok, queued):
+                    # Tk thread. The results window may have closed meanwhile.
+                    try:
+                        if not ab.winfo_exists():
+                            return
+                    except Exception:
+                        return
+                    ab.config(state="normal")
+                    if not ok:
                         ab.config(text="Failed — retry", image="", compound="none")
-                except Exception:
-                    ab.config(text="Failed — retry", image="", compound="none")
+                    elif queued:
+                        # DEFERRED: the icon isn't written yet, so this is intent,
+                        # not application. Mark queued_index (NOT applied_index) so
+                        # the slot shows "Queued (close Steam)" with NO border; the
+                        # border + "Applied!" only land once the write happens.
+                        s["queued_index"] = idx
+                        _sync_apply_ui(app, s, ab)
+                        # Track enough to finish the job later: _mark_queued_icons_applied
+                        # promotes queued_index -> applied_index and re-syncs this slot
+                        # once the icons are actually written.
+                        app._queued_apply_btns.append(
+                            {"state": s, "index": idx, "btn": ab, "il": il, "cl": cl})
+                        # Make the pending warning + "Close Steam & Apply Icons"
+                        # action (re)appear/refresh right away.
+                        _refresh_results_steam_ui(app)
+                    else:
+                        # The write succeeded — NOW it's truly applied, so set
+                        # applied_index and let _sync_apply_ui draw the border + label.
+                        s["applied_index"] = idx
+                        _sync_apply_ui(app, s, ab)
+
+                threading.Thread(target=worker, daemon=True).start()
             return prev, nxt, apply
 
         prev_fn, next_fn, apply_fn = make_callbacks(state, img_label, counter_label, apply_btn)
@@ -713,7 +732,7 @@ def apply_animated_art(app, state, apply_btn, url, out_path, index):
     status = tk.Label(popup, text="Starting…", font=(FONT_UI, 9),
                       bg=t["bg"], fg=t["muted2"])
     status.pack()
-    # Real per-frame progress comes from find_games.download_apng (it counts the
+    # Real per-frame progress comes from find_games.install_into_slot (it counts the
     # APNG frame chunks Pillow writes), so this is an accurate determinate bar.
     try:
         bar = ttk.Progressbar(popup, mode="determinate", maximum=100, length=300,
@@ -761,10 +780,11 @@ def apply_animated_art(app, state, apply_btn, url, out_path, index):
 
     def worker():
         try:
-            # Drop any existing file in this slot first so the new APNG is the only
-            # one Steam sees, then write the converted .png.
-            clear_slot_files(out_path)
-            ok = download_apng(url, out_path, progress_cb=on_progress, status_cb=on_status)
+            # Download + encode in the cache, then .part + os.replace into the slot,
+            # THEN clear the slot's other extensions so the new APNG is the only one
+            # Steam sees. A failure leaves the old file in place.
+            ok = fg.install_into_slot(out_path, url, animated=True,
+                                      progress_cb=on_progress, status_cb=on_status)
         except Exception:
             ok = False
         app.window.after(0, lambda: finish(ok))

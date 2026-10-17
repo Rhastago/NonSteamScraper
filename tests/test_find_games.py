@@ -1092,6 +1092,78 @@ def test_write_shortcuts_atomic_no_temp_left(tmp_path, monkeypatch):
     assert not os.path.exists(os.path.join(str(tmp_path), "shortcuts.vdf.tmp"))
 
 
+def test_set_shortcut_icons_concurrent_writers_both_land(tmp_path, monkeypatch):
+    """B4: the fetch worker and the pending-icon poll can write at the same time.
+    Each reads, changes and writes the whole file; without one lock around that,
+    the second writer works from the original and drops the first one's icon.
+    The patched write holds thread A inside its write long enough for thread B
+    to read — the overlap that loses an icon when nothing serialises them."""
+    import threading
+    import time
+    sc = _setup_shortcuts(tmp_path, monkeypatch, {
+        "0": {"appid": 100, "icon": ""}, "1": {"appid": 200, "icon": ""}})
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "111")
+    real_write = fg._write_shortcuts_atomic
+    a_writing = threading.Event()
+
+    def slow_write(data):
+        if threading.current_thread().name == "A":
+            a_writing.set()
+            time.sleep(0.3)   # B reads now, unless a lock holds it back
+        real_write(data)
+    monkeypatch.setattr(fg, "_write_shortcuts_atomic", slow_write)
+
+    a = threading.Thread(target=fg.set_shortcut_icons, args=({100: "/a/100.png"},), name="A")
+    b = threading.Thread(target=fg.set_shortcut_icons, args=({200: "/a/200.png"},), name="B")
+    a.start()
+    assert a_writing.wait(2)
+    b.start()
+    a.join(5); b.join(5)
+
+    out = _read_shortcuts(str(sc))
+    assert out["0"]["icon"] == "/a/100.png", "thread A's icon was lost"
+    assert out["1"]["icon"] == "/a/200.png", "thread B's icon was lost"
+
+
+def test_write_shortcuts_atomic_unique_temp_fsync_then_replace(tmp_path, monkeypatch):
+    sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""}})
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "111")
+    os.chmod(sc, 0o644)
+    events = []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(fg.os, "fsync", lambda fd: events.append("fsync") or real_fsync(fd))
+
+    def spy_replace(src, dst):
+        events.append(("replace", src, dst))
+        return real_replace(src, dst)
+    monkeypatch.setattr(fg.os, "replace", spy_replace)
+
+    assert fg.set_shortcut_icons({100: "/a/i.png"}) == 1
+
+    replaces = [e for e in events if isinstance(e, tuple) and e[2] == str(sc)]
+    assert len(replaces) == 1
+    tmp = replaces[0][1]
+    assert os.path.dirname(tmp) == str(tmp_path), "the temp file must sit next to shortcuts.vdf"
+    assert os.path.basename(tmp) != "shortcuts.vdf.tmp", "no fixed temp name"
+    assert events.index("fsync") < events.index(replaces[0]), "fsync before replace"
+    assert sorted(os.listdir(tmp_path)) == ["backup", "shortcuts.vdf"]
+    assert (os.stat(sc).st_mode & 0o777) == 0o644, "the file keeps its mode"
+
+
+def test_write_shortcuts_atomic_failure_leaves_original_and_no_temp(tmp_path, monkeypatch):
+    sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": "old"}})
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "111")
+    before = sc.read_bytes()
+
+    def boom(src, dst):
+        raise OSError("disk full")
+    monkeypatch.setattr(fg.os, "replace", boom)
+
+    assert fg.set_shortcut_icons({100: "/a/i.png"}) == 0
+    assert sc.read_bytes() == before
+    assert sorted(os.listdir(tmp_path)) == ["backup", "shortcuts.vdf"]
+
+
 # ---------------------------------------------------------------------------
 # stop_steam / start_steam / restart_steam — sequencing + factoring
 # ---------------------------------------------------------------------------
@@ -1978,6 +2050,93 @@ def test_remove_partial_downloads_only_the_runs_part_files(tmp_path, monkeypatch
 
     assert sorted(os.listdir(grid)) == sorted(keep)
     assert os.listdir(cache) == ["12345p_1.png"]
+
+
+def _grid_and_cache(tmp_path, monkeypatch):
+    grid, cache = tmp_path / "grid", tmp_path / "cache"
+    grid.mkdir(); cache.mkdir()
+    monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
+    monkeypatch.setattr(fg, "CACHE_FOLDER", str(cache))
+    monkeypatch.setattr(fg, "register_managed_file", lambda p: None)
+    return grid, cache
+
+
+def test_install_into_slot_failed_static_download_keeps_old_file_no_partial(tmp_path, monkeypatch):
+    """The real download path: the CDN dies mid-body. The old art stays and no
+    .part is left in Steam's grid folder."""
+    grid, _cache = _grid_and_cache(tmp_path, monkeypatch)
+    (grid / "12345p.jpg").write_bytes(b"OLD")
+
+    class _Dying:
+        status_code = 200
+        headers = {}
+
+        def iter_content(self, n):
+            yield b"half"
+            raise fg.requests.exceptions.ConnectionError("reset")
+    monkeypatch.setattr(fg, "_http_get", lambda *a, **k: _Dying())
+
+    assert fg.install_into_slot(str(grid / "12345p.png"), "https://x/new.png") is False
+    assert sorted(os.listdir(grid)) == ["12345p.jpg"]
+    assert (grid / "12345p.jpg").read_bytes() == b"OLD"
+
+
+def test_install_into_slot_failed_apng_encode_keeps_old_file_no_partial(tmp_path, monkeypatch):
+    grid, cache = _grid_and_cache(tmp_path, monkeypatch)
+    (grid / "12345p.png").write_bytes(b"OLD")
+    (grid / "12345p.jpg").write_bytes(b"OLD-JPG")
+
+    def fake_download(url, save_path, register=True):
+        with open(save_path, "wb") as f:
+            f.write(b"webp")
+        return True
+
+    def failing_encode(src, out, progress_cb=None, status_cb=None):
+        with open(out, "wb") as f:
+            f.write(b"half an apng")
+        raise RuntimeError("encoder crashed")
+    monkeypatch.setattr(fg, "download_artwork", fake_download)
+    monkeypatch.setattr(fg, "convert_animated_to_apng", failing_encode)
+
+    assert fg.install_into_slot(str(grid / "12345p.png"), "https://x/a.webp",
+                                animated=True) is False
+    assert sorted(os.listdir(grid)) == ["12345p.jpg", "12345p.png"]
+    assert (grid / "12345p.png").read_bytes() == b"OLD"
+    assert os.listdir(cache) == [], "no source download or encode output may be left"
+
+
+def test_install_into_slot_apng_appears_only_after_the_encode(tmp_path, monkeypatch):
+    """B7: the encode wrote straight into the live grid file, and the source
+    download sat in the grid folder too. Both must happen outside it; the APNG
+    appears in the slot only once the encode has finished."""
+    grid, cache = _grid_and_cache(tmp_path, monkeypatch)
+    (grid / "12345p.jpg").write_bytes(b"OLD-JPG")
+    out_path = grid / "12345p.png"
+    seen = {}
+
+    def fake_download(url, save_path, register=True):
+        seen["src_dir"] = os.path.dirname(save_path)
+        with open(save_path, "wb") as f:
+            f.write(b"webp")
+        return True
+
+    def watching_encode(src, out, progress_cb=None, status_cb=None):
+        seen["out_dir"] = os.path.dirname(out)
+        seen["grid_during_encode"] = sorted(os.listdir(grid))
+        with open(out, "wb") as f:
+            f.write(b"APNG")
+        return True
+    monkeypatch.setattr(fg, "download_artwork", fake_download)
+    monkeypatch.setattr(fg, "convert_animated_to_apng", watching_encode)
+
+    assert fg.install_into_slot(str(out_path), "https://x/a.webp", animated=True) is True
+
+    assert seen["src_dir"] == str(cache), "the source download must not sit in the grid folder"
+    assert seen["out_dir"] == str(cache), "the encode must not write in the grid folder"
+    assert seen["grid_during_encode"] == ["12345p.jpg"], "nothing new in the slot mid-encode"
+    assert sorted(os.listdir(grid)) == ["12345p.png"], "old extension cleared after the install"
+    assert out_path.read_bytes() == b"APNG"
+    assert os.listdir(cache) == []
 
 
 def test_install_into_slot_same_extension_success_keeps_the_new_file(tmp_path, monkeypatch):

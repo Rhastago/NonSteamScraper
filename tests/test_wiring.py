@@ -365,3 +365,37 @@ def test_wiring_settings_write_commands_refuse_while_a_fetch_runs():
         assert fn is not None, f"settings_window.{name} does not exist"
         assert _first_stmt_refuses_if_busy(fn), (
             f"settings_window.{name} must start with `if app._refuse_if_busy(): return`")
+
+
+def test_wiring_results_apply_installs_off_the_tk_thread():
+    """B6: results "Apply this one" downloaded on the Tk thread (the window froze)
+    and wrote the grid file with no .part. The button command must start a
+    worker thread, the worker must install through fg.install_into_slot, and no
+    HTTP call or file write may remain in the command itself."""
+    tree = _module("results_window.py")
+    apply_fn = _func(tree, "apply")
+    assert apply_fn is not None, "results_window apply() does not exist"
+    worker = _func(apply_fn, "worker")
+    assert worker is not None, "apply() must define a worker for the download"
+    assert _calls_named(worker, "install_into_slot"), "the worker must use fg.install_into_slot"
+    assert _calls_named(apply_fn, "Thread"), "apply() must start a threading.Thread"
+    assert not _calls_named(tree, "_http_get"), "results_window.py must not download itself"
+    assert not _calls_named(tree, "clear_slot_files"), (
+        "results_window.py must not clear slots itself — install_into_slot does")
+    opens = [c for c in _calls_named(tree, "open") if isinstance(c.func, ast.Name)]
+    assert not opens, "results_window.py must not write files itself"
+    finish = _func(apply_fn, "finish")
+    assert finish is not None, "apply() must update the button in a Tk-thread finish()"
+    afters = [c for c in _calls_named(worker, "after")
+              if any(_references_name(a, "finish") for a in c.args)]
+    assert afters, "the worker must hand finish() back to the Tk thread with after(0, ...)"
+
+
+def test_wiring_animated_apply_installs_through_install_into_slot():
+    tree = _module("results_window.py")
+    fn = _func(tree, "apply_animated_art")
+    assert fn is not None, "results_window.apply_animated_art does not exist"
+    calls = _calls_named(fn, "install_into_slot")
+    assert calls, "the animated apply must use fg.install_into_slot"
+    assert any(k.arg == "animated" for c in calls for k in c.keywords), (
+        "the animated apply must pass animated=True")

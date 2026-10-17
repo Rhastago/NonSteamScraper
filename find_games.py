@@ -1,4 +1,4 @@
-import os, re, sys, platform, shutil, subprocess, time, json, threading, glob, vdf, requests
+import os, re, sys, platform, shutil, subprocess, time, json, threading, glob, tempfile, vdf, requests
 from requests.adapters import HTTPAdapter
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote as _url_quote
@@ -903,15 +903,40 @@ def get_non_steam_games():
         games.append({"name": name, "app_id": uid, "has_art": (str(uid) in uids_with_art) or in_skip, "skipped": in_skip})
     return games
 
+# ONE writer at a time for shortcuts.vdf (B4). The fetch worker, the 4 s pending-icon
+# poll, the results window's apply flows and Undo all write it, from two threads; each
+# does read -> change -> write, so without this lock two of them could read the same
+# original and the second write would drop the first one's icons. Held by
+# set_shortcut_icons around the whole read-modify-write — the only writer.
+_SHORTCUTS_LOCK = threading.Lock()
+
 def _write_shortcuts_atomic(data):
-    """Serialize `data` and atomically replace shortcuts.vdf: write a temp file in the
-    SAME directory, then os.replace() onto SHORTCUTS_PATH. os.replace is atomic within
-    one filesystem, so a crash/clobber mid-write can never leave a truncated vdf."""
+    """Serialize `data` and atomically replace shortcuts.vdf: write a UNIQUE temp file
+    (tempfile.mkstemp) in the SAME directory, fsync it, then os.replace() onto
+    SHORTCUTS_PATH. os.replace is atomic within one filesystem, so a crash/clobber
+    mid-write can never leave a truncated vdf; the fsync makes sure the bytes are on
+    disk before the rename (a power loss right after a write on ext4 can otherwise
+    leave an empty file). The caller holds _SHORTCUTS_LOCK."""
+    payload = vdf.binary_dumps(data)
     folder = os.path.dirname(SHORTCUTS_PATH)
-    tmp = os.path.join(folder, "shortcuts.vdf.tmp")
-    with open(tmp, "wb") as f:
-        f.write(vdf.binary_dumps(data))
-    os.replace(tmp, SHORTCUTS_PATH)
+    fd, tmp = tempfile.mkstemp(prefix="shortcuts.vdf.", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        # mkstemp creates the file owner-only; keep the original file's mode.
+        try:
+            shutil.copymode(SHORTCUTS_PATH, tmp)
+        except OSError:
+            _debug("_write_shortcuts_atomic copymode")
+        os.replace(tmp, SHORTCUTS_PATH)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 def set_shortcut_icons(mapping):
     """Batch-write icons into shortcuts.vdf in ONE read+parse+write instead of one full
@@ -923,20 +948,21 @@ def set_shortcut_icons(mapping):
     first write; the legacy shortcuts.vdf.bak is left as it is."""
     if not mapping or not os.path.exists(SHORTCUTS_PATH): return 0
     try:
-        os.makedirs(BACKUP_FOLDER, exist_ok=True)
-        bak = _shortcuts_backup_path()
-        if not os.path.exists(bak): shutil.copy2(SHORTCUTS_PATH, bak)
-        with open(SHORTCUTS_PATH, "rb") as f: data = vdf.binary_loads(f.read())
-        changed = 0
-        for _key, game in data.get("shortcuts", {}).items():
-            aid = game.get("appid")
-            if aid is None: continue
-            uid = aid & 0xFFFFFFFF
-            if uid in mapping:
-                game["icon"] = mapping[uid]; changed += 1
-        if changed:
-            _write_shortcuts_atomic(data)
-        return changed
+        with _SHORTCUTS_LOCK:
+            os.makedirs(BACKUP_FOLDER, exist_ok=True)
+            bak = _shortcuts_backup_path()
+            if not os.path.exists(bak): shutil.copy2(SHORTCUTS_PATH, bak)
+            with open(SHORTCUTS_PATH, "rb") as f: data = vdf.binary_loads(f.read())
+            changed = 0
+            for _key, game in data.get("shortcuts", {}).items():
+                aid = game.get("appid")
+                if aid is None: continue
+                uid = aid & 0xFFFFFFFF
+                if uid in mapping:
+                    game["icon"] = mapping[uid]; changed += 1
+            if changed:
+                _write_shortcuts_atomic(data)
+            return changed
     except Exception as e:
         print(f"Failed to set icons: {e}"); return 0
 
@@ -1253,14 +1279,24 @@ def remove_partial_downloads(grid_folder, unsigned_ids):
                     _debug("remove_partial_downloads")
     return removed
 
-def install_into_slot(save_path, url, existing_files=None):
-    """Put the image at `url` into the grid slot `save_path`. Download FIRST
-    (download_artwork: a .part file, a length check, then os.replace onto save_path),
-    and only when that succeeded clear the slot's other extensions and register the
-    file. A failed download changes nothing in the grid folder: the old art stays
-    (B5 — clearing first used to delete it even when the download then failed).
-    Returns True when the new file is in place."""
-    if not download_artwork(url, save_path, register=False):
+def install_into_slot(save_path, url, existing_files=None, animated=False,
+                      progress_cb=None, status_cb=None):
+    """The ONE way a new image lands in a grid slot — used by the fetch, by the
+    results window's "Apply this one" and by the animated (APNG) apply. First get the
+    new file into place atomically: a static image through download_artwork (a .part
+    file, a length check, then os.replace onto save_path); an animated one through
+    _apng_into_place (download + encode in the cache, then .part + os.replace). Only
+    when that succeeded clear the slot's other extensions and register the file. A
+    failure changes nothing in the grid folder: the old art stays (B5 — clearing
+    first used to delete it even when the download then failed).
+    Order note: the replace comes BEFORE the clear, so a crash between the two leaves
+    the new file plus an old one of another extension, never an empty slot.
+    progress_cb / status_cb are the APNG encode callbacks. Returns True when the
+    new file is in place."""
+    if animated:
+        if not _apng_into_place(url, save_path, progress_cb, status_cb):
+            return False
+    elif not download_artwork(url, save_path, register=False):
         return False
     clear_slot_files(save_path, existing_files=existing_files,
                      keep=os.path.basename(save_path))
@@ -1349,26 +1385,39 @@ def convert_animated_to_apng(src_path, out_path, progress_cb=None, status_cb=Non
                        append_images=frames[1:], duration=durations, loop=0, disposal=2)
     return True
 
-def download_apng(url, out_path, progress_cb=None, status_cb=None, register=True):
-    """Download an animated webp/gif from `url` and write it to out_path as APNG.
+def _apng_into_place(url, out_path, progress_cb=None, status_cb=None):
+    """Download an animated webp/gif from `url`, convert it to APNG and put it at
+    out_path. The source download and the slow encode (seconds to minutes) both
+    happen in CACHE_FOLDER, never in Steam's grid folder (B7: encoding straight into
+    the live file left a half-written PNG for Steam to read if the app closed). The
+    finished APNG is copied next to out_path as a .part and os.replace'd into place —
+    a copy, because the cache and the grid folder may be on different drives.
     progress_cb(done, total) reports per-frame encode progress; status_cb(message)
-    reports the current phase (download / read / convert). Returns True on success."""
+    reports the current phase. Leaves no temp file behind. Returns True on success."""
     if status_cb:
         status_cb("Downloading…")
-    src_ext = url.split(".")[-1].split("?")[0]
-    tmp = f"{out_path}.src.{src_ext}"
-    if not download_artwork(url, tmp, register=False):
-        return False
+    os.makedirs(CACHE_FOLDER, exist_ok=True)
+    fd, work = tempfile.mkstemp(prefix="apng_", dir=CACHE_FOLDER)
+    os.close(fd)
+    src = f"{work}.src.{url.split('.')[-1].split('?')[0]}"
+    encoded = f"{work}.png"
+    part = out_path + ".part"
     try:
-        ok = convert_animated_to_apng(tmp, out_path, progress_cb, status_cb)
+        if not download_artwork(url, src, register=False):
+            return False
+        convert_animated_to_apng(src, encoded, progress_cb, status_cb)
+        shutil.copyfile(encoded, part)
+        os.replace(part, out_path)
+        return True
     except Exception as e:
-        print(f"    ❌ APNG conversion failed: {e}"); ok = False
+        _debug("_apng_into_place")
+        print(f"    ❌ APNG conversion failed: {e}"); return False
     finally:
-        try: os.remove(tmp)
-        except OSError: pass
-    if ok and register:
-        register_managed_file(out_path)
-    return ok
+        for p in (work, src, encoded, part):
+            try:
+                if os.path.exists(p): os.remove(p)
+            except OSError:
+                pass
 
 # Bounded concurrency for SGDB requests. SGDB publishes no rate limit and throttles
 # dynamically via HTTP 429 + Retry-After (handled by _sgdb_get's retry); a handful of
