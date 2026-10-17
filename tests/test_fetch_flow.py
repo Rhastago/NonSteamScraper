@@ -51,10 +51,13 @@ def _fake_tk_modules():
     mb = types.ModuleType("tkinter.messagebox")
     mb.calls = []
     mb.answer = True
+    mb.while_open = None   # run while a dialog is "open" (the Tk queue keeps going)
 
     def _record(kind):
         def f(*a, **k):
             mb.calls.append((kind, a, k))
+            if mb.while_open:
+                mb.while_open()
             return mb.answer if kind == "askyesno" else "ok"
         return f
     for kind in ("showinfo", "showwarning", "showerror", "askyesno"):
@@ -238,6 +241,7 @@ def fetch_env(ui, tmp_path, monkeypatch):
                         lambda: [dict(g) for g in rec.library])
     ui.mb.calls.clear()
     ui.mb.answer = True
+    ui.mb.while_open = None
     return rec
 
 
@@ -538,3 +542,23 @@ def test_close_during_fetch_stops_between_games_and_removes_its_parts(
     assert sorted(os.listdir(grid)) == ["10p.png.part", "1p.png"], (
         "the run's .part files go; game 10 was not in the run; real art stays")
     assert os.listdir(cache) == []
+
+
+def test_close_yes_after_the_fetch_ended_under_the_question_closes_at_once(
+        ui, fetch_env, no_threads):
+    """C1: the fetch ends while "stop and close?" is open (_end_fetch runs from the
+    Tk queue under the modal dialog, not closing). Yes then closes the window at
+    once — not after the CLOSE_FALLBACK_MS fallback."""
+    fetch_env.library = [_game(1)]
+    app = make_app(ui, fetch_env.library)
+    app.start_fetch()
+    assert app._fetch_busy is True
+    ui.mb.while_open = lambda: app._end_fetch(None)
+    ui.mb.answer = True
+
+    app._on_close()
+
+    assert app._fetch_busy is False
+    assert app.window.destroyed, "Yes must close at once when the fetch already ended"
+    assert not any(ms == app.CLOSE_FALLBACK_MS for ms, _fn in app.window.delayed), (
+        "no fallback timer for a run that is already over")

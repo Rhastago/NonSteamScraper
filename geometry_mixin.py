@@ -255,6 +255,12 @@ class GeometryMixin:
                                        "A fetch is running — stop and close?",
                                        parent=self.window):
                 return
+            # The question is modal but the Tk queue keeps running under it: the
+            # fetch may have ended (and _end_fetch run, not closing) meanwhile.
+            # Close now instead of waiting CLOSE_FALLBACK_MS for an ended run.
+            if not self._fetch_busy:
+                self._finish_close()
+                return
             self._closing = True
             self._fetch_cancel.set()
             self._set_status("Stopping the fetch — the window closes after the current game…",
