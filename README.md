@@ -154,6 +154,7 @@ All state is stored in your home directory:
 | `~/.steamart_geometry` | Saved window position |
 | `~/.steamart_skip` | Hidden games — not found on SGDB, or ignored by you |
 | `~/.steamart_names` | Custom search name overrides per game |
+| `~/.steamart_ids` | The SteamGridDB match you picked with Search, per game |
 | `~/.steamart_managed` | Tracks which files this app created (for safe cleanup) |
 | `~/.steamart_cache/` | Thumbnail cache |
 | `~/.steamart_backup/` | Backup of previous artwork and shortcuts.vdf |

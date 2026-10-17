@@ -199,10 +199,10 @@ def open_sgdb_search(app, game):
         if app._refuse_if_busy():
             status_lbl.config(text=app.BUSY_MESSAGE)
             return
-        # Saves the chosen name, then the same unskip + snapshot + exact-id delete
-        # as Re-fetch: Undo can restore the art, and a neighbouring game (12345 vs
-        # 123456) is never touched.
-        operations.rematch(game["app_id"], chosen["name"])
+        # Saves the chosen SGDB id and name, then the same unskip + snapshot +
+        # exact-id delete as Re-fetch: Undo can restore the art, and a
+        # neighbouring game (12345 vs 123456) is never touched.
+        operations.rematch(game["app_id"], chosen["name"], chosen["id"])
         app.log(f"Matched '{game['name']}' → '{chosen['name']}' (SGDB #{chosen['id']})",
                  icon="search")
         _close_dlg()

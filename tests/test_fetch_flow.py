@@ -948,6 +948,8 @@ def search_env(ui, fetch_env, monkeypatch):
     monkeypatch.setattr(dl, "search_sgdb_autocomplete", lambda q: [
         {"id": 2016, "name": "DOOM", "year": "2016", "type": "game"},
         {"id": 1993, "name": "DOOM", "year": "1993", "type": "game"}])
+    monkeypatch.setattr(fg, "save_id_override",
+                        lambda uid, sid: rec.calls.append(("id", uid, sid)))
     monkeypatch.setattr(fg, "save_name_override",
                         lambda uid, name: rec.calls.append(("name", uid, name)))
     monkeypatch.setattr(fg, "remove_from_skip_list", lambda uid: rec.calls.append(("unskip", uid)))
@@ -977,7 +979,9 @@ def test_search_select_clears_that_game_and_fetches_only_it(ui, search_env):
 
     widget_by_text(widgets, "Select").opts["command"]()
 
-    assert search_env.calls == [("name", 12345, "DOOM"), ("unskip", 12345), ("clear", 12345)]
+    assert search_env.calls == [("id", 12345, 1993), ("name", 12345, "DOOM"),
+                                ("unskip", 12345), ("clear", 12345)], (
+        "the SGDB id of the row picked (DOOM 1993, not 2016) must be stored")
     assert search_env.fetches == [[game]], "Search → Select fetches only the matched game"
 
 

@@ -29,7 +29,7 @@ import operations  # noqa: E402
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def run_env(monkeypatch):
+def run_env(monkeypatch, tmp_path):
     """Record, in ONE ordered list, every step run_fetch takes outside itself."""
     rec = types.SimpleNamespace(calls=[], logs=[], progress=[], outcomes={},
                                 icon_for=set(), steam_running=False, key=fg.KEY_ACCEPTED)
@@ -59,6 +59,8 @@ def run_env(monkeypatch):
                         lambda m: rec.calls.append(("write_icons", dict(m))) or len(m))
     monkeypatch.setattr(fg, "save_pending_icons",
                         lambda m: rec.calls.append(("queue_icons", dict(m))))
+    rec.ids_file = tmp_path / "ids"
+    monkeypatch.setattr(fg, "IDS_FILE", str(rec.ids_file))
     rec.on_log = lambda msg, icon: rec.logs.append(msg)
     rec.on_progress = lambda pct, label, status=None: rec.progress.append((pct, label, status))
     return rec
@@ -161,6 +163,7 @@ def files(tmp_path, monkeypatch):
     monkeypatch.setattr(fg, "MANAGED_FILE", str(tmp_path / "managed"))
     monkeypatch.setattr(fg, "SKIP_FILE", str(tmp_path / "skip"))
     monkeypatch.setattr(fg, "NAMES_FILE", str(tmp_path / "names"))
+    monkeypatch.setattr(fg, "IDS_FILE", str(tmp_path / "ids"))
     (tmp_path / "skip").write_text("12345\n999\n", encoding="utf-8")
     return tmp_path
 
@@ -183,8 +186,9 @@ def test_refetch_clears_only_that_game_snapshots_first_and_unskips(files):
 
 
 def test_rematch_saves_the_name_then_clears_like_refetch(files):
-    operations.rematch(12345, "DOOM")
+    operations.rematch(12345, "DOOM", 1993)
     assert fg.load_name_overrides() == {"12345": "DOOM"}
+    assert fg.load_id_overrides() == {"12345": 1993}
     assert sorted(os.listdir(files / "grid")) == ["123456_logo.png", "123456p.png"]
     assert "12345" in _manifest(files)["entries"]
     assert (files / "skip").read_text(encoding="utf-8") == "999\n"
@@ -201,3 +205,22 @@ def test_apply_option_never_raises(monkeypatch):
         raise OSError("disk gone")
     monkeypatch.setattr(fg, "install_option", boom)
     assert operations.apply_option("/g/1p.png", "u", 1) == (False, False)
+
+
+def test_run_fetch_uses_a_picked_sgdb_id_without_searching(run_env, monkeypatch):
+    """T5 / B8: Search → Select stored SGDB id 1993 for game 2. The run fetches
+    THAT id; a name search could land on a same-named game (DOOM 2016)."""
+    run_env.ids_file.write_text("2|1993\n", encoding="utf-8")
+    downloaded = []
+    recorded_download = fg.download_all_artwork   # run_env's stand-in
+
+    def record(sgdb_id, app_id, prefs, progress_cb=None, defer_icon=False):
+        downloaded.append((app_id, sgdb_id))
+        return recorded_download(sgdb_id, app_id, prefs, progress_cb, defer_icon)
+    monkeypatch.setattr(fg, "download_all_artwork", record)
+
+    _run(run_env, _games(1, 2))
+
+    assert ("search", 2) not in run_env.calls, "a picked id skips search_game"
+    assert ("search", 1) in run_env.calls, "a game without a pick is searched as before"
+    assert downloaded == [(1, 1001), (2, 1993)]

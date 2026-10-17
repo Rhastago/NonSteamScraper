@@ -1760,8 +1760,9 @@ def test_full_reset_preserves_art_but_clears_settings(tmp_path, monkeypatch):
 
     # Settings/state files — these SHOULD be removed.
     settings = {}
-    for name in ("APIKEY_FILE", "PREFS_FILE", "SKIP_FILE", "NAMES_FILE", "ACCOUNT_FILE",
-                 "FIRSTRUN_FILE", "THEME_FILE", "ACCENT_FILE", "GEOMETRY_FILE"):
+    for name in ("APIKEY_FILE", "PREFS_FILE", "SKIP_FILE", "NAMES_FILE", "IDS_FILE",
+                 "ACCOUNT_FILE", "FIRSTRUN_FILE", "THEME_FILE", "ACCENT_FILE",
+                 "GEOMETRY_FILE"):
         p = tmp_path / name
         p.write_text("x", encoding="utf-8")
         monkeypatch.setattr(fg, name, str(p))
@@ -3211,3 +3212,33 @@ def test_install_option_non_icon_slot_writes_no_icon(monkeypatch):
     rec = _install_option_env(monkeypatch)
     assert fg.install_option("/g/7p.png", "u", 7, animated=True) == (True, False)
     assert rec["written"] == [] and rec["queued"] == []
+
+
+# ---------------------------------------------------------------------------
+# SGDB id overrides — ~/.steamart_ids (T5 / B8)
+# ---------------------------------------------------------------------------
+
+def test_id_overrides_round_trip_and_update(tmp_path, monkeypatch):
+    monkeypatch.setattr(fg, "IDS_FILE", str(tmp_path / "ids"))
+    assert fg.load_id_overrides() == {}
+    fg.save_id_override(12345, 2016)
+    fg.save_id_override(777, 5)
+    fg.save_id_override(12345, 1993)
+    assert fg.load_id_overrides() == {"12345": 1993, "777": 5}
+    assert (tmp_path / "ids").read_text(encoding="utf-8") == "12345|1993\n777|5\n"
+
+
+def test_id_overrides_skip_malformed_lines(tmp_path, monkeypatch):
+    p = tmp_path / "ids"
+    p.write_text("12345|1993\njunk\n55|DOOM\n|9\n 66 | 7 \n", encoding="utf-8")
+    monkeypatch.setattr(fg, "IDS_FILE", str(p))
+    assert fg.load_id_overrides() == {"12345": 1993, "66": 7}
+
+
+def test_id_override_lives_apart_from_the_names_file(tmp_path, monkeypatch):
+    """An older build reads ~/.steamart_names with split("|", 1); the id must
+    never land there, or that build would search for "1993" as the name."""
+    monkeypatch.setattr(fg, "IDS_FILE", str(tmp_path / "ids"))
+    monkeypatch.setattr(fg, "NAMES_FILE", str(tmp_path / "names"))
+    fg.save_id_override(12345, 1993)
+    assert not (tmp_path / "names").exists()

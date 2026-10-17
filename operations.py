@@ -32,9 +32,12 @@ def refetch(app_id):
     return fg.clear_game_art(app_id)
 
 
-def rematch(app_id, name):
-    """Search → Select: remember the name the user picked for this game, then
-    clear its art exactly like Re-fetch. The caller then fetches this one game."""
+def rematch(app_id, name, sgdb_id):
+    """Search → Select: remember the SteamGridDB game the user picked (its id,
+    which the next fetch uses without searching again — B8: a re-search by name
+    could land on a same-named game — and its name, as before), then clear the
+    game's art exactly like Re-fetch. The caller then fetches this one game."""
+    fg.save_id_override(app_id, sgdb_id)
     fg.save_name_override(app_id, name)
     return refetch(app_id)
 
@@ -108,6 +111,8 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
     fetch_results = report["results"]
     # Icon writes are collected during the loop and written once after it.
     icons_to_set = {}
+    # Games matched by hand in Search → Select: fetch that SGDB id, no search.
+    picked_ids = fg.load_id_overrides()
 
     for i, game in enumerate(games):
         if should_stop():
@@ -125,7 +130,11 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
         on_progress(game_start, f"[{i+1}/{total}] {short} — Searching SteamGridDB...",
                     f"Searching: {name}")
 
-        outcome, sgdb_id = fg.search_game(name, app_id)
+        if str(app_id) in picked_ids:
+            outcome, sgdb_id = fg.SEARCH_FOUND, picked_ids[str(app_id)]
+            on_log(f"  Using the SteamGridDB match you picked (#{sgdb_id})", None)
+        else:
+            outcome, sgdb_id = fg.search_game(name, app_id)
         if outcome == fg.SEARCH_REFUSED:
             # Safety net for a key revoked after the check: stop, hide nothing.
             on_log("SteamGridDB rejected the API key — fetch stopped. "

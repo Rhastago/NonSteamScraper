@@ -337,6 +337,10 @@ def get_steam_user_personas():
 
 SKIP_FILE     = os.path.expanduser("~/.steamart_skip")
 NAMES_FILE    = os.path.expanduser("~/.steamart_names")
+# The SteamGridDB game id the user picked in Search → Select, per app id
+# ("appid|sgdb_id" per line). A separate file, not a new form in NAMES_FILE: an
+# older build reads that file with split("|", 1) and would take an id as a name.
+IDS_FILE      = os.path.expanduser("~/.steamart_ids")
 CACHE_FOLDER  = os.path.expanduser("~/.steamart_cache")
 BACKUP_FOLDER = os.path.expanduser("~/.steamart_backup")
 RESTORE_FOLDER = os.path.expanduser("~/.steamart_restore")
@@ -408,6 +412,22 @@ def save_name_override(app_id, name):
     o = load_name_overrides(); o[str(app_id)] = name
     with open(NAMES_FILE, "w", encoding="utf-8") as f:
         for a, n in o.items(): f.write(f"{a}|{n}\n")
+
+def load_id_overrides():
+    """{app_id_str: sgdb_id_int} from IDS_FILE. A malformed line is skipped."""
+    o = {}
+    if not os.path.exists(IDS_FILE): return o
+    with open(IDS_FILE, encoding="utf-8") as f:
+        for l in f:
+            a, _, i = l.strip().partition("|")
+            if a.strip() and i.strip().isdigit():
+                o[a.strip()] = int(i.strip())
+    return o
+
+def save_id_override(app_id, sgdb_id):
+    o = load_id_overrides(); o[str(app_id)] = int(sgdb_id)
+    with open(IDS_FILE, "w", encoding="utf-8") as f:
+        for a, i in o.items(): f.write(f"{a}|{i}\n")
 
 def register_managed_file(path):
     with open(MANAGED_FILE, "a", encoding="utf-8") as f: f.write(f"{path}\n")
@@ -794,7 +814,7 @@ def clear_backup():
 def full_reset():
     """Reset the app to a first-launch state WITHOUT touching the user's fetched/
     applied artwork. Clears SETTINGS only — API key, prefs, theme/accent, skip list,
-    name overrides, saved account, window geometry, first-run flag — plus the
+    name overrides, picked SGDB ids, saved account, window geometry, first-run flag — plus the
     regenerable thumbnail cache and any pending (un-applied) icon queue.
 
     DELIBERATELY PRESERVES the applied grid artwork, the managed-file registry
@@ -803,7 +823,7 @@ def full_reset():
     collection. Removing art is the job of the separate `clear_managed_artwork()`
     ("Clear All Artwork") action only — not this one."""
     clear_cache()
-    files = [APIKEY_FILE, PREFS_FILE, SKIP_FILE, NAMES_FILE, ACCOUNT_FILE,
+    files = [APIKEY_FILE, PREFS_FILE, SKIP_FILE, NAMES_FILE, IDS_FILE, ACCOUNT_FILE,
              FIRSTRUN_FILE, THEME_FILE, ACCENT_FILE, GEOMETRY_FILE]
     # Pending-icon queues are per-account (namespaced), so sweep the whole family
     # plus any legacy un-namespaced file. (Applied icons in shortcuts.vdf are kept.)
