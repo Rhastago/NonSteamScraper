@@ -198,6 +198,10 @@ def open_sgdb_search(app, game):
         if not sel:
             return
         chosen = results[sel[0]]
+        # A running fetch owns the grid folder (B2); say so here, in front.
+        if app._refuse_if_busy():
+            status_lbl.config(text=app.BUSY_MESSAGE)
+            return
         save_name_override(game["app_id"], chosen["name"])
         app._remove_from_skip(game["app_id"])
         # The same snapshot + exact-id delete as Re-fetch: Undo can restore the

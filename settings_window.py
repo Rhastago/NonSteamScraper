@@ -34,6 +34,17 @@ def open_settings(app):
 
     tk.Label(settings, text="Settings", font=(FONT_UI, 16, "bold"),
               bg=t["bg"], fg=t["fg"]).pack(pady=10)
+    # While a fetch runs, every control that writes to disk is built disabled
+    # (Q3); the API key, update check, cache and Steam status still work. Settings
+    # is modal, so a fetch can end while it is open but cannot start: reopening
+    # it re-enables them. Each command also refuses on its own (_refuse_if_busy).
+    busy = app._fetch_busy
+    if busy:
+        tk.Label(settings, text="Fetch in progress — options that change your files "
+                                "are unavailable until it finishes.",
+                 font=(FONT_UI, 9), fg=t["warn"], bg=t["bg"],
+                 wraplength=420).pack(padx=12, pady=(0, 6))
+    busy_state = "disabled" if busy else "normal"
 
     def close_settings():
         app._close_modal(settings)
@@ -136,8 +147,9 @@ def open_settings(app):
     tk.Label(mode_row, text=f"Current: {app.theme_name.capitalize()} mode",
               font=(FONT_UI, 10), bg=t["bg"], fg=t["fg"]).pack(side="left")
     toggle_text = "Switch to Dark Mode" if app.theme_name == "light" else "Switch to Light Mode"
-    app._btn(mode_row, toggle_text, app.toggle_theme,
-              font=(FONT_UI, 9)).pack(side="right")
+    theme_btn = app._btn(mode_row, toggle_text, app.toggle_theme, font=(FONT_UI, 9))
+    theme_btn.config(state=busy_state)
+    theme_btn.pack(side="right")
 
     accent_row = tk.Frame(appearance_frame, bg=t["bg"])
     accent_row.pack(fill="x", pady=(PAD_S, 0))
@@ -155,7 +167,7 @@ def open_settings(app):
             bd=2 if selected else 0,
             highlightbackground=t["fg"] if selected else t["bg"],
             highlightthickness=2 if selected else 0,
-            cursor="hand2",
+            cursor="hand2", state=busy_state,
             command=lambda n=name: app.set_accent(n))
         sw.pack(side="left", padx=PAD_XS)
         app._add_tooltip(sw, acc["label"] + (" (current)" if selected else ""))
@@ -189,6 +201,8 @@ def open_settings(app):
     storage_label.pack(side="left")
 
     def do_clear_restore():
+        if app._refuse_if_busy():
+            return
         if messagebox.askyesno(
             "Clear Saved Undo Data",
             "This only removes the app's own saved copies — the Undo restore "
@@ -205,8 +219,10 @@ def open_settings(app):
             app.log("Saved Undo data cleared.", icon="trash")
             app.load_games()  # greys out the Undo button in the main window
 
-    app._btn(storage_frame, "Clear saved undo data", do_clear_restore,
-             font=(FONT_UI, 9)).pack(side="right")
+    clear_restore_btn = app._btn(storage_frame, "Clear saved undo data", do_clear_restore,
+                                 font=(FONT_UI, 9))
+    clear_restore_btn.config(state=busy_state)
+    clear_restore_btn.pack(side="right")
 
     # Artwork
     artwork_frame = tk.LabelFrame(body, text="Artwork", padx=10, pady=8,
@@ -214,6 +230,8 @@ def open_settings(app):
     artwork_frame.pack(fill="x", padx=15, pady=5)
 
     def do_clear_artwork():
+        if app._refuse_if_busy():
+            return
         if messagebox.askyesno(
             "Clear All Artwork",
             "This will remove all artwork fetched by NonSteamScraper.\n\n"
@@ -230,7 +248,7 @@ def open_settings(app):
 
     tk.Button(artwork_frame, text="Clear All Artwork", font=(FONT_UI, 9),
                fg=t["danger"], bg=t["button_bg"], activebackground=t["select_bg"],
-               command=do_clear_artwork).pack(side="left")
+               state=busy_state, command=do_clear_artwork).pack(side="left")
     tk.Label(artwork_frame, text="Only removes artwork added by this app",
               font=(FONT_UI, 8), fg=t["muted2"], bg=t["bg"]).pack(side="left", padx=8)
 
@@ -240,6 +258,8 @@ def open_settings(app):
     reset_frame.pack(fill="x", padx=15, pady=5)
 
     def do_full_reset():
+        if app._refuse_if_busy():
+            return
         if messagebox.askyesno(
             "Reset App",
             "This resets the app to a fresh first-launch state.\n\n"
@@ -259,7 +279,7 @@ def open_settings(app):
 
     tk.Button(reset_frame, text="Reset App to Factory Defaults", font=(FONT_UI, 9),
                fg=t["danger"], bg=t["button_bg"], activebackground=t["select_bg"],
-               command=do_full_reset).pack(side="left")
+               state=busy_state, command=do_full_reset).pack(side="left")
     tk.Label(reset_frame, text="Cannot be undone",
               font=(FONT_UI, 8), fg=t["muted2"], bg=t["bg"]).pack(side="left", padx=8)
 
@@ -365,6 +385,10 @@ def open_settings(app):
         account_var = tk.StringVar(value=id_to_label.get(active, users[0]))
 
         def on_account_change(label):
+            # A switch rebinds fg.GRID_FOLDER, which a running fetch reads live (B2).
+            if app._refuse_if_busy():
+                account_var.set(id_to_label.get(fg.get_active_user(), users[0]))
+                return
             uid = label_to_id.get(label)
             if uid and fg.set_active_user(uid):
                 app.log(f"Switched to Steam account {label}.", icon="refresh")
@@ -372,7 +396,8 @@ def open_settings(app):
 
         om = tk.OptionMenu(account_frame, account_var, *id_to_label.values(),
                            command=on_account_change)
-        om.config(bg=t["button_bg"], fg=t["button_fg"], highlightthickness=0)
+        om.config(bg=t["button_bg"], fg=t["button_fg"], highlightthickness=0,
+                  state=busy_state)
         om.pack(side="left", padx=8)
     else:
         # 0 or 1 accounts — show a disabled placeholder so the section is

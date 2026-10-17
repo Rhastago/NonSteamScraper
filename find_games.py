@@ -1228,6 +1228,31 @@ def clear_slot_files(save_path, existing_files=None, keep=None):
             try: os.remove(os.path.join(folder, f))
             except OSError: pass
 
+def remove_partial_downloads(grid_folder, unsigned_ids):
+    """Delete the .part files a stopped fetch left behind: in `grid_folder`, the
+    ones whose leading digit run is one of `unsigned_ids` (never another game's),
+    and the matching preview downloads in CACHE_FOLDER. A .part is only ever this
+    app's own unfinished download, never the user's art. Returns the number
+    removed. Never raises."""
+    ids = {str(i) for i in unsigned_ids}
+    removed = 0
+    for folder in (grid_folder, CACHE_FOLDER):
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for f in names:
+            if not f.endswith(".part"):
+                continue
+            m = re.match(r"(\d+)", f)
+            if m and m.group(1) in ids:
+                try:
+                    os.remove(os.path.join(folder, f))
+                    removed += 1
+                except OSError:
+                    _debug("remove_partial_downloads")
+    return removed
+
 def install_into_slot(save_path, url, existing_files=None):
     """Put the image at `url` into the grid slot `save_path`. Download FIRST
     (download_artwork: a .part file, a length check, then os.replace onto save_path),

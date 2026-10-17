@@ -67,6 +67,15 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self.selected_name_lbl = None
         self._restore_point_inherited = fg.has_restore_point()
         self._fetched_this_session = False
+        # Fetch busy state (B2): set by start_fetch, cleared by _end_fetch on every
+        # worker exit path. _fetch_cancel is the run's stop flag, _fetch_run what a
+        # stopped run may leave behind, _closing set once the user chose to close,
+        # _fetch_followup a Tk step the run asked _end_fetch to take after it.
+        self._fetch_busy = False
+        self._fetch_followup = None
+        self._fetch_cancel = None
+        self._fetch_run = None
+        self._closing = False
         fg.RATE_LIMIT_HOOK = lambda msg: self.log(msg, icon="warning")
         self._icon_cache = {}
         # Row-thumbnail cache: (app_id, path, mtime, size) -> ImageTk.PhotoImage.

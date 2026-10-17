@@ -7,10 +7,12 @@ find_games (compute_window_fit / parse_net_workarea) so it can be unit-tested
 without a display; the tkinter side effects stay here. Mixed into SteamArtApp."""
 
 import tkinter as tk
+from tkinter import messagebox
 from PIL import Image, ImageTk
 
 from appcommon import resource_path
 from theming import PAD_XS, PAD_L
+import find_games as fg
 from find_games import parse_net_workarea, compute_window_fit
 
 class GeometryMixin:
@@ -237,7 +239,40 @@ class GeometryMixin:
             pass
 
 
+    # How long a stopping fetch may keep the window open before it closes anyway
+    # (a game stuck on a stalled download must not hold the app open for good).
+    CLOSE_FALLBACK_MS = 30000
+
     def _on_close(self):
+        """Window close button. During a fetch, ask first (Q4); on yes, set the run's
+        stop flag and let the worker finish the game it is on — _end_fetch then
+        closes the window through _finish_close. Closing at once used to kill the
+        daemon worker mid-download and leave .part files in Steam's grid folder."""
+        if self._fetch_busy:
+            if self._closing:
+                return  # already stopping; the window closes when the run ends
+            if not messagebox.askyesno("Fetch in progress",
+                                       "A fetch is running — stop and close?",
+                                       parent=self.window):
+                return
+            self._closing = True
+            self._fetch_cancel.set()
+            self._set_status("Stopping the fetch — the window closes after the current game…",
+                             self.theme["warn"], icon="warning")
+            self.window.after(self.CLOSE_FALLBACK_MS, self._finish_close)
+            return
+        self._finish_close()
+
+
+    def _finish_close(self):
+        """Tk thread: close the window, once. After a stopped fetch, first remove
+        the .part files that run left behind."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        run = self._fetch_run
+        if run:
+            fg.remove_partial_downloads(run["grid"], run["ids"])
         # We deliberately do not persist or restore the window position — the window
         # always re-centers on launch — so there is nothing to save here.
         # Stop the thumbnail decode pool so no worker survives the window. Don't wait

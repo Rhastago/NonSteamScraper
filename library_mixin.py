@@ -296,6 +296,10 @@ class LibraryMixin:
                 state="disabled" if not needs_art else "normal",
                 text="Nothing to fetch" if not needs_art else "Fetch Missing Artwork"
             )
+        if self._fetch_busy:
+            # A running fetch owns this button (B2): Refresh, Ignore, Restore and
+            # Re-fetch all call load_games, and must not re-enable it mid-run.
+            self.fetch_button.config(state="disabled", text="Fetching...")
 
         self._render_list()
         self._refresh_undo_button()
@@ -306,9 +310,10 @@ class LibraryMixin:
         point. has_restore_point() returns false when the manifest's grid_folder
         no longer matches the live fg.GRID_FOLDER, so an account switch greys the
         button out. Called from load_games(), which runs at startup, after a
-        fetch, after a Re-fetch, after an Undo and on account switch."""
+        fetch, after a Re-fetch, after an Undo and on account switch. Always
+        disabled while a fetch runs."""
         self.undo_button.config(
-            state="normal" if fg.has_restore_point() else "disabled")
+            state="normal" if fg.has_restore_point() and not self._fetch_busy else "disabled")
 
 
     def _render_list(self):
@@ -627,6 +632,8 @@ class LibraryMixin:
         it by. Uses the same skip list as "not found on SteamGridDB", so Restore
         brings back either kind. Touches only our skip file — any art the game
         already has stays in place."""
+        if self._refuse_if_busy():
+            return
         add_to_skip_list(game["app_id"])
         self.log(f"Ignored: {game['name']} — moved to Hidden", icon="offline")
         self.load_games()
@@ -635,6 +642,8 @@ class LibraryMixin:
     def restore_game(self, game):
         """Move a hidden game (skipped or ignored) back to the main list. The next
         fetch picks it up only if it has no art; one that has art needs Re-fetch."""
+        if self._refuse_if_busy():
+            return
         self._remove_from_skip(game["app_id"])
         self.log(f"Restored: {game['name']}", icon="undo")
         self.load_games()
@@ -642,6 +651,8 @@ class LibraryMixin:
 
     def refetch_game(self, game):
         """Clear existing artwork and skip data so a game is fully reprocessed."""
+        if self._refuse_if_busy():
+            return
         self._remove_from_skip(game["app_id"])
         # Snapshot + exact-id delete live in ONE find_games function, shared with
         # Search → Select, so a fix to the deletion rule reaches both.

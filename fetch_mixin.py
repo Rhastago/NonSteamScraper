@@ -19,6 +19,19 @@ from find_games import (
 
 class FetchMixin:
 
+    # The status line a write command shows while a fetch runs (Q3).
+    BUSY_MESSAGE = "Fetch in progress — try again when it finishes."
+
+    def _refuse_if_busy(self):
+        """Tk thread: True — and say so on the status line — while a fetch runs.
+        Every command that writes to disk calls this first (B2): a second fetch, an
+        account switch, a reset or a relaunch in the middle of a run writes into the
+        files the running fetch is writing."""
+        if self._fetch_busy:
+            self._set_status(self.BUSY_MESSAGE, self.theme["warn"], icon="warning")
+            return True
+        return False
+
     def check_steam_running(self):
         """Display a warning if Steam is open, since artwork changes require a restart."""
         # Opportunistic flush: a manual refresh after closing Steam applies queued icons
@@ -37,6 +50,8 @@ class FetchMixin:
         confirmation messagebox is safe here. Undo is destructive and cannot itself
         be undone, and its state now comes from disk, so when the restore point was
         inherited from a previous session and no fetch has run since, confirm first."""
+        if self._refuse_if_busy():
+            return
         if not fg.has_restore_point():
             self.log("Nothing to undo.", icon="warning")
             return
@@ -123,7 +138,9 @@ class FetchMixin:
     def start_fetch(self, games=None):
         """Disable the fetch button, show progress UI, and start the fetch thread.
         games: the game dicts to fetch (Search → Select passes the one matched game);
-        None fetches every game missing art."""
+        None fetches every game missing art. Does nothing while a fetch runs."""
+        if self._fetch_busy:
+            return
         if not load_api_key():
             messagebox.showinfo(
                 "API Key Required",
@@ -134,6 +151,12 @@ class FetchMixin:
             self.open_settings()
             return
 
+        # Busy from here until _end_fetch, which every worker exit path reaches.
+        self._fetch_busy = True
+        self._fetch_cancel = threading.Event()
+        # What a stopped run may leave behind, for _finish_close's .part cleanup.
+        targets = games if games is not None else [g for g in self.games if not g["has_art"]]
+        self._fetch_run = {"grid": fg.GRID_FOLDER, "ids": [g["app_id"] for g in targets]}
         self.fetch_button.config(state="disabled", text="Fetching...")
         self.undo_button.config(state="disabled")
         self._set_status("Working...")
@@ -153,22 +176,52 @@ class FetchMixin:
         """Background-thread entry point. Wraps the real work so that ANY exception
         is logged and the UI is reset to a usable state instead of silently hanging
         on "Fetching…" forever (this thread has no Tk event loop to recover it).
-        See the icon_to_set/tuple hazard in find_games for the bug this guards."""
+        See the icon_to_set/tuple hazard in find_games for the bug this guards.
+        The finally block is the ONE way out: whatever happened, _end_fetch runs on
+        the Tk thread and clears the busy state."""
+        fetch_results = None
         try:
-            self._run_fetch_body(games)
+            fetch_results = self._run_fetch_body(games)
         except Exception as e:
             import traceback
             self.log(f"Fetch failed: {e}", icon="error")
             if fg.DEBUG:
                 traceback.print_exc()
             self._reset_fetch_ui("Fetch failed — see log.")
+        finally:
+            self._ui(lambda r=fetch_results: self._end_fetch(r))
+
+
+    def _end_fetch(self, fetch_results=None):
+        """Tk thread: the fetch worker has exited — at the end of the run, early
+        (nothing to fetch, key refused, SGDB unreachable) or by an exception. Clear
+        the busy state FIRST, so load_games re-derives Fetch and Undo instead of
+        keeping them disabled. fetch_results is None unless the run reached its end.
+        If the window is closing (Q4), close it now instead."""
+        self._fetch_busy = False
+        if self._closing:
+            self._fetch_followup = None
+            self._finish_close()
+            return
+        self._fetch_run = None
+        self.fetch_button.config(state="normal", text="Fetch Missing Artwork")
+        self.load_games()
+        # A step the run asked for once it is over (the rejected-key popup, which
+        # opens Settings — so it must come after the busy state has cleared).
+        followup, self._fetch_followup = self._fetch_followup, None
+        if followup:
+            followup()
+        if fetch_results is not None:
+            self.check_steam_running()
+            if fetch_results:
+                self.show_results(fetch_results)
 
 
     def _reset_fetch_ui(self, status, color=None, icon=None):
         """Worker thread: put the window back to idle after a run that ended
         without results — Fetch enabled, progress hidden, `status` on the status
-        line. Every widget call is marshalled through self._ui."""
-        self._ui(lambda: self.fetch_button.config(state="normal", text="Fetch Missing Artwork"))
+        line. Every widget call is marshalled through self._ui. Fetch itself is
+        re-enabled by _end_fetch."""
         self._ui(lambda: self.progress_label.pack_forget())
         self._ui(lambda: self.progress_bar.pack_forget())
         self._ui(lambda: self._refit_window_height())
@@ -189,7 +242,8 @@ class FetchMixin:
 
     def _run_fetch_body(self, games=None):
         """Background thread: search and download artwork for `games`, or for all
-        games missing it when games is None."""
+        games missing it when games is None. Returns the per-game results at the
+        end of the run, None when it returns early."""
         prefs = load_prefs()
         if games is not None:
             needs_art = list(games)
@@ -211,7 +265,7 @@ class FetchMixin:
             self.log("SteamGridDB rejected your API key — nothing was fetched.", icon="error")
             self._reset_fetch_ui("API key rejected — nothing was fetched.",
                                  self.theme["warn"], icon="warning")
-            self._ui(self._show_key_rejected)
+            self._fetch_followup = self._show_key_rejected  # run by _end_fetch
             return
         if key_state != fg.KEY_ACCEPTED:
             msg = ("Couldn't reach SteamGridDB — nothing was fetched. "
@@ -233,6 +287,11 @@ class FetchMixin:
         stopped = None
 
         for i, game in enumerate(needs_art):
+            # Closing the window during a run sets this (Q4): stop between games.
+            if self._fetch_cancel is not None and self._fetch_cancel.is_set():
+                self.log("Fetch stopped — the window is closing.", icon="warning")
+                stopped = "Fetch stopped."
+                break
             start = time.monotonic()
             name   = game["name"]
             app_id = game["app_id"]
@@ -330,9 +389,5 @@ class FetchMixin:
             self.log("\nDone! No new artwork was fetched.", icon="applied")
 
         self._ui(lambda: self._set_status(stopped or "Done!"))
-        self._ui(lambda: self.fetch_button.config(state="normal", text="Fetch Missing Artwork"))
-        self._ui(lambda: self.load_games())
-        self._ui(lambda: self.check_steam_running())
-
-        if fetch_results:
-            self.window.after(0, lambda: self.show_results(fetch_results))
+        # _end_fetch (from run_fetch) reloads the list and opens the results screen.
+        return fetch_results

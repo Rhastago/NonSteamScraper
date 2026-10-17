@@ -1963,6 +1963,23 @@ def test_download_all_artwork_success_replaces_a_different_extension(tmp_path, m
     assert fg.failed_slots_from_results(results) == []
 
 
+def test_remove_partial_downloads_only_the_runs_part_files(tmp_path, monkeypatch):
+    grid, cache = tmp_path / "grid", tmp_path / "cache"
+    grid.mkdir(); cache.mkdir()
+    keep = ["12345p.png", "12345.png.bak", "123456p.png.part", "999_hero.png.part", "notes.part.txt"]
+    gone = ["12345p.png.part", "12345_icon.ico.part"]
+    for f in keep + gone:
+        (grid / f).write_bytes(b"x")
+    (cache / "12345p_0.png.part").write_bytes(b"x")
+    (cache / "12345p_1.png").write_bytes(b"x")
+    monkeypatch.setattr(fg, "CACHE_FOLDER", str(cache))
+
+    assert fg.remove_partial_downloads(str(grid), [12345]) == 3
+
+    assert sorted(os.listdir(grid)) == sorted(keep)
+    assert os.listdir(cache) == ["12345p_1.png"]
+
+
 def test_install_into_slot_same_extension_success_keeps_the_new_file(tmp_path, monkeypatch):
     """The listing taken before the download names the OLD 12345p.png; after a
     successful download that name is the NEW file and must not be cleared."""

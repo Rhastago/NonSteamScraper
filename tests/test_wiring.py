@@ -343,3 +343,25 @@ def test_wiring_fetch_marks_the_session_as_having_fetched():
     attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
     assert "_fetched_this_session" in attrs, (
         "_run_fetch_body must set self._fetched_this_session")
+
+
+def _first_stmt_refuses_if_busy(fn):
+    """True when fn's first statement is `if <x>._refuse_if_busy(): return`."""
+    if not fn.body or not isinstance(fn.body[0], ast.If):
+        return False
+    first = fn.body[0]
+    return (bool(_calls_named(first.test, "_refuse_if_busy"))
+            and any(isinstance(n, ast.Return) for n in first.body))
+
+
+def test_wiring_settings_write_commands_refuse_while_a_fetch_runs():
+    """Q3: in Settings, Clear saved undo data, Clear All Artwork, Factory reset
+    and the account switch must refuse first thing while a fetch runs. (Settings
+    cannot be built headless, so this is a structure check; the live behaviour
+    is on the manual-test list.)"""
+    tree = _module("settings_window.py")
+    for name in ("do_clear_restore", "do_clear_artwork", "do_full_reset", "on_account_change"):
+        fn = _func(tree, name)
+        assert fn is not None, f"settings_window.{name} does not exist"
+        assert _first_stmt_refuses_if_busy(fn), (
+            f"settings_window.{name} must start with `if app._refuse_if_busy(): return`")
