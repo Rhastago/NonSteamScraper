@@ -176,8 +176,8 @@ def open_settings(app):
     app._btn(cache_frame, "Clear Cache", do_clear_cache, font=(FONT_UI, 9)).pack(side="right")
 
     # Storage — the Undo restore point plus the legacy ~/.steamart_backup pile
-    # from past fetches (which had no caller until this button). shortcuts.vdf.bak
-    # is never deleted — clear_backup already skips it.
+    # from past fetches (which had no caller until this button). The shortcuts.vdf
+    # backups (legacy and per-account) are never deleted — clear_backup skips them.
     storage_frame = tk.LabelFrame(body, text="Storage", padx=10, pady=8,
                                   bg=t["bg"], fg=t["link"])
     storage_frame.pack(fill="x", padx=15, pady=5)

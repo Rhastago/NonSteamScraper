@@ -138,7 +138,7 @@ Steam reads non-Steam game icons from `shortcuts.vdf`, not from the grid folder.
 
 **Close Steam before fetching or applying icons.** If Steam is running when the icon is applied, Steam may overwrite `shortcuts.vdf` on exit and lose the change.
 
-A backup of your original `shortcuts.vdf` is saved to `~/.steamart_backup/shortcuts.vdf.bak` before the first write.
+A backup of each Steam account's `shortcuts.vdf` is saved to `~/.steamart_backup/shortcuts.vdf.<account id>.bak` before the app first writes to it. (Versions before 1.5.2 kept a single `shortcuts.vdf.bak` for the first account only; it is left in place.)
 
 ---
 

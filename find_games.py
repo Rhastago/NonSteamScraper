@@ -737,18 +737,30 @@ def restore_point_size():
         return 0.0
     return round(total / (1024 * 1024), 2)
 
+def _is_shortcuts_backup(fname):
+    """True for a shortcuts.vdf backup in BACKUP_FOLDER: the legacy
+    shortcuts.vdf.bak (one copy, taken for whichever account wrote first before
+    v1.5.2) or a per-account shortcuts.vdf.<userid>.bak. Neither is ever deleted."""
+    return fname.startswith("shortcuts.vdf.") and fname.endswith(".bak")
+
+def _shortcuts_backup_path():
+    """The ACTIVE account's shortcuts.vdf backup. Per account (B10): one shared
+    file meant only the first account ever written got a backup. Reads the live
+    STEAM_USER_ID, so an account switch is honored."""
+    return os.path.join(BACKUP_FOLDER, f"shortcuts.vdf.{STEAM_USER_ID}.bak")
+
 def legacy_backup_size():
     """MB of the art copies still sitting in ~/.steamart_backup from every past
     fetch (backup_artwork is gone; this reports what it left behind), rounded to
-    2 dp like get_cache_size. shortcuts.vdf.bak is EXCLUDED — it is never
-    deleted (the only pre-app shortcut-list copy), so the Settings clear button
-    could never zero it out. Never raises."""
+    2 dp like get_cache_size. The shortcuts.vdf backups are EXCLUDED — they are
+    never deleted (the only pre-app shortcut-list copies), so the Settings clear
+    button could never zero them out. Never raises."""
     if not os.path.exists(BACKUP_FOLDER):
         return 0.0
     try:
         total = 0
         for f in os.listdir(BACKUP_FOLDER):
-            if f == "shortcuts.vdf.bak": continue  # never deleted; not clearable
+            if _is_shortcuts_backup(f): continue  # never deleted; not clearable
             p = os.path.join(BACKUP_FOLDER, f)
             if os.path.isfile(p):
                 total += os.path.getsize(p)
@@ -759,7 +771,7 @@ def legacy_backup_size():
 def clear_backup():
     if not os.path.exists(BACKUP_FOLDER): return
     for f in os.listdir(BACKUP_FOLDER):
-        if f == "shortcuts.vdf.bak": continue
+        if _is_shortcuts_backup(f): continue
         p = os.path.join(BACKUP_FOLDER, f)
         if os.path.isfile(p): os.remove(p)
 
@@ -906,11 +918,13 @@ def set_shortcut_icons(mapping):
     rewrite per game. `mapping` is {unsigned_id: icon_path}. Every shortcut whose
     (appid & 0xFFFFFFFF) is a key gets game["icon"] set (all shortcuts sharing an appid,
     like the single-write path). Backs up on first write; writes atomically. Returns the
-    count of shortcuts changed. Never raises (matches set_shortcut_icon's style)."""
+    count of shortcuts changed. Never raises (matches set_shortcut_icon's style).
+    The backup is per account (shortcuts.vdf.<userid>.bak), taken on that account's
+    first write; the legacy shortcuts.vdf.bak is left as it is."""
     if not mapping or not os.path.exists(SHORTCUTS_PATH): return 0
     try:
         os.makedirs(BACKUP_FOLDER, exist_ok=True)
-        bak = os.path.join(BACKUP_FOLDER, "shortcuts.vdf.bak")
+        bak = _shortcuts_backup_path()
         if not os.path.exists(bak): shutil.copy2(SHORTCUTS_PATH, bak)
         with open(SHORTCUTS_PATH, "rb") as f: data = vdf.binary_loads(f.read())
         changed = 0

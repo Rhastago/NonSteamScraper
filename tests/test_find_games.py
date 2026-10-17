@@ -999,14 +999,72 @@ def test_set_shortcut_icons_appid_masked_to_unsigned(tmp_path, monkeypatch):
 
 def test_set_shortcut_icons_backs_up_once(tmp_path, monkeypatch):
     sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""}})
+    monkeypatch.setattr(fg, "STEAM_USER_ID", "111")
     fg.set_shortcut_icons({100: "/a/i.png"})
-    bak = os.path.join(fg.BACKUP_FOLDER, "shortcuts.vdf.bak")
+    bak = os.path.join(fg.BACKUP_FOLDER, "shortcuts.vdf.111.bak")
     assert os.path.exists(bak)
     import shutil
     before = open(bak, "rb").read()
     # A second write must not overwrite the original backup.
     fg.set_shortcut_icons({100: "/a/i2.png"})
     assert open(bak, "rb").read() == before
+
+
+def _two_accounts(tmp_path, monkeypatch):
+    """Two account folders, each with its own shortcuts.vdf, and a backup folder
+    holding a legacy shortcuts.vdf.bak. Returns {uid: vdf path} and the backup dir."""
+    paths = {}
+    for uid, appid in (("111", 100), ("222", 200)):
+        cfg = tmp_path / "userdata" / uid / "config"
+        cfg.mkdir(parents=True)
+        _write_shortcuts(str(cfg / "shortcuts.vdf"), {"0": {"appid": appid, "icon": uid}})
+        paths[uid] = str(cfg / "shortcuts.vdf")
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    (backup / "shortcuts.vdf.bak").write_bytes(b"LEGACY")
+    monkeypatch.setattr(fg, "BACKUP_FOLDER", str(backup))
+    return paths, backup
+
+
+def _use_account(monkeypatch, uid, paths):
+    monkeypatch.setattr(fg, "STEAM_USER_ID", uid)
+    monkeypatch.setattr(fg, "SHORTCUTS_PATH", paths[uid])
+
+
+def test_set_shortcut_icons_backs_up_each_account_separately(tmp_path, monkeypatch):
+    """B10: the backup was ONE file taken "if not exists", so after account A's
+    first write, account B's first write backed up nothing."""
+    paths, backup = _two_accounts(tmp_path, monkeypatch)
+    originals = {uid: open(p, "rb").read() for uid, p in paths.items()}
+
+    _use_account(monkeypatch, "111", paths)
+    fg.set_shortcut_icons({100: "/a/one.png"})
+    _use_account(monkeypatch, "222", paths)
+    fg.set_shortcut_icons({200: "/a/two.png"})
+    fg.set_shortcut_icons({200: "/a/two-again.png"})
+
+    for uid in ("111", "222"):
+        bak = backup / f"shortcuts.vdf.{uid}.bak"
+        assert bak.exists(), f"account {uid} must get its own backup"
+        assert bak.read_bytes() == originals[uid], "the backup is the pre-write file"
+    assert (backup / "shortcuts.vdf.bak").read_bytes() == b"LEGACY", (
+        "the legacy backup must be left untouched")
+
+
+def test_clear_backup_keeps_every_shortcuts_backup(tmp_path, monkeypatch):
+    paths, backup = _two_accounts(tmp_path, monkeypatch)
+    for uid in ("111", "222"):
+        _use_account(monkeypatch, uid, paths)
+        fg.set_shortcut_icons({100: "/x.png", 200: "/y.png"})
+    (backup / "12345p.png").write_bytes(b"x" * (300 * 1024))
+    assert fg.legacy_backup_size() > 0.0
+
+    fg.clear_backup()
+
+    assert sorted(os.listdir(backup)) == [
+        "shortcuts.vdf.111.bak", "shortcuts.vdf.222.bak", "shortcuts.vdf.bak"]
+    assert fg.legacy_backup_size() == 0.0, (
+        "shortcuts.vdf backups are never cleared, so they must not count")
 
 
 def test_set_shortcut_icons_empty_mapping_returns_zero(tmp_path, monkeypatch):
