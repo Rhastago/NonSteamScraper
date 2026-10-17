@@ -4,6 +4,44 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.5.2] — 2026-10-17
+
+A safety release: every fix below stops the app from losing or hiding your artwork.
+
+### Fixed
+- **Search → Select no longer deletes other games' artwork.** Matching a game whose ID
+  is the start of another game's ID (for example 12345 and 123456) also deleted the other
+  game's art, and Undo could not bring it back. Now only the matched game's art is cleared,
+  Undo can restore it, and the fetch that follows covers only that game.
+- **A rejected API key no longer hides your library.** If SteamGridDB stopped accepting your
+  key (for example after you replaced it on their site), every game the fetch touched was
+  moved to Hidden as "not found". Fetch now checks the key first: if SteamGridDB rejects it,
+  nothing is fetched, a message tells you so and Settings opens; if SteamGridDB cannot be
+  reached, the status line says so and nothing is fetched. If the key stops working in the
+  middle of a fetch, the fetch stops and no game is hidden. Settings now says "A key is
+  saved" instead of claiming the key is valid.
+- **A failed download keeps your old artwork.** When a download timed out, the old image was
+  already deleted, and the results screen still said "Applied!". Now the new image is
+  downloaded first and the old one is replaced only when the download succeeded. The log
+  names any artwork that failed, and a failed icon no longer points Steam at a missing file.
+- **Each Steam account gets its own `shortcuts.vdf` backup.** Only the first account the app
+  ever wrote to was backed up. Each account now gets `shortcuts.vdf.<account id>.bak` before
+  its first change; the older single backup is kept.
+- **Nothing that changes your files can run during a fetch.** While a fetch runs, Re-fetch,
+  Ignore, Restore, Search → Select, Undo, theme and accent say "Fetch in progress", and in
+  Settings the account switch, Clear All Artwork, Clear saved undo data and Reset are greyed
+  out. Before, a second fetch, an account switch or a restart could run in the middle of a
+  fetch and write art into the wrong place.
+- **Closing the window during a fetch asks first.** If you confirm, the fetch stops after the
+  game it is on and its unfinished downloads are removed before the window closes.
+- **Icon changes can no longer overwrite each other.** Two parts of the app writing Steam's
+  shortcut list at the same moment could lose one of the changes; writes now take turns, and
+  each one is flushed to disk before it replaces the file.
+- **"Apply this one" no longer freezes the results window**, and an interrupted download no
+  longer leaves a broken image in Steam's artwork folder.
+- **Animated artwork is placed only once its conversion has finished**, so closing the app
+  mid-conversion can no longer leave a half-written image for Steam to show.
+
 ## [1.5.1] — 2026-10-15
 
 ### Added

@@ -12,7 +12,7 @@ import sys
 import subprocess
 import webbrowser
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 FIRST_RUN_FILE = os.path.expanduser("~/.steamart_firstrun")
 
