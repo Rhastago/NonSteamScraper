@@ -189,7 +189,7 @@ def update_view(state, img_label, counter_label):
             _meta["animated"] = is_anim
             _update_badge(_bl, _meta)
 
-    if index < len(state["paths"]):
+    if index in state["paths"]:
         # Per-index decoded-image cache (#6): revisiting an index via ◀/▶ should be
         # instant instead of re-opening + re-decoding the file off-thread every time
         # (the row-thumb path already caches; the results cycle didn't). We cache the
@@ -229,22 +229,37 @@ def update_view(state, img_label, counter_label):
         # Fetch on demand — keep the current image visible while downloading to
         # avoid the label reverting to character-unit dimensions mid-load.
         counter_label.config(text=f"{index + 1} / {len(state['option_urls'])} (loading...)")
+        loading = state.setdefault("_loading", set())
+        if index in loading:
+            return  # already downloading this option; it shows when it lands
+        loading.add(index)
         url = state["option_urls"][index]
+        ext = url.split(".")[-1].split("?")[0]
+        # The {base}_{i} cache name the fetch's own previews use — never renamed.
+        cache_path = state["paths"][0].rsplit("_", 1)[0] + f"_{index}.{ext}"
 
         def fetch(expected=index, _on_anim=on_animated):
+            # Worker thread: no widget calls except through after(). The download
+            # goes through the HTTP seam with a status check (a non-200 writes no
+            # file) and lands atomically (.part + os.replace).
+            ok = fg.download_artwork(url, cache_path, register=False)
+
+            def land():
+                # Tk thread: file the preview under ITS index (B9: appending in
+                # finish order showed option 5's image under option 4).
+                loading.discard(expected)
+                if ok:
+                    state["paths"][expected] = cache_path
+                if state["index"] != expected:
+                    return
+                if ok:
+                    _display_image_on_label(img_label, cache_path, _on_anim)
+                    counter_label.config(text=f"{expected + 1} / {len(state['option_urls'])}")
+                else:
+                    img_label.config(text="preview\nunavailable")
             try:
-                r = fg._http_get(url, stream=True, timeout=10)
-                ext = url.split(".")[-1].split("?")[0]
-                cache_path = state["paths"][0].rsplit("_", 1)[0] + f"_{expected}.{ext}"
-                with open(cache_path, "wb") as f:
-                    f.write(r.content)
-                state["paths"].append(cache_path)
-                if state["index"] == expected:
-                    img_label.after(0, lambda: _display_image_on_label(img_label, cache_path, _on_anim))
-                    counter_label.after(0, lambda: counter_label.config(
-                        text=f"{expected + 1} / {len(state['option_urls'])}"))
+                img_label.after(0, land)
             except Exception:
-                if state["index"] == expected:
-                    img_label.after(0, lambda: img_label.config(text="preview\nunavailable"))
+                pass  # the results window is gone
 
         threading.Thread(target=fetch, daemon=True).start()

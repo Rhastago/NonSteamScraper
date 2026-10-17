@@ -995,3 +995,88 @@ def test_search_select_refuses_while_a_fetch_runs(ui, search_env):
     assert search_env.calls == [] and search_env.fetches == []
     status = [w for w in widgets if w.opts.get("text") == ui.fetch_mixin.FetchMixin.BUSY_MESSAGE]
     assert status, "the dialog's own status line must say a fetch is in progress"
+
+
+# ---------------------------------------------------------------------------
+# T6 / B9 — on-demand previews are filed by option index
+# ---------------------------------------------------------------------------
+
+class _Resp:
+    def __init__(self, status, body=b""):
+        self.status_code = status
+        self.content = body
+        self.headers = {"Content-Length": str(len(body))}
+
+    def iter_content(self, n):
+        yield self.content
+
+
+@pytest.fixture
+def preview_env(ui, tmp_path, monkeypatch):
+    im = ui.imaging
+    threads = _InlineThreads()
+    monkeypatch.setattr(im, "threading", threads)
+    shown = []
+    monkeypatch.setattr(im, "_display_image_on_label",
+                        lambda lbl, path, on_anim=None, cache=None, cache_key=None:
+                        shown.append(path))
+    bodies = {}
+    monkeypatch.setattr(fg, "_http_get", lambda url, **kw: bodies[url])
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    for i in range(3):
+        (cache / f"7p_{i}.png").write_bytes(b"cached %d" % i)
+    state = {"index": 0,
+             "paths": {i: str(cache / f"7p_{i}.png") for i in range(3)},
+             "option_urls": [f"https://x/opt{i}.png" for i in range(5)],
+             "option_meta": [{} for _ in range(5)]}
+    return types.SimpleNamespace(state=state, threads=threads, shown=shown,
+                                 bodies=bodies, cache=cache, img=StandInWidget(),
+                                 counter=StandInWidget())
+
+
+def _view(ui, env, index):
+    env.state["index"] = index
+    ui.imaging.update_view(env.state, env.img, env.counter)
+
+
+def test_previews_finishing_out_of_order_still_map_to_their_options(ui, preview_env):
+    """B9: ▶ to option 4 (index 3), ▶ again to 5 (index 4); 5's download lands
+    first. Each preview must be filed under its own index, so ◀ back to 4 shows
+    option 4 — the option Apply installs."""
+    env = preview_env
+    env.bodies.update({"https://x/opt3.png": _Resp(200, b"option 4"),
+                       "https://x/opt4.png": _Resp(200, b"option 5")})
+    _view(ui, env, 3)
+    _view(ui, env, 4)
+    fetch_3, fetch_4 = env.threads.started
+    env.threads.started[:] = [fetch_4, fetch_3]   # option 5 finishes first
+    env.threads.run_all()
+
+    assert env.state["paths"][3].endswith("7p_3.png")
+    assert env.state["paths"][4].endswith("7p_4.png")
+    assert open(env.state["paths"][3], "rb").read() == b"option 4"
+    assert open(env.state["paths"][4], "rb").read() == b"option 5"
+    env.shown.clear()
+    _view(ui, env, 3)                              # ◀ back to option 4
+    assert env.shown == [env.state["paths"][3]]
+
+
+def test_a_non_200_preview_writes_no_file(ui, preview_env):
+    env = preview_env
+    env.bodies["https://x/opt3.png"] = _Resp(404, b"<html>not found</html>")
+    _view(ui, env, 3)
+    env.threads.run_all()
+    assert 3 not in env.state["paths"]
+    assert sorted(os.listdir(env.cache)) == ["7p_0.png", "7p_1.png", "7p_2.png"], (
+        "an error page must not be cached as an image")
+    assert env.img.opts.get("text") == "preview\nunavailable"
+
+
+def test_revisiting_an_option_while_it_downloads_starts_no_second_download(ui, preview_env):
+    env = preview_env
+    env.bodies["https://x/opt3.png"] = _Resp(200, b"option 4")
+    _view(ui, env, 3)
+    _view(ui, env, 2)
+    _view(ui, env, 3)
+    assert len(env.threads.started) == 1

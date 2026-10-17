@@ -548,7 +548,9 @@ def build_game_result_section(app, parent, game_result):
 
         state = {
             "index": 0,
-            "paths": list(art_data["thumb_paths"]),
+            # option index -> its preview file. A dict, not a list: on-demand
+            # previews finish in any order (B9), so they are filed by index.
+            "paths": dict(enumerate(art_data["thumb_paths"])),
             "option_urls": art_data["option_urls"],
             "option_meta": art_data.get("option_meta", [{}] * len(art_data["option_urls"])),
             "applied_path": art_data["applied_path"],
