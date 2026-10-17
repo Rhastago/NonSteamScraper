@@ -3158,3 +3158,54 @@ def test_download_artwork_identity_encoding_length_mismatch_fails(tmp_path, monk
     assert fg.download_artwork("https://x/c.png", str(save_path), register=False) is False
     assert not save_path.exists()
     assert not (tmp_path / "c.png.part").exists()
+
+
+# ---------------------------------------------------------------------------
+# install_option / apply_icon — the results window's "Apply this one" (C4)
+# ---------------------------------------------------------------------------
+
+def _install_option_env(monkeypatch, installed=True, steam_running=False):
+    rec = {"installed": [], "written": [], "queued": []}
+
+    def fake_install(save_path, url, existing_files=None, animated=False,
+                     progress_cb=None, status_cb=None):
+        rec["installed"].append((save_path, animated))
+        return installed
+    monkeypatch.setattr(fg, "install_into_slot", fake_install)
+    monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: steam_running)
+    monkeypatch.setattr(fg, "set_shortcut_icon",
+                        lambda uid, path: rec["written"].append((uid, path)) or True)
+    monkeypatch.setattr(fg, "save_pending_icons", lambda m: rec["queued"].append(dict(m)))
+    return rec
+
+
+def test_install_option_animated_icon_with_steam_closed_writes_the_vdf(monkeypatch):
+    """C4: an animated icon pick is placed AND written to shortcuts.vdf."""
+    rec = _install_option_env(monkeypatch, steam_running=False)
+    ok, queued = fg.install_option("/g/7_icon.png", "https://x/i.png", 7,
+                                   is_icon=True, animated=True)
+    assert (ok, queued) == (True, False)
+    assert rec["installed"] == [("/g/7_icon.png", True)]
+    assert rec["written"] == [(7, "/g/7_icon.png")]
+    assert rec["queued"] == []
+
+
+def test_install_option_animated_icon_with_steam_running_queues(monkeypatch):
+    rec = _install_option_env(monkeypatch, steam_running=True)
+    ok, queued = fg.install_option("/g/7_icon.png", "https://x/i.png", 7,
+                                   is_icon=True, animated=True)
+    assert (ok, queued) == (True, True)
+    assert rec["written"] == []
+    assert rec["queued"] == [{7: "/g/7_icon.png"}]
+
+
+def test_install_option_failed_install_writes_no_icon(monkeypatch):
+    rec = _install_option_env(monkeypatch, installed=False)
+    assert fg.install_option("/g/7_icon.png", "u", 7, is_icon=True) == (False, False)
+    assert rec["written"] == [] and rec["queued"] == []
+
+
+def test_install_option_non_icon_slot_writes_no_icon(monkeypatch):
+    rec = _install_option_env(monkeypatch)
+    assert fg.install_option("/g/7p.png", "u", 7, animated=True) == (True, False)
+    assert rec["written"] == [] and rec["queued"] == []

@@ -17,7 +17,6 @@ from tkinter import ttk
 from appcommon import open_url
 from theming import FONT_UI
 import find_games as fg
-from find_games import set_shortcut_icon
 from imaging import _update_badge, _display_image_on_label, update_view
 
 
@@ -482,6 +481,36 @@ def _sync_apply_ui(app, state, apply_btn):
     _set_applied_border(app, state)
 
 
+def _show_apply_outcome(app, state, apply_btn, index, ok, queued):
+    """Tk thread: show how an "Apply this one" (static or animated) ended. The
+    results window may have closed meanwhile."""
+    try:
+        if not apply_btn.winfo_exists():
+            return
+    except Exception:
+        return
+    apply_btn.config(state="normal")
+    if not ok:
+        apply_btn.config(text="Failed — retry", image="", compound="none")
+    elif queued:
+        # DEFERRED: the icon isn't written yet, so this is intent, not
+        # application. Mark queued_index (NOT applied_index) so the slot shows
+        # "Queued (close Steam)" with NO border; the border + "Applied!" only land
+        # once the write happens: _mark_queued_icons_applied promotes
+        # queued_index -> applied_index and re-syncs this slot then.
+        state["queued_index"] = index
+        _sync_apply_ui(app, state, apply_btn)
+        app._queued_apply_btns.append({"state": state, "index": index, "btn": apply_btn})
+        # Make the pending warning + "Close Steam & Apply Icons" action
+        # (re)appear/refresh right away.
+        _refresh_results_steam_ui(app)
+    else:
+        # The write succeeded — NOW it's truly applied, so set applied_index and
+        # let _sync_apply_ui draw the border + label.
+        state["applied_index"] = index
+        _sync_apply_ui(app, state, apply_btn)
+
+
 def build_game_result_section(app, parent, game_result):
     """Build the artwork review UI for a single game in the results screen."""
     t = app.theme
@@ -589,8 +618,7 @@ def build_game_result_section(app, parent, game_result):
         # "Applied!" + border once the queue is written.
         if state["queued_index"] is not None:
             app._queued_apply_btns.append(
-                {"state": state, "index": state["queued_index"],
-                 "btn": apply_btn, "il": img_label, "cl": counter_label})
+                {"state": state, "index": state["queued_index"], "btn": apply_btn})
 
         # Clicking the image or badge opens the full-size version in the browser
         for w in (img_frame, img_label, badge_label):
@@ -629,62 +657,22 @@ def build_game_result_section(app, parent, game_result):
 
                 def worker():
                     # OFF the Tk thread: no widget calls here, only the file work.
-                    # install_into_slot: .part + verify + os.replace, THEN clear the
-                    # slot's other extensions, so an extension change (e.g. animated
-                    # .png -> static .jpg) leaves no duplicate Steam keeps showing,
-                    # and a failed download leaves the old file in place.
+                    # install_option: .part + verify + os.replace, THEN clear the
+                    # slot's other extensions (a failed download leaves the old file),
+                    # then for an icon write shortcuts.vdf now (Steam closed) or queue
+                    # it (Steam running). (s["app_id"] is the int uid.)
                     ok, queued = False, False
                     try:
-                        ok = fg.install_into_slot(new_path, url)
-                        # Icons must also be registered in shortcuts.vdf to apply.
-                        # BUT Steam clobbers shortcuts.vdf on exit, so a write while
-                        # Steam is running is silently lost. If Steam is up, DEFER:
-                        # queue the icon (auto-applies when Steam closes); only write
-                        # immediately when Steam is closed. (s["app_id"] is the int uid.)
-                        if ok and is_icon:
-                            if fg.is_steam_running():
-                                fg.save_pending_icons({s["app_id"]: new_path})
-                                queued = True
-                            else:
-                                set_shortcut_icon(s["app_id"], new_path)
+                        ok, queued = fg.install_option(new_path, url, s["app_id"],
+                                                       is_icon=is_icon)
                     except Exception:
                         fg._debug("results apply")
                         ok = False
                     try:
-                        app.window.after(0, lambda: finish(ok, queued))
+                        app.window.after(0, lambda: _show_apply_outcome(
+                            app, s, ab, idx, ok, queued))
                     except Exception:
                         pass  # the main window is gone; nothing left to update
-
-                def finish(ok, queued):
-                    # Tk thread. The results window may have closed meanwhile.
-                    try:
-                        if not ab.winfo_exists():
-                            return
-                    except Exception:
-                        return
-                    ab.config(state="normal")
-                    if not ok:
-                        ab.config(text="Failed — retry", image="", compound="none")
-                    elif queued:
-                        # DEFERRED: the icon isn't written yet, so this is intent,
-                        # not application. Mark queued_index (NOT applied_index) so
-                        # the slot shows "Queued (close Steam)" with NO border; the
-                        # border + "Applied!" only land once the write happens.
-                        s["queued_index"] = idx
-                        _sync_apply_ui(app, s, ab)
-                        # Track enough to finish the job later: _mark_queued_icons_applied
-                        # promotes queued_index -> applied_index and re-syncs this slot
-                        # once the icons are actually written.
-                        app._queued_apply_btns.append(
-                            {"state": s, "index": idx, "btn": ab, "il": il, "cl": cl})
-                        # Make the pending warning + "Close Steam & Apply Icons"
-                        # action (re)appear/refresh right away.
-                        _refresh_results_steam_ui(app)
-                    else:
-                        # The write succeeded — NOW it's truly applied, so set
-                        # applied_index and let _sync_apply_ui draw the border + label.
-                        s["applied_index"] = idx
-                        _sync_apply_ui(app, s, ab)
 
                 threading.Thread(target=worker, daemon=True).start()
             return prev, nxt, apply
@@ -761,32 +749,29 @@ def apply_animated_art(app, state, apply_btn, url, out_path, index):
         app.window.after(0, lambda m=msg: status.config(text=m)
                           if status.winfo_exists() else None)
 
-    def finish(ok):
+    def finish(ok, queued):
         if popup.winfo_exists():
             app._close_modal(popup)
             popup.destroy()
-        # The worker marshals this back via after(0,...); if the results window was
-        # destroyed mid-conversion, apply_btn / state["img_frame"] are gone, so touching
-        # them would raise a TclError. Bail once the popup is closed.
-        if not apply_btn.winfo_exists():
-            return
-        if ok:
-            state["applied_index"] = index
+        if ok and not queued:
             state["queued_index"] = None
-            _sync_apply_ui(app, state, apply_btn)
-            apply_btn.config(state="normal")
-        else:
-            apply_btn.config(text="Failed — retry", image="", compound="none", state="normal")
+        # If the results window was destroyed mid-conversion, apply_btn is gone;
+        # _show_apply_outcome checks that before touching it.
+        _show_apply_outcome(app, state, apply_btn, index, ok, queued)
 
     def worker():
+        ok, queued = False, False
         try:
             # Download + encode in the cache, then .part + os.replace into the slot,
             # THEN clear the slot's other extensions so the new APNG is the only one
-            # Steam sees. A failure leaves the old file in place.
-            ok = fg.install_into_slot(out_path, url, animated=True,
-                                      progress_cb=on_progress, status_cb=on_status)
+            # Steam sees. A failure leaves the old file in place. An animated ICON
+            # is then written to shortcuts.vdf (or queued) like a static one (C4).
+            ok, queued = fg.install_option(out_path, url, state["app_id"],
+                                           is_icon=state["art_type"] == "icons",
+                                           animated=True, progress_cb=on_progress,
+                                           status_cb=on_status)
         except Exception:
-            ok = False
-        app.window.after(0, lambda: finish(ok))
+            fg._debug("results animated apply")
+        app.window.after(0, lambda: finish(ok, queued))
 
     threading.Thread(target=worker, daemon=True).start()

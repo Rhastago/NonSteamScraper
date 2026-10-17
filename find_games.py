@@ -1303,6 +1303,33 @@ def install_into_slot(save_path, url, existing_files=None, animated=False,
     register_managed_file(save_path)
     return True
 
+def apply_icon(unsigned_id, icon_path):
+    """Point a shortcut's icon at icon_path in shortcuts.vdf: written at once while
+    Steam is closed, QUEUED in the pending-icon file while it runs (Steam rewrites
+    shortcuts.vdf on exit and would drop the write; the poll applies the queue once
+    Steam closes). Returns True when the icon was queued, False when written."""
+    if is_steam_running():
+        save_pending_icons({unsigned_id: icon_path})
+        return True
+    set_shortcut_icon(unsigned_id, icon_path)
+    return False
+
+def install_option(save_path, url, unsigned_id, is_icon=False, animated=False,
+                   progress_cb=None, status_cb=None):
+    """The results window's "Apply this one", static or animated: install the
+    option into its slot (install_into_slot), then, for the icon slot, point
+    Steam's shortcut at it (apply_icon). An animated icon is an APNG served as
+    image/png; it goes through the same icon write as a static one (C4: the
+    animated apply used to place the file and never touch shortcuts.vdf).
+    Returns (ok, queued): ok when the file is in place, queued when the icon
+    write waits for Steam to close."""
+    ok = install_into_slot(save_path, url, animated=animated,
+                           progress_cb=progress_cb, status_cb=status_cb)
+    queued = False
+    if ok and is_icon:
+        queued = apply_icon(unsigned_id, save_path)
+    return ok, queued
+
 def row_thumbnail_path(grid_folder, app_id):
     """Return the best representative art file for `app_id` to show as a list-row
     thumbnail, or None if the game has no cover art on disk.

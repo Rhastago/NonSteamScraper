@@ -78,6 +78,15 @@ class StandInWidget:
     def winfo_reqwidth(self):
         return 100
 
+    def winfo_rootx(self):
+        return 0
+
+    def winfo_rooty(self):
+        return 0
+
+    def __setitem__(self, key, value):
+        self.opts[key] = value
+
     def __getattr__(self, name):
         if name.startswith("__"):
             raise AttributeError(name)
@@ -125,7 +134,7 @@ def _fake_tk_modules():
 
 
 _UI_MODULES = ("fetch_mixin", "library_mixin", "geometry_mixin", "ui_mixin",
-               "settings_window", "imaging", "PIL.ImageTk")
+               "settings_window", "results_window", "imaging", "PIL.ImageTk")
 
 
 @pytest.fixture(scope="module")
@@ -144,10 +153,13 @@ def ui():
         import geometry_mixin
         import ui_mixin
         import settings_window
+        import results_window
+        import imaging
         yield types.SimpleNamespace(
             fetch_mixin=fetch_mixin, library_mixin=library_mixin,
             geometry_mixin=geometry_mixin, ui_mixin=ui_mixin,
-            settings_window=settings_window,
+            settings_window=settings_window, results_window=results_window,
+            imaging=imaging,
             mb=fakes["tkinter.messagebox"])
     finally:
         for name, mod in saved.items():
@@ -283,7 +295,7 @@ def make_settings_app(ui, monkeypatch, busy=False, users=("111",)):
     app.theme = resolve_theme("dark", "blue")
     app._icon_cache = {}
     app._modal_stack = []
-    app.ICON_BTN = app.ICON_INLINE = app.ICON_ACTION = 24
+    app.ICON_BTN = app.ICON_INLINE = app.ICON_ACTION = app.ICON_NAV = 24
     app._icon = lambda name, size=18: None
     app._fit_window_to_workarea = lambda win, w, h: (w, h)
     app._fetch_busy = busy
@@ -756,3 +768,146 @@ def test_closing_settings_before_the_fetch_ends_drops_the_release(ui, fetch_env,
 
     assert app._settings_on_fetch_end is None, (
         "a closed Settings window must not be called back when the fetch ends")
+
+
+# ---------------------------------------------------------------------------
+# Results window, built headless — "Apply this one" (B6/B7, C4)
+# ---------------------------------------------------------------------------
+
+class _InlineThreads:
+    """Stand-in for a module's `threading`: Thread(...).start() is RECORDED, so a
+    test can check nothing ran on the Tk thread, then run the worker itself."""
+    def __init__(self):
+        self.started = []
+        outer = self
+
+        class Thread:
+            def __init__(self, target=None, args=(), daemon=None):
+                self.target, self.args = target, args
+
+            def start(self):
+                outer.started.append(self)
+        self.Thread = Thread
+
+    def run_all(self):
+        while self.started:
+            t = self.started.pop(0)
+            t.target(*t.args)
+
+
+@pytest.fixture
+def results_env(ui, fetch_env, monkeypatch):
+    """A fake app that can build results_window sections; worker threads are
+    recorded (run with .threads.run_all()); image decodes are skipped."""
+    rw = ui.results_window
+    threads = _InlineThreads()
+    monkeypatch.setattr(rw, "threading", threads)
+    monkeypatch.setattr(ui.imaging, "threading", _InlineThreads())   # decodes never run
+    monkeypatch.setattr(rw, "_display_image_on_label", lambda *a, **k: None)
+    rec = types.SimpleNamespace(installed=[], written=[], queued=[], threads=threads,
+                                install_ok=True, steam_running=False)
+
+    def fake_install(save_path, url, existing_files=None, animated=False,
+                     progress_cb=None, status_cb=None):
+        rec.installed.append((save_path, url, animated))
+        return rec.install_ok
+    monkeypatch.setattr(fg, "install_into_slot", fake_install)
+    monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: rec.steam_running)
+    monkeypatch.setattr(fg, "set_shortcut_icon",
+                        lambda uid, path: rec.written.append((uid, path)) or True)
+    monkeypatch.setattr(fg, "save_pending_icons", lambda m: rec.queued.append(dict(m)))
+    monkeypatch.setattr(fg, "load_pending_icons", lambda: {})
+    monkeypatch.setattr(fg, "has_pending_icons", lambda: False)
+    app = make_settings_app(ui, monkeypatch)
+    app._queued_apply_btns = []
+    app._build_pending_icons = {}
+    app._results_widgets = None
+    app.results_window = StandInWidget()
+    rec.app = app
+    return rec
+
+
+def _slot_data(base, urls, animated, applied_index):
+    ext = "png"
+    return {"applied_path": f"/grid/{base}.{ext}", "applied_index": applied_index,
+            "failed": False, "label": "Icon",
+            "option_urls": list(urls),
+            "option_meta": [{"animated": a, "nsfw": False, "humor": False, "steam": False}
+                            for a in animated],
+            "thumb_paths": [f"/cache/{base}_{i}.png" for i in range(min(3, len(urls)))],
+            "filename_base": base}
+
+
+def build_results_section(ui, app, app_id, slots):
+    StandInWidget.created = []
+    ui.results_window.build_game_result_section(
+        app, StandInWidget(), {"name": "G", "app_id": app_id, "results": slots})
+    return list(StandInWidget.created)
+
+
+def _apply_button(widgets):
+    btns = [w for w in widgets if type(w).__name__ == "Button"
+            and w.opts.get("text") in ("Apply this one", "Applied!", "Queued (close Steam)")]
+    assert len(btns) == 1
+    return btns[0]
+
+
+@pytest.mark.parametrize("steam_running", [False, True])
+def test_results_animated_icon_apply_writes_or_queues_the_icon(ui, results_env, steam_running):
+    """C4: an animated pick in the ICON slot was placed in the grid but never
+    written to shortcuts.vdf. Steam closed: written; Steam running: queued."""
+    app = results_env.app
+    results_env.steam_running = steam_running
+    data = _slot_data("7_icon", ["https://x/anim.png"], [True], applied_index=None)
+    btn = _apply_button(build_results_section(ui, app, 7, {"icons": data}))
+
+    btn.opts["command"]()
+    assert results_env.installed == [], "the encode must not run on the Tk thread"
+    results_env.threads.run_all()
+
+    assert results_env.installed == [("/grid/7_icon.png", "https://x/anim.png", True)]
+    if steam_running:
+        assert results_env.written == []
+        assert results_env.queued == [{7: "/grid/7_icon.png"}]
+        assert btn.opts["text"] == "Queued (close Steam)"
+    else:
+        assert results_env.written == [(7, "/grid/7_icon.png")], (
+            "an animated icon apply with Steam closed must write shortcuts.vdf")
+        assert results_env.queued == []
+        assert btn.opts["text"] == "Applied!"
+
+
+def test_results_animated_cover_apply_writes_no_icon(ui, results_env):
+    app = results_env.app
+    data = _slot_data("7p", ["https://x/anim.webp"], [True], applied_index=None)
+    btn = _apply_button(build_results_section(ui, app, 7, {"grids": data}))
+    btn.opts["command"]()
+    results_env.threads.run_all()
+    assert results_env.installed == [("/grid/7p.png", "https://x/anim.webp", True)]
+    assert results_env.written == [] and results_env.queued == []
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_results_static_apply_installs_on_a_worker_then_shows_the_outcome(ui, results_env, ok):
+    """B6, behavioural (replaces the AST check that the worker called
+    install_into_slot): the button command only locks the button and starts a
+    worker; the install happens in the worker; the outcome is drawn after."""
+    app = results_env.app
+    results_env.install_ok = ok
+    data = _slot_data("7p", ["https://x/a.png", "https://x/b.jpg"], [False, False],
+                      applied_index=0)
+    widgets = build_results_section(ui, app, 7, {"grids": data})
+    btn = _apply_button(widgets)
+    next_btn = [w for w in widgets if w.opts.get("text") == "▶"][0]
+    next_btn.opts["command"]()           # view option 2
+    assert btn.opts["text"] == "Apply this one"
+
+    btn.opts["command"]()
+    assert btn.opts["state"] == "disabled" and btn.opts["text"] == "Applying…"
+    assert results_env.installed == [], "the download must not run on the Tk thread"
+    results_env.threads.run_all()
+
+    assert results_env.installed == [("/grid/7p.jpg", "https://x/b.jpg", False)]
+    assert btn.opts["state"] == "normal"
+    assert btn.opts["text"] == ("Applied!" if ok else "Failed — retry")
+    assert results_env.written == [], "a cover apply never writes shortcuts.vdf"
