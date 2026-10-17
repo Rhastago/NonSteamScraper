@@ -70,21 +70,6 @@ def _references_name(node, name):
     return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
 
 
-def test_wiring_refetch_game_clears_through_clear_game_art():
-    """refetch_game must delegate the snapshot + exact-id delete to
-    find_games.clear_game_art (whose order and matching are tested by behaviour
-    in test_find_games) and keep no delete loop of its own — a second copy is
-    how B1 survived in dialogs.py after Re-fetch was fixed."""
-    tree = _module("library_mixin.py")
-    fn = _func(tree, "refetch_game")
-    assert fn is not None, "library_mixin.refetch_game does not exist"
-    assert _calls_named(fn, "clear_game_art"), (
-        "library_mixin.refetch_game must call fg.clear_game_art")
-    assert not _unlink_calls(fn), (
-        "library_mixin.refetch_game must not delete files itself — "
-        "deletion lives in find_games.clear_game_art")
-
-
 def _glob_calls(node):
     return [n for n in ast.walk(node)
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
@@ -92,69 +77,16 @@ def _glob_calls(node):
             and n.func.value.id == "glob"]
 
 
-def test_wiring_search_select_clears_through_clear_game_art():
-    """B1: Search → Select (dialogs.open_sgdb_search._apply) deleted with
-    glob(f"{app_id}*") — game 12345 took 123456's art with it — and took no
-    snapshot, so Undo could not restore it. It must use clear_game_art and keep
-    no glob and no delete of its own anywhere in dialogs.py."""
-    tree = _module("dialogs.py")
-    fn = _func(tree, "_apply")
-    assert fn is not None, "dialogs._apply (Search → Select) does not exist"
-    assert _calls_named(fn, "clear_game_art"), (
-        "Search → Select must clear the game's art through fg.clear_game_art")
-    assert not _glob_calls(tree), "dialogs.py must not glob the grid folder"
-    assert not _unlink_calls(fn), (
-        "Search → Select must not delete files itself — deletion lives in "
-        "find_games.clear_game_art")
-
-
-def test_wiring_search_select_fetches_only_the_matched_game():
-    """Q1: after the match, Search → Select starts a fetch of THAT game only —
-    start_fetch(games=[game]), not a bare start_fetch() over every game."""
-    tree = _module("dialogs.py")
-    fn = _func(tree, "_apply")
-    assert fn is not None, "dialogs._apply (Search → Select) does not exist"
-    calls = _calls_named(fn, "start_fetch")
-    assert calls, "Search → Select must start a fetch"
-    for c in calls:
-        kw = {k.arg: k.value for k in c.keywords}
-        assert "games" in kw, "start_fetch must be given games=[game]"
-        val = kw["games"]
-        assert isinstance(val, ast.List) and len(val.elts) == 1 and \
-            isinstance(val.elts[0], ast.Name) and val.elts[0].id == "game", (
-            "start_fetch must be given exactly the matched game: games=[game]")
-
-
-def test_wiring_begin_restore_run_before_fetch_loop():
-    """begin_restore_run must run before the first For in _run_fetch_body."""
-    tree = _module("fetch_mixin.py")
-    fn = _func(tree, "_run_fetch_body")
-    assert fn is not None, "fetch_mixin._run_fetch_body does not exist"
-    begins = _calls_named(fn, "begin_restore_run")
-    assert begins, "fetch_mixin._run_fetch_body must call begin_restore_run"
-    loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)]
-    assert loops, "fetch_mixin._run_fetch_body must contain a For loop"
-    first_for = min(loops, key=lambda n: n.lineno)
-    assert begins[0].lineno < first_for.lineno, (
-        "begin_restore_run must run BEFORE the fetch loop")
-
-
-def test_wiring_seal_restore_point_after_fetch_loop():
-    """seal_restore_point must run after the same For loop the fetch iterates."""
-    tree = _module("fetch_mixin.py")
-    fn = _func(tree, "_run_fetch_body")
-    assert fn is not None, "fetch_mixin._run_fetch_body does not exist"
-    seals = _calls_named(fn, "seal_restore_point")
-    assert seals, "fetch_mixin._run_fetch_body must call seal_restore_point after the loop"
-    loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)]
-    assert loops, "fetch_mixin._run_fetch_body must contain a For loop"
-    first_for = min(loops, key=lambda n: n.lineno)
-    # Containment again: seal_restore_point as the FIRST statement of the loop
-    # body satisfies `lineno >` while leaving the last game's entry unsealed.
-    assert not any(_contains(first_for, sl) for sl in seals), (
-        "seal_restore_point must not sit INSIDE the fetch loop")
-    assert seals[0].lineno > first_for.end_lineno, (
-        "seal_restore_point must run AFTER the whole fetch loop")
+def test_wiring_library_and_search_delete_nothing_themselves():
+    """B1: the Search dialog once deleted with glob(f"{app_id}*") and took a
+    neighbouring game's art. Re-fetch and Search → Select now clear through
+    operations.refetch / operations.rematch (tested by behaviour in
+    test_operations.py and test_fetch_flow.py); these two UI files must not glob
+    the grid folder or delete a file anywhere."""
+    for name in ("library_mixin.py", "dialogs.py"):
+        tree = _module(name)
+        assert not _glob_calls(tree), f"{name} must not glob the grid folder"
+        assert not _unlink_calls(tree), f"{name} must not delete files itself"
 
 
 def test_wiring_undo_fetch_delegates_to_undo_restore_point():
@@ -229,60 +161,6 @@ def test_wiring_relaunch_app_uses_relaunch_env():
     assert fn is not None, "ui_mixin.relaunch_app does not exist"
     calls = _calls_named(fn, "relaunch_env")
     assert calls, "ui_mixin.relaunch_app must call relaunch_env instead of re-execing with dict(os.environ)"
-
-
-def test_wiring_begin_restore_run_after_needs_art_early_return():
-    """begin_restore_run must sit AFTER the 'if not needs_art:' early return —
-    a no-op fetch must not be able to destroy the previous restore point."""
-    tree = _module("fetch_mixin.py")
-    fn = _func(tree, "_run_fetch_body")
-    assert fn is not None, "fetch_mixin._run_fetch_body does not exist"
-    begins = _calls_named(fn, "begin_restore_run")
-    assert begins, "fetch_mixin._run_fetch_body must call begin_restore_run"
-    early = None
-    for n in ast.walk(fn):
-        if isinstance(n, ast.If) and _references_name(n.test, "needs_art"):
-            if early is None or n.lineno < early.lineno:
-                early = n
-    assert early is not None, "fetch_mixin._run_fetch_body must contain the 'if not needs_art:' early return"
-    # Containment, not line order: a begin_restore_run() placed INSIDE the
-    # `if not needs_art:` block also satisfies `lineno >`, and that is exactly
-    # the failure this gate exists to catch — the no-op fetch still drops every
-    # sealed entry and erases the operator's Undo.
-    assert not any(_contains(early, b) for b in begins), (
-        "begin_restore_run must not sit INSIDE the needs_art early-return block")
-    assert begins[0].lineno > early.end_lineno, (
-        "begin_restore_run must run AFTER the whole needs_art early return, or a "
-        "no-op fetch destroys the previous restore point")
-
-
-def test_wiring_fetch_log_reports_per_game_elapsed():
-    """Per-game timing: the 'Artwork saved for …' log line must interpolate an
-    elapsed value, so 'incredibly slow' becomes a number the operator can quote."""
-    tree = _module("fetch_mixin.py")
-    fn = _func(tree, "_run_fetch_body")
-    assert fn is not None, "fetch_mixin._run_fetch_body does not exist"
-    target = None
-    for n in ast.walk(fn):
-        if isinstance(n, ast.JoinedStr):
-            literal = "".join(
-                v.value for v in n.values
-                if isinstance(v, ast.Constant) and isinstance(v.value, str))
-            if "Artwork saved for" in literal:
-                target = n
-                break
-    assert target is not None, (
-        "fetch_mixin._run_fetch_body must log 'Artwork saved for ...' as an f-string")
-    refs = []
-    for v in target.values:
-        if isinstance(v, ast.FormattedValue):
-            for sub in ast.walk(v):
-                if isinstance(sub, ast.Name) and "elapsed" in sub.id:
-                    refs.append(sub.id)
-    assert refs, (
-        "the 'Artwork saved for' log line must interpolate a per-game elapsed "
-        "value (e.g. {elapsed:.1f}s), got formatted values: %s"
-        % [v.lineno for v in target.values])
 
 
 def test_wiring_refetch_game_has_no_glob_prefix_delete():

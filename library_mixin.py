@@ -11,7 +11,8 @@ from theming import PAD_XS, PAD_S, PAD_M, PAD_L, FONT_UI, FONT_MONO
 from appcommon import FIRST_RUN_FILE
 from imaging import _decode_row_thumb
 import find_games as fg
-from find_games import get_non_steam_games, load_api_key, add_to_skip_list, SKIP_FILE
+import operations
+from find_games import get_non_steam_games, load_api_key, add_to_skip_list
 
 class LibraryMixin:
 
@@ -253,18 +254,6 @@ class LibraryMixin:
         # Grow/shrink the window so the drawer is fully visible (open) or the
         # freed space is reclaimed (close), clamped to the work area.
         self._refit_window_height()
-
-
-    def _remove_from_skip(self, app_id):
-        """Remove a single app ID from the skip file."""
-        if not os.path.exists(SKIP_FILE):
-            return
-        with open(SKIP_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        with open(SKIP_FILE, "w", encoding="utf-8") as f:
-            for line in lines:
-                if line.strip() != str(app_id):
-                    f.write(line)
 
 
     def refresh_library(self):
@@ -644,7 +633,7 @@ class LibraryMixin:
         fetch picks it up only if it has no art; one that has art needs Re-fetch."""
         if self._refuse_if_busy():
             return
-        self._remove_from_skip(game["app_id"])
+        operations.restore_from_skip(game["app_id"])
         self.log(f"Restored: {game['name']}", icon="undo")
         self.load_games()
 
@@ -653,10 +642,9 @@ class LibraryMixin:
         """Clear existing artwork and skip data so a game is fully reprocessed."""
         if self._refuse_if_busy():
             return
-        self._remove_from_skip(game["app_id"])
-        # Snapshot + exact-id delete live in ONE find_games function, shared with
-        # Search → Select, so a fix to the deletion rule reaches both.
-        fg.clear_game_art(game["app_id"])
+        # Unskip + snapshot + exact-id delete live in operations.refetch, shared
+        # with Search → Select, so a fix to the deletion rule reaches both.
+        operations.refetch(game["app_id"])
         self.log(f"Artwork saved for: {game['name']} — will re-fetch on next run; "
                  "use Undo to restore the previous art", icon="refresh")
         self.load_games()

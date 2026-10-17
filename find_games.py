@@ -383,6 +383,17 @@ def add_to_skip_list(app_id):
     if str(app_id) not in load_skip_list():
         with open(SKIP_FILE, "a", encoding="utf-8") as f: f.write(f"{app_id}\n")
 
+def remove_from_skip_list(app_id):
+    """Take one app id off the skip list (Restore, Re-fetch, Search → Select)."""
+    if not os.path.exists(SKIP_FILE):
+        return
+    with open(SKIP_FILE, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    with open(SKIP_FILE, "w", encoding="utf-8") as f:
+        for line in lines:
+            if line.strip() != str(app_id):
+                f.write(line)
+
 def load_name_overrides():
     o = {}
     if not os.path.exists(NAMES_FILE): return o
@@ -647,6 +658,11 @@ def has_restore_point():
     except Exception:
         _debug("has_restore_point")
         return False
+
+def restore_point_game_count():
+    """How many games the restore point holds (Undo's confirmation names it).
+    Never raises."""
+    return len(_load_restore_manifest().get("entries", {}))
 
 def undo_restore_point():
     """Restore the art recorded in the restore point. If has_restore_point() is

@@ -17,6 +17,7 @@ from tkinter import ttk
 from appcommon import open_url
 from theming import FONT_UI
 import find_games as fg
+import operations
 from imaging import _update_badge, _display_image_on_label, update_view
 
 
@@ -657,17 +658,12 @@ def build_game_result_section(app, parent, game_result):
 
                 def worker():
                     # OFF the Tk thread: no widget calls here, only the file work.
-                    # install_option: .part + verify + os.replace, THEN clear the
+                    # apply_option: .part + verify + os.replace, THEN clear the
                     # slot's other extensions (a failed download leaves the old file),
                     # then for an icon write shortcuts.vdf now (Steam closed) or queue
-                    # it (Steam running). (s["app_id"] is the int uid.)
-                    ok, queued = False, False
-                    try:
-                        ok, queued = fg.install_option(new_path, url, s["app_id"],
-                                                       is_icon=is_icon)
-                    except Exception:
-                        fg._debug("results apply")
-                        ok = False
+                    # it (Steam running). (s["app_id"] is the int uid.) Never raises.
+                    ok, queued = operations.apply_option(new_path, url, s["app_id"],
+                                                         is_icon=is_icon)
                     try:
                         app.window.after(0, lambda: _show_apply_outcome(
                             app, s, ab, idx, ok, queued))
@@ -760,18 +756,14 @@ def apply_animated_art(app, state, apply_btn, url, out_path, index):
         _show_apply_outcome(app, state, apply_btn, index, ok, queued)
 
     def worker():
-        ok, queued = False, False
-        try:
-            # Download + encode in the cache, then .part + os.replace into the slot,
-            # THEN clear the slot's other extensions so the new APNG is the only one
-            # Steam sees. A failure leaves the old file in place. An animated ICON
-            # is then written to shortcuts.vdf (or queued) like a static one (C4).
-            ok, queued = fg.install_option(out_path, url, state["app_id"],
-                                           is_icon=state["art_type"] == "icons",
-                                           animated=True, progress_cb=on_progress,
-                                           status_cb=on_status)
-        except Exception:
-            fg._debug("results animated apply")
+        # Download + encode in the cache, then .part + os.replace into the slot,
+        # THEN clear the slot's other extensions so the new APNG is the only one
+        # Steam sees. A failure leaves the old file in place. An animated ICON is
+        # then written to shortcuts.vdf (or queued) like a static one (C4).
+        ok, queued = operations.apply_option(out_path, url, state["app_id"],
+                                             is_icon=state["art_type"] == "icons",
+                                             animated=True, progress_cb=on_progress,
+                                             status_cb=on_status)
         app.window.after(0, lambda: finish(ok, queued))
 
     threading.Thread(target=worker, daemon=True).start()

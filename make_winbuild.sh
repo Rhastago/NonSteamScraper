@@ -18,11 +18,10 @@ APP="$STAGE/NonSteamScraper"
 mkdir -p "$APP" "$OUTDIR"
 
 echo "Staging source (working tree)…"
-# Explicit list of everything a Windows build needs, taken from the working tree
-# (so uncommitted changes are included).
-for item in app.py appcommon.py find_games.py theming.py imaging.py \
-            ui_mixin.py geometry_mixin.py library_mixin.py fetch_mixin.py \
-            dialogs.py settings_window.py results_window.py \
+# Everything a Windows build needs, taken from the working tree (so uncommitted
+# changes are included). Every *.py at the repo root is an app module: a fixed
+# list once missed a new module and broke only the Windows build.
+for item in *.py \
             requirements.txt icon.png icon.ico \
             build_windows.sh assets README.md CHANGELOG.md LICENSE; do
     [ -e "$item" ] && cp -r "$item" "$APP/"

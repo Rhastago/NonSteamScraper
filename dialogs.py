@@ -12,11 +12,8 @@ from tkinter import messagebox
 
 from appcommon import VERSION, open_url
 from theming import FONT_UI
-import find_games as fg
-from find_games import (
-    save_name_override, search_sgdb_autocomplete,
-    load_prefs, save_prefs, DEFAULT_PREFS,
-)
+import operations
+from find_games import search_sgdb_autocomplete, load_prefs, save_prefs, DEFAULT_PREFS
 
 
 # --- Flash-free popup reveal ------------------------------------------------
@@ -202,11 +199,10 @@ def open_sgdb_search(app, game):
         if app._refuse_if_busy():
             status_lbl.config(text=app.BUSY_MESSAGE)
             return
-        save_name_override(game["app_id"], chosen["name"])
-        app._remove_from_skip(game["app_id"])
-        # The same snapshot + exact-id delete as Re-fetch: Undo can restore the
-        # art, and a neighbouring game (12345 vs 123456) is never touched.
-        fg.clear_game_art(game["app_id"])
+        # Saves the chosen name, then the same unskip + snapshot + exact-id delete
+        # as Re-fetch: Undo can restore the art, and a neighbouring game (12345 vs
+        # 123456) is never touched.
+        operations.rematch(game["app_id"], chosen["name"])
         app.log(f"Matched '{game['name']}' → '{chosen['name']}' (SGDB #{chosen['id']})",
                  icon="search")
         _close_dlg()

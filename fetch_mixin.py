@@ -3,19 +3,17 @@ starting and running the background fetch, appending to the (thread-safe) log,
 checking/restarting Steam, undoing the last fetch, and the pending-icon
 flush/poll that auto-applies queued icons once Steam closes. Mixed into SteamArtApp.
 
-Threading: run_fetch and friends do their work on daemon threads and marshal every
-widget update back onto the Tk thread via self._ui / self.window.after."""
+The fetch itself is operations.run_fetch (no tkinter); this mixin starts it on a
+daemon thread and draws what it reports. Every widget update is marshalled back
+onto the Tk thread via self._ui / self.window.after."""
 
 import threading
-import time
 from tkinter import messagebox
 
 from theming import PAD_XS, PAD_L
 import find_games as fg
-from find_games import (
-    load_api_key, load_prefs, search_game, download_all_artwork,
-    add_to_skip_list, is_steam_running, restart_steam,
-)
+import operations
+from find_games import load_api_key, load_prefs, is_steam_running, restart_steam
 
 class FetchMixin:
 
@@ -57,8 +55,7 @@ class FetchMixin:
             return
         if self._restore_point_inherited and not self._fetched_this_session:
             # Count comes from the live manifest (fg. reads rebound globals).
-            manifest = fg._load_restore_manifest()
-            count = len(manifest.get("entries", {}))
+            count = fg.restore_point_game_count()
             if not messagebox.askyesno(
                 "Undo Last Fetch",
                 f"Undo will restore the artwork for {count} game(s) from a "
@@ -245,153 +242,49 @@ class FetchMixin:
 
 
     def _run_fetch_body(self, games=None):
-        """Background thread: search and download artwork for `games`, or for all
-        games missing it when games is None. Returns the per-game results at the
-        end of the run, None when it returns early."""
-        prefs = load_prefs()
+        """Background thread: run operations.run_fetch for `games`, or for every
+        game missing art when games is None, and draw what it reports. Returns the
+        per-game results when the run happened, None when nothing ran."""
         if games is not None:
             needs_art = list(games)
         else:
             needs_art = [g for g in self.games if not g["has_art"]]
-        if not needs_art:
-            self.log("All games already have artwork!", icon="applied")
+
+        def on_progress(pct, label, status=None):
+            if status is not None:
+                self._ui(lambda status=status: self._set_status(status))
+            self._ui(lambda pct=pct: self.progress_var.set(pct))
+            self._ui(lambda label=label: self.progress_label.config(text=label))
+
+        def on_log(message, icon):
+            self.log(message, icon=icon)
+
+        def should_stop():
+            # Closing the window during a run sets this (Q4): stop between games.
+            return self._fetch_cancel is not None and self._fetch_cancel.is_set()
+
+        report = operations.run_fetch(needs_art, load_prefs(), on_progress, on_log,
+                                      should_stop)
+        outcome = report["outcome"]
+        if outcome == operations.FETCH_NOTHING:
             self._ui(lambda: self.fetch_button.config(state="disabled", text="Nothing to fetch"))
             self._ui(lambda: self.progress_label.pack_forget())
             self._ui(lambda: self.progress_bar.pack_forget())
             self._ui(lambda: self._refit_window_height())
-            return
-
-        # Check the key BEFORE anything changes on disk (Q2). A revoked key used to
-        # come back as "not found" for every game and hide the whole library. This
-        # is the worker thread, so a slow network never freezes the window.
-        key_state = fg.check_api_key()
-        if key_state == fg.KEY_REJECTED:
-            self.log("SteamGridDB rejected your API key — nothing was fetched.", icon="error")
+            return None
+        if outcome == operations.FETCH_REJECTED:
             self._reset_fetch_ui("API key rejected — nothing was fetched.",
                                  self.theme["warn"], icon="warning")
             self._fetch_followup = self._show_key_rejected  # run by _end_fetch
-            return
-        if key_state != fg.KEY_ACCEPTED:
-            msg = ("Couldn't reach SteamGridDB — nothing was fetched. "
-                   "Check your connection and try again.")
-            self.log(msg, icon="error")
-            self._reset_fetch_ui(msg, self.theme["warn"], icon="warning")
-            return
+            return None
+        if outcome == operations.FETCH_UNREACHABLE:
+            self._reset_fetch_ui(operations.UNREACHABLE_MESSAGE, self.theme["warn"],
+                                 icon="warning")
+            return None
 
-        # AFTER the early return: a no-op fetch must not be able to destroy the
-        # previous restore point (it would drop every sealed entry and its copies).
-        fg.begin_restore_run()
-        total = len(needs_art)
-        fetch_results = []
-        # Icon writes to shortcuts.vdf are deferred during the loop and batched into a
-        # single atomic write after it (one read+parse+write instead of N), done while
-        # Steam is closed so it can't clobber them. {unsigned_id: icon_path}.
-        icons_to_set = {}
-        # Set when SteamGridDB refuses the key mid-run: the loop stops there.
-        stopped = None
-
-        for i, game in enumerate(needs_art):
-            # Closing the window during a run sets this (Q4): stop between games.
-            if self._fetch_cancel is not None and self._fetch_cancel.is_set():
-                self.log("Fetch stopped — the window is closing.", icon="warning")
-                stopped = "Fetch stopped."
-                break
-            start = time.monotonic()
-            name   = game["name"]
-            app_id = game["app_id"]
-            short  = name[:32]
-            game_start = i / total * 100
-            game_end   = (i + 1) / total * 100
-
-            self.log(f"\nProcessing: {name}", icon="game")
-            self._ui(lambda name=name: self._set_status(f"Searching: {name}"))
-            self._ui(lambda game_start=game_start: self.progress_var.set(game_start))
-            self._ui(lambda i=i, total=total, short=short:
-                     self.progress_label.config(text=f"[{i+1}/{total}] {short} — Searching SteamGridDB..."))
-
-            outcome, sgdb_id = search_game(name, app_id)
-            if outcome == fg.SEARCH_REFUSED:
-                # Safety net for a key revoked after the check: stop, hide nothing.
-                self.log("SteamGridDB rejected the API key — fetch stopped. "
-                         "No games were hidden.", icon="error")
-                stopped = "Fetch stopped — SteamGridDB rejected the API key."
-                break
-            if outcome == fg.SEARCH_ERROR:
-                self.log("Network error — will retry on next fetch", icon="error")
-                continue
-            if outcome == fg.SEARCH_FOUND:
-                def make_cb(_short, _start, _end, _i, _tot):
-                    def cb(label, step, total_steps):
-                        pct = _start + (step / total_steps) * (_end - _start)
-                        self._ui(lambda pct=pct: self.progress_var.set(pct))
-                        self._ui(lambda label=label: self.progress_label.config(
-                            text=f"[{_i+1}/{_tot}] {_short} — {label}"
-                        ))
-                    return cb
-
-                results = download_all_artwork(
-                    sgdb_id, app_id, prefs,
-                    progress_cb=make_cb(short, game_start, game_end, i, total),
-                    defer_icon=True,
-                )
-                elapsed = time.monotonic() - start
-                # Never say "saved" for a slot whose download failed (B5): name the
-                # failed slots, whose previous art was kept.
-                failed = fg.failed_slots_from_results(results)
-                if not failed:
-                    self.log(f"Artwork saved for {name} ({elapsed:.1f}s)", icon="applied")
-                elif fg.applied_paths_from_results(results):
-                    self.log(f"Artwork saved for {name} ({elapsed:.1f}s) — download failed "
-                             f"for {', '.join(failed)}; the previous art was kept",
-                             icon="warning")
-                else:
-                    self.log(f"Download failed for {name} ({elapsed:.1f}s) — "
-                             f"{', '.join(failed)}; the previous art was kept", icon="error")
-                # Collect the deferred icon write (if any) for one batched apply later.
-                # NOTE: use the find_games helpers — results mixes slot dicts with the
-                # icon_to_set TUPLE, so a naive values()-loop with .get() crashes here
-                # (the bug that silently hung this thread). See find_games helpers.
-                icon_pair = fg.icon_write_from_results(results)
-                if icon_pair:
-                    uid, icon_path = icon_pair
-                    icons_to_set[uid] = icon_path
-                fetch_results.append({"name": name, "app_id": app_id, "results": results})
-            else:
-                # Only a genuine "no results" (SEARCH_NOT_FOUND) reaches here.
-                self.log("Not found on SteamGridDB — skipping permanently", icon="warning")
-                add_to_skip_list(app_id)
-
-        # End of the run: seal every entry so the operator's decision about this
-        # run's art is recorded, and mark the session as having fetched (this
-        # scopes undo_fetch's inherited-restore-point confirmation).
-        fg.seal_restore_point()
+        # The run happened: this scopes undo_fetch's inherited-restore-point
+        # confirmation to restore points older than this session's fetches.
         self._fetched_this_session = True
-
-        # --- Batched icon write -------------------------------------------------
-        # Only ICON writes (shortcuts.vdf) care about Steam being open; grid/hero/logo
-        # art already wrote to fg.GRID_FOLDER and is fine. "Defer & auto-apply": if Steam
-        # is running we DON'T prompt or write — we persist the pending icons and let the
-        # poll flush them when Steam closes. WHY: the old from-thread yes/no dialog could
-        # hang, and the stop→sleep→write→start restart was racy (Steam could clobber the file).
-        if icons_to_set:
-            if fg.is_steam_running():
-                fg.save_pending_icons(icons_to_set)
-                self.log(f"Steam is running — {len(icons_to_set)} icon(s) queued; "
-                         "they'll apply automatically when you close Steam.", icon="warning")
-            else:
-                n = fg.set_shortcut_icons(icons_to_set)
-                self.log(f"Applied {n} icon(s) to shortcuts.vdf.", icon="applied")
-
-        self._ui(lambda: self.progress_var.set(100))
-        head = "Stopped —" if stopped else "Done!"
-        self._ui(lambda n=len(fetch_results), total=total, head=head:
-                 self.progress_label.config(text=f"{head} Fetched artwork for {n} of {total} game(s)."))
-
-        if fetch_results:
-            self.log("\nDone! Opening results screen...", icon="applied")
-        else:
-            self.log("\nDone! No new artwork was fetched.", icon="applied")
-
-        self._ui(lambda: self._set_status(stopped or "Done!"))
+        self._ui(lambda stopped=report["stopped"]: self._set_status(stopped or "Done!"))
         # _end_fetch (from run_fetch) reloads the list and opens the results screen.
-        return fetch_results
+        return report["results"]

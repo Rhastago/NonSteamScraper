@@ -83,6 +83,12 @@ class StandInWidget:
     def __setitem__(self, key, value):
         self.opts[key] = value
 
+    def after(self, ms, fn=None, *args):
+        # like FakeWindow: the Tk thread is the test thread; delayed calls never run
+        if ms == 0 and fn is not None:
+            fn(*args)
+        return "after#"
+
     def __getattr__(self, name):
         if name.startswith("__"):
             raise AttributeError(name)
@@ -90,6 +96,15 @@ class StandInWidget:
 
 
 _Dummy = StandInWidget
+
+
+class StandInListbox(StandInWidget):
+    """A Listbox whose selection a test can set."""
+    def curselection(self):
+        return tuple(self.opts.get("selection", ()))
+
+    def selection_set(self, index):
+        self.opts["selection"] = (index,)
 
 
 def _fake_tk_modules():
@@ -104,7 +119,8 @@ def _fake_tk_modules():
         if name.startswith("__"):
             raise AttributeError(name)
         if name not in kinds:
-            kinds[name] = type(name, (StandInWidget,), {})
+            base = StandInListbox if name == "Listbox" else StandInWidget
+            kinds[name] = type(name, (base,), {})
         return kinds[name]
     tk.__getattr__ = widget_class
     tk.TclError = type("TclError", (Exception,), {})
@@ -130,7 +146,8 @@ def _fake_tk_modules():
 
 
 _UI_MODULES = ("fetch_mixin", "library_mixin", "geometry_mixin", "ui_mixin",
-               "settings_window", "results_window", "imaging", "PIL.ImageTk")
+               "settings_window", "results_window", "dialogs", "imaging",
+               "PIL.ImageTk")
 
 
 @pytest.fixture(scope="module")
@@ -151,11 +168,12 @@ def ui():
         import settings_window
         import results_window
         import imaging
+        import dialogs
         yield types.SimpleNamespace(
             fetch_mixin=fetch_mixin, library_mixin=library_mixin,
             geometry_mixin=geometry_mixin, ui_mixin=ui_mixin,
             settings_window=settings_window, results_window=results_window,
-            imaging=imaging,
+            imaging=imaging, dialogs=dialogs,
             mb=fakes["tkinter.messagebox"])
     finally:
         for name, mod in saved.items():
@@ -213,6 +231,13 @@ class FakeWindow(FakeWidget):
 
     def focus_force(self):
         pass
+
+    def update_idletasks(self):
+        pass
+
+    def winfo_x(self):
+        return 0
+    winfo_y = winfo_width = winfo_height = winfo_x
 
 
 def make_app(ui, games=()):
@@ -335,9 +360,10 @@ def fetch_env(ui, tmp_path, monkeypatch):
         rec.downloaded.append(app_id)
         return {"icon_to_set": None}
 
-    monkeypatch.setattr(fm, "search_game", fake_search)
-    monkeypatch.setattr(fm, "download_all_artwork", fake_download)
-    monkeypatch.setattr(fm, "add_to_skip_list", lambda app_id: rec.skipped.append(app_id))
+    # operations.run_fetch reads find_games live, so these are patched on fg.
+    monkeypatch.setattr(fg, "search_game", fake_search)
+    monkeypatch.setattr(fg, "download_all_artwork", fake_download)
+    monkeypatch.setattr(fg, "add_to_skip_list", lambda app_id: rec.skipped.append(app_id))
     monkeypatch.setattr(fm, "load_prefs", lambda: {})
     monkeypatch.setattr(fm, "load_api_key", lambda: "KEY")
     monkeypatch.setattr(fg, "check_api_key", lambda key=None: fg.KEY_ACCEPTED)
@@ -478,7 +504,7 @@ def _slot(label, failed, applied=True):
 def test_fetch_log_reports_failed_slots(ui, fetch_env, monkeypatch, slots, expect_start, expect_in):
     def fake_download(sgdb_id, app_id, prefs, progress_cb=None, defer_icon=False):
         return dict(slots, icon_to_set=None)
-    monkeypatch.setattr(ui.fetch_mixin, "download_all_artwork", fake_download)
+    monkeypatch.setattr(fg, "download_all_artwork", fake_download)
     app = make_app(ui, [_game(1, name="G")])
 
     app._run_fetch_body()
@@ -582,7 +608,7 @@ def test_write_commands_refuse_while_busy(ui, fetch_env, monkeypatch):
     monkeypatch.setattr(ui.ui_mixin, "save_accent", lambda n: done.append(("accent", n)))
     monkeypatch.setattr(ui.ui_mixin, "ACCENTS", {"blue": {}, "green": {}})
     app = make_app(ui)
-    monkeypatch.setattr(app, "_remove_from_skip", lambda uid: done.append(("unskip", uid)))
+    monkeypatch.setattr(fg, "remove_from_skip_list", lambda uid: done.append(("unskip", uid)))
     monkeypatch.setattr(app, "relaunch_app", lambda: done.append("relaunch"))
     g = _game(5)
 
@@ -907,3 +933,61 @@ def test_results_static_apply_installs_on_a_worker_then_shows_the_outcome(ui, re
     assert btn.opts["state"] == "normal"
     assert btn.opts["text"] == ("Applied!" if ok else "Failed — retry")
     assert results_env.written == [], "a cover apply never writes shortcuts.vdf"
+
+
+# ---------------------------------------------------------------------------
+# Search → Select, built headless (B1, Q1) — replaces the AST checks on _apply
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def search_env(ui, fetch_env, monkeypatch):
+    dl = ui.dialogs
+    threads = _InlineThreads()
+    monkeypatch.setattr(dl, "threading", threads)
+    rec = types.SimpleNamespace(calls=[], threads=threads, fetches=[])
+    monkeypatch.setattr(dl, "search_sgdb_autocomplete", lambda q: [
+        {"id": 2016, "name": "DOOM", "year": "2016", "type": "game"},
+        {"id": 1993, "name": "DOOM", "year": "1993", "type": "game"}])
+    monkeypatch.setattr(fg, "save_name_override",
+                        lambda uid, name: rec.calls.append(("name", uid, name)))
+    monkeypatch.setattr(fg, "remove_from_skip_list", lambda uid: rec.calls.append(("unskip", uid)))
+    monkeypatch.setattr(fg, "clear_game_art", lambda uid: rec.calls.append(("clear", uid)) or 0)
+    app = make_settings_app(ui, monkeypatch)
+    app.start_fetch = lambda games=None: rec.fetches.append(games)
+    rec.app = app
+    return rec
+
+
+def _open_search(ui, rec, game):
+    StandInWidget.created = []
+    ui.dialogs.open_sgdb_search(rec.app, game)
+    rec.threads.run_all()          # the autocomplete worker fills the list
+    widgets = list(StandInWidget.created)
+    listbox = [w for w in widgets if type(w).__name__ == "Listbox"][0]
+    return widgets, listbox
+
+
+def test_search_select_clears_that_game_and_fetches_only_it(ui, search_env):
+    """B1 + Q1: Select saves the picked name, unskips and clears the game's art
+    through the shared clear_game_art (snapshot + exact-id delete), then fetches
+    ONLY that game."""
+    game = _game(12345, name="Doom")
+    widgets, listbox = _open_search(ui, search_env, game)
+    listbox.selection_set(1)
+
+    widget_by_text(widgets, "Select").opts["command"]()
+
+    assert search_env.calls == [("name", 12345, "DOOM"), ("unskip", 12345), ("clear", 12345)]
+    assert search_env.fetches == [[game]], "Search → Select fetches only the matched game"
+
+
+def test_search_select_refuses_while_a_fetch_runs(ui, search_env):
+    search_env.app._fetch_busy = True
+    widgets, listbox = _open_search(ui, search_env, _game(12345))
+    listbox.selection_set(0)
+
+    widget_by_text(widgets, "Select").opts["command"]()
+
+    assert search_env.calls == [] and search_env.fetches == []
+    status = [w for w in widgets if w.opts.get("text") == ui.fetch_mixin.FetchMixin.BUSY_MESSAGE]
+    assert status, "the dialog's own status line must say a fetch is in progress"
