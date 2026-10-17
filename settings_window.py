@@ -37,17 +37,28 @@ def open_settings(app):
     # While a fetch runs, every control that writes to disk is built disabled
     # (Q3, and Clear Cache by S1); the API key, update check, cache size and Steam
     # status still work. Settings is modal, so a fetch can end while it is open but
-    # cannot start: reopening it re-enables them. Each command also refuses on its
-    # own (_refuse_if_busy).
+    # cannot start: the fetch end releases them through release_write_controls
+    # below (S2). Each command also refuses on its own (_refuse_if_busy).
     busy = app._fetch_busy
+    busy_note = None
     if busy:
-        tk.Label(settings, text="Fetch in progress — options that change your files "
-                                "are unavailable until it finishes.",
-                 font=(FONT_UI, 9), fg=t["warn"], bg=t["bg"],
-                 wraplength=420).pack(padx=12, pady=(0, 6))
+        busy_note = tk.Label(settings, text="Fetch in progress — options that change "
+                                            "your files are unavailable until it finishes.",
+                             font=(FONT_UI, 9), fg=t["warn"], bg=t["bg"],
+                             wraplength=420)
+        busy_note.pack(padx=12, pady=(0, 6))
     busy_state = "disabled" if busy else "normal"
+    write_controls = []
+
+    def lock(widget):
+        """A control that writes to disk: disabled while a fetch runs, and listed
+        so the fetch end can release it."""
+        widget.config(state=busy_state)
+        write_controls.append(widget)
+        return widget
 
     def close_settings():
+        app._settings_on_fetch_end = None
         app._close_modal(settings)
         settings.destroy()
 
@@ -148,9 +159,7 @@ def open_settings(app):
     tk.Label(mode_row, text=f"Current: {app.theme_name.capitalize()} mode",
               font=(FONT_UI, 10), bg=t["bg"], fg=t["fg"]).pack(side="left")
     toggle_text = "Switch to Dark Mode" if app.theme_name == "light" else "Switch to Light Mode"
-    theme_btn = app._btn(mode_row, toggle_text, app.toggle_theme, font=(FONT_UI, 9))
-    theme_btn.config(state=busy_state)
-    theme_btn.pack(side="right")
+    lock(app._btn(mode_row, toggle_text, app.toggle_theme, font=(FONT_UI, 9))).pack(side="right")
 
     accent_row = tk.Frame(appearance_frame, bg=t["bg"])
     accent_row.pack(fill="x", pady=(PAD_S, 0))
@@ -168,9 +177,9 @@ def open_settings(app):
             bd=2 if selected else 0,
             highlightbackground=t["fg"] if selected else t["bg"],
             highlightthickness=2 if selected else 0,
-            cursor="hand2", state=busy_state,
+            cursor="hand2",
             command=lambda n=name: app.set_accent(n))
-        sw.pack(side="left", padx=PAD_XS)
+        lock(sw).pack(side="left", padx=PAD_XS)
         app._add_tooltip(sw, acc["label"] + (" (current)" if selected else ""))
 
     # Cache
@@ -189,9 +198,7 @@ def open_settings(app):
         cache_label.config(text="Cache size: 0.0 MB")
         app.log("Cache cleared.", icon="trash")
 
-    clear_cache_btn = app._btn(cache_frame, "Clear Cache", do_clear_cache, font=(FONT_UI, 9))
-    clear_cache_btn.config(state=busy_state)
-    clear_cache_btn.pack(side="right")
+    lock(app._btn(cache_frame, "Clear Cache", do_clear_cache, font=(FONT_UI, 9))).pack(side="right")
 
     # Storage — the Undo restore point plus the legacy ~/.steamart_backup pile
     # from past fetches (which had no caller until this button). The shortcuts.vdf
@@ -225,10 +232,8 @@ def open_settings(app):
             app.log("Saved Undo data cleared.", icon="trash")
             app.load_games()  # greys out the Undo button in the main window
 
-    clear_restore_btn = app._btn(storage_frame, "Clear saved undo data", do_clear_restore,
-                                 font=(FONT_UI, 9))
-    clear_restore_btn.config(state=busy_state)
-    clear_restore_btn.pack(side="right")
+    lock(app._btn(storage_frame, "Clear saved undo data", do_clear_restore,
+                  font=(FONT_UI, 9))).pack(side="right")
 
     # Artwork
     artwork_frame = tk.LabelFrame(body, text="Artwork", padx=10, pady=8,
@@ -252,9 +257,9 @@ def open_settings(app):
             app.load_games()
             close_settings()
 
-    tk.Button(artwork_frame, text="Clear All Artwork", font=(FONT_UI, 9),
-               fg=t["danger"], bg=t["button_bg"], activebackground=t["select_bg"],
-               state=busy_state, command=do_clear_artwork).pack(side="left")
+    lock(tk.Button(artwork_frame, text="Clear All Artwork", font=(FONT_UI, 9),
+                   fg=t["danger"], bg=t["button_bg"], activebackground=t["select_bg"],
+                   command=do_clear_artwork)).pack(side="left")
     tk.Label(artwork_frame, text="Only removes artwork added by this app",
               font=(FONT_UI, 8), fg=t["muted2"], bg=t["bg"]).pack(side="left", padx=8)
 
@@ -283,9 +288,9 @@ def open_settings(app):
             full_reset()
             app.relaunch_app()
 
-    tk.Button(reset_frame, text="Reset App to Factory Defaults", font=(FONT_UI, 9),
-               fg=t["danger"], bg=t["button_bg"], activebackground=t["select_bg"],
-               state=busy_state, command=do_full_reset).pack(side="left")
+    lock(tk.Button(reset_frame, text="Reset App to Factory Defaults", font=(FONT_UI, 9),
+                   fg=t["danger"], bg=t["button_bg"], activebackground=t["select_bg"],
+                   command=do_full_reset)).pack(side="left")
     tk.Label(reset_frame, text="Cannot be undone",
               font=(FONT_UI, 8), fg=t["muted2"], bg=t["bg"]).pack(side="left", padx=8)
 
@@ -402,9 +407,8 @@ def open_settings(app):
 
         om = tk.OptionMenu(account_frame, account_var, *id_to_label.values(),
                            command=on_account_change)
-        om.config(bg=t["button_bg"], fg=t["button_fg"], highlightthickness=0,
-                  state=busy_state)
-        om.pack(side="left", padx=8)
+        om.config(bg=t["button_bg"], fg=t["button_fg"], highlightthickness=0)
+        lock(om).pack(side="left", padx=8)
     else:
         # 0 or 1 accounts — show a disabled placeholder so the section is
         # always visible but clearly non-interactive.
@@ -418,6 +422,21 @@ def open_settings(app):
         om.pack(side="left", padx=8)
 
     app._bind_wheel_to_canvas(canvas, canvas)
+
+    def release_write_controls():
+        """Tk thread, called by _end_fetch: the fetch this window was opened during
+        has ended, so its write controls come back live and the note goes (S2)."""
+        try:
+            if not settings.winfo_exists():
+                return
+            for widget in write_controls:
+                widget.config(state="normal")
+            busy_note.destroy()
+        except tk.TclError:
+            pass  # the window went away meanwhile
+
+    if busy:
+        app._settings_on_fetch_end = release_write_controls
 
     # Auto-size to fit all content, fully within the screen work area (so it
     # can't open under a taskbar/panel) — same shared placement helper the

@@ -200,6 +200,12 @@ class FakeWindow(FakeWidget):
     def destroy(self):
         self.destroyed = True
 
+    def lift(self):
+        pass
+
+    def focus_force(self):
+        pass
+
 
 def make_app(ui, games=()):
     """A fake SteamArtApp built from the real mixins, with stand-in widgets."""
@@ -227,6 +233,7 @@ def make_app(ui, games=()):
             self._fetch_followup = None
             self._fetch_run = None
             self._closing = False
+            self._settings_on_fetch_end = None
             self._thumb_executor = types.SimpleNamespace(shutdown=lambda wait=True: None)
             self.theme = {"warn": "#d17a00", "fg": "#000000"}
             self.theme_name = "dark"
@@ -686,3 +693,66 @@ def test_settings_clear_cache_works_when_idle(ui, fetch_env, monkeypatch):
     assert btn.opts.get("state") in (None, "normal")
     btn.opts["command"]()
     assert cleared == [1]
+
+
+# ---------------------------------------------------------------------------
+# C3 / S2 — Settings left open across the end of a fetch comes back live
+# ---------------------------------------------------------------------------
+
+_WRITE_CONTROL_TEXTS = ("Switch to Light Mode", "Clear Cache", "Clear saved undo data",
+                        "Clear All Artwork", "Reset App to Factory Defaults")
+_ALWAYS_LIVE_TEXTS = ("Save", "Check for updates", "Restart Steam", "Close")
+
+
+def _write_controls(widgets):
+    """The controls Q3/S1 grey out: the five buttons above, the accent swatches
+    (Buttons with an accent-colour bg and no command text) and the account menu."""
+    named = [widget_by_text(widgets, t) for t in _WRITE_CONTROL_TEXTS]
+    swatches = [w for w in widgets if type(w).__name__ == "Button"
+                and w.opts.get("text") in ("", "✓") and w.opts.get("width") == 2]
+    menus = [w for w in widgets if type(w).__name__ == "OptionMenu"]
+    assert len(swatches) == 4 and len(menus) == 1
+    return named + swatches + menus
+
+
+def _busy_note(widgets):
+    return [w for w in widgets
+            if str(w.opts.get("text", "")).startswith("Fetch in progress —")]
+
+
+def test_settings_opened_during_a_fetch_comes_back_live_when_it_ends(ui, fetch_env, monkeypatch):
+    app = make_settings_app(ui, monkeypatch, busy=True, users=("111", "222"))
+    widgets = open_settings_headless(ui, app)
+    controls = _write_controls(widgets)
+    note = _busy_note(widgets)
+    assert len(note) == 1 and not note[0].destroyed
+    assert all(w.opts.get("state") == "disabled" for w in controls)
+    for text in _ALWAYS_LIVE_TEXTS:
+        assert widget_by_text(widgets, text).opts.get("state") != "disabled", text
+
+    app._end_fetch(None)   # the worker's last step, on the Tk thread
+
+    assert all(w.opts.get("state") == "normal" for w in controls), (
+        "every write control must come back live when the fetch ends")
+    assert note[0].destroyed, "the 'Fetch in progress' note must go"
+    assert app._settings_on_fetch_end is None, "the release runs once"
+
+
+def test_settings_opened_while_idle_is_unaffected_by_a_fetch_end(ui, fetch_env, monkeypatch):
+    app = make_settings_app(ui, monkeypatch, busy=False, users=("111", "222"))
+    widgets = open_settings_headless(ui, app)
+
+    assert _busy_note(widgets) == []
+    assert app._settings_on_fetch_end is None, "an idle Settings registers nothing"
+    assert all(w.opts.get("state") == "normal" for w in _write_controls(widgets))
+
+
+def test_closing_settings_before_the_fetch_ends_drops_the_release(ui, fetch_env, monkeypatch):
+    app = make_settings_app(ui, monkeypatch, busy=True)
+    widgets = open_settings_headless(ui, app)
+    assert app._settings_on_fetch_end is not None
+
+    widget_by_text(widgets, "Close").opts["command"]()
+
+    assert app._settings_on_fetch_end is None, (
+        "a closed Settings window must not be called back when the fetch ends")

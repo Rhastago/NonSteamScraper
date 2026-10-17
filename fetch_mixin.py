@@ -204,6 +204,10 @@ class FetchMixin:
             self._finish_close()
             return
         self._fetch_run = None
+        # A Settings window opened during the run gets its write controls back (S2).
+        release, self._settings_on_fetch_end = self._settings_on_fetch_end, None
+        if release:
+            release()
         self.fetch_button.config(state="normal", text="Fetch Missing Artwork")
         self.load_games()
         # A step the run asked for once it is over (the rejected-key popup, which
