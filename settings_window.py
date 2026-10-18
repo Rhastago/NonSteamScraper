@@ -197,9 +197,12 @@ def open_settings(app):
         # S1: the previews a running fetch just downloaded live in the cache.
         if app._refuse_if_busy():
             return
-        clear_cache()
-        cache_label.config(text="Cache size: 0.0 MB")
-        app.log("Cache cleared.", icon="trash")
+        failed = clear_cache()
+        cache_label.config(text=f"Cache size: {get_cache_size()} MB")
+        if failed:
+            app.log(f"Cache cleared — {failed} file(s) could not be removed.", icon="warning")
+        else:
+            app.log("Cache cleared.", icon="trash")
 
     lock(app._btn(cache_frame, "Clear Cache", do_clear_cache, font=(FONT_UI, 9))).pack(side="right")
 
@@ -229,10 +232,15 @@ def open_settings(app):
             parent=settings
         ):
             restore.clear_restore_point()
-            steam_files.clear_backup()
+            failed = steam_files.clear_backup()
             storage_label.config(
-                text="Undo restore point: 0.0 MB   ·   Older backups: 0.0 MB")
-            app.log("Saved Undo data cleared.", icon="trash")
+                text=(f"Undo restore point: {restore.restore_point_size()} MB   ·   "
+                      f"Older backups: {steam_files.legacy_backup_size()} MB"))
+            if failed:
+                app.log(f"Saved Undo data cleared — {failed} older backup file(s) could "
+                        "not be removed.", icon="warning")
+            else:
+                app.log("Saved Undo data cleared.", icon="trash")
             app.load_games()  # greys out the Undo button in the main window
 
     lock(app._btn(storage_frame, "Clear saved undo data", do_clear_restore,
@@ -254,9 +262,14 @@ def open_settings(app):
             "Are you sure?",
             parent=settings
         ):
-            deleted = clear_managed_artwork()
-            app.log(f"Cleared {deleted} artwork file(s) added by NonSteamScraper.",
-                     icon="trash")
+            deleted, failed = clear_managed_artwork()
+            if failed:
+                app.log(f"Cleared {deleted} artwork file(s) added by NonSteamScraper — "
+                        f"{failed} could not be removed (in use?) and are kept for the "
+                        "next Clear.", icon="warning")
+            else:
+                app.log(f"Cleared {deleted} artwork file(s) added by NonSteamScraper.",
+                        icon="trash")
             app.load_games()
             close_settings()
 

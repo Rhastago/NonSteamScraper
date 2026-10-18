@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import restore
 import sgdb
 import steam_env
-from appfiles import clean_old_cache
+from appfiles import clean_old_cache, prune_managed_files
 
 from theming import resolve_theme, load_theme, load_accent
 from appcommon import VERSION
@@ -99,6 +99,7 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self._modal_stack = []
         self.build_ui()
         clean_old_cache()
+        prune_managed_files()
         self.load_games()
         self.check_steam_running()
         # Defer & auto-apply: flush any icons queued from a previous session if Steam

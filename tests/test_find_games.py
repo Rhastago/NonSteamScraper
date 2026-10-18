@@ -403,16 +403,16 @@ def test_register_and_load_managed(tmp_path, monkeypatch):
     assert appfiles.load_managed_files() == {"/a/b/c.png", "/d/e/f.png"}
 
 
-def test_register_managed_appends_duplicates_but_set_dedups(tmp_path, monkeypatch):
-    # register_managed_file has no de-dup guard; load returns a set so the result
-    # is still de-duplicated even though the file holds two lines.
+def test_register_managed_does_not_append_a_path_twice(tmp_path, monkeypatch):
+    # B13: re-registering the same path (every re-apply) used to append another
+    # line, so the registry only ever grew.
     managed = tmp_path / "managed"
     monkeypatch.setattr(appfiles, "MANAGED_FILE", str(managed))
     appfiles.register_managed_file("/a/b/c.png")
     appfiles.register_managed_file("/a/b/c.png")
     with open(managed, encoding="utf-8") as f:
         lines = [l for l in f.read().splitlines() if l.strip()]
-    assert lines == ["/a/b/c.png", "/a/b/c.png"]
+    assert lines == ["/a/b/c.png"]
     assert appfiles.load_managed_files() == {"/a/b/c.png"}
 
 
@@ -3344,3 +3344,90 @@ def test_pending_icons_and_account_file_go_through_the_atomic_write(tmp_path, mo
 
     assert written == ["account", "pending_111"]
     assert steam_files.load_pending_icons() == {5: "/i.png"}
+
+
+
+# ---------------------------------------------------------------------------
+# T9 — the managed registry is pruned (B13); cleanups finish and report (B14)
+# ---------------------------------------------------------------------------
+
+def test_prune_managed_files_drops_duplicates_and_gone_files_only(tmp_path, monkeypatch):
+    grid = tmp_path / "grid"
+    grid.mkdir()
+    (grid / "1p.png").write_bytes(b"x")
+    (grid / "2p.png").write_bytes(b"x")
+    unmounted = tmp_path / "sdcard" / "grid" / "9p.png"          # folder missing
+    lines = [grid / "1p.png", grid / "1p.png", grid / "gone.png", grid / "2p.png",
+             unmounted, grid / "1p.png"]
+    managed = tmp_path / "managed"
+    managed.write_text("".join(f"{p}\n" for p in lines), encoding="utf-8")
+    monkeypatch.setattr(appfiles, "MANAGED_FILE", str(managed))
+
+    assert appfiles.prune_managed_files() == 3
+    assert managed.read_text(encoding="utf-8").splitlines() == [
+        str(grid / "1p.png"), str(grid / "2p.png"), str(unmounted)]
+    assert sorted(os.listdir(grid)) == ["1p.png", "2p.png"], "pruning never deletes a file"
+
+
+def _failing_remove(monkeypatch, fail_names):
+    real = os.remove
+
+    def remove(p):
+        if os.path.basename(p) in fail_names:
+            raise PermissionError(13, "in use", p)
+        real(p)
+    monkeypatch.setattr(os, "remove", remove)
+
+
+def test_clear_managed_artwork_goes_past_a_locked_file_and_keeps_it_registered(tmp_path, monkeypatch):
+    grid = tmp_path / "grid"
+    grid.mkdir()
+    paths = [grid / f for f in ("1p.png", "2p.png", "3p.png")]
+    for p in paths:
+        p.write_bytes(b"x")
+    managed = tmp_path / "managed"
+    managed.write_text("".join(f"{p}\n" for p in paths), encoding="utf-8")
+    monkeypatch.setattr(appfiles, "MANAGED_FILE", str(managed))
+    monkeypatch.setattr(appfiles, "RESTORE_FOLDER", str(tmp_path / "restore"))
+    (tmp_path / "restore").mkdir()
+    (tmp_path / "restore" / "manifest.json").write_text("{}", encoding="utf-8")
+    _failing_remove(monkeypatch, {"2p.png"})
+
+    assert artwork.clear_managed_artwork() == (2, 1)
+
+    assert os.listdir(grid) == ["2p.png"], "the loop goes on past the locked file"
+    assert managed.read_text(encoding="utf-8").splitlines() == [str(grid / "2p.png")], (
+        "the file that could not be removed stays registered for the next Clear")
+    assert not (tmp_path / "restore").exists(), "the restore point is cleared regardless"
+
+
+def test_cache_and_backup_cleanups_finish_the_list_and_count_failures(tmp_path, monkeypatch):
+    cache, backup = tmp_path / "cache", tmp_path / "backup"
+    cache.mkdir(); backup.mkdir()
+    for f in ("a.png", "b.png", "c.png"):
+        (cache / f).write_bytes(b"x")
+    for f in ("old1.png", "old2.png", "shortcuts.vdf.111.bak"):
+        (backup / f).write_bytes(b"x")
+    monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(cache))
+    monkeypatch.setattr(appfiles, "BACKUP_FOLDER", str(backup))
+    _failing_remove(monkeypatch, {"b.png", "old1.png"})
+
+    assert appfiles.clear_cache() == 1
+    assert os.listdir(cache) == ["b.png"]
+    assert steam_files.clear_backup() == 1
+    assert sorted(os.listdir(backup)) == ["old1.png", "shortcuts.vdf.111.bak"]
+
+
+def test_clean_old_cache_finishes_the_list_and_counts_failures(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    for f in ("a.png", "b.png", "new.png"):
+        (cache / f).write_bytes(b"x")
+    old = time.time() - 40 * 86400
+    for f in ("a.png", "b.png"):
+        os.utime(cache / f, (old, old))
+    monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(cache))
+    _failing_remove(monkeypatch, {"a.png"})
+
+    assert appfiles.clean_old_cache() == 1
+    assert sorted(os.listdir(cache)) == ["a.png", "new.png"]

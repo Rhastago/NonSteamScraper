@@ -1353,3 +1353,26 @@ def test_decodes_run_on_the_pool_and_only_the_tk_thread_touches_tk(ui, tmp_path,
     assert thumbs and main not in thumbs, "every resize happens on a pool worker"
     if animated:
         assert len(photos) >= 5, "the animation played its pre-decoded frames"
+
+
+
+def test_settings_clear_all_artwork_reports_files_it_could_not_remove(ui, fetch_env, monkeypatch):
+    """B14: a Clear that could not remove every file says so, in the log."""
+    monkeypatch.setattr(ui.settings_window, "clear_managed_artwork", lambda: (3, 1))
+    app = make_settings_app(ui, monkeypatch)
+    widgets = open_settings_headless(ui, app)
+
+    widget_by_text(widgets, "Clear All Artwork").opts["command"]()
+
+    assert any(m.startswith("Cleared 3 artwork file(s) added by NonSteamScraper — 1 could "
+                            "not be removed") for m in app.logged), app.logged
+
+
+def test_settings_clear_cache_reports_files_it_could_not_remove(ui, fetch_env, monkeypatch):
+    monkeypatch.setattr(ui.settings_window, "clear_cache", lambda: 2)
+    app = make_settings_app(ui, monkeypatch)
+    widgets = open_settings_headless(ui, app)
+
+    widget_by_text(widgets, "Clear Cache").opts["command"]()
+
+    assert "Cache cleared — 2 file(s) could not be removed." in app.logged

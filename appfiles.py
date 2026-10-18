@@ -187,7 +187,31 @@ def save_id_override(app_id, sgdb_id):
 # --- Managed-file registry ------------------------------------------------------------
 
 def register_managed_file(path):
+    """Record a file this app wrote (Clear All Artwork and Undo may delete only
+    these). A path already listed is not added again (B13)."""
+    if path in load_managed_files():
+        return
     with open(MANAGED_FILE, "a", encoding="utf-8") as f: f.write(f"{path}\n")
+
+def prune_managed_files():
+    """Rewrite the registry without duplicate lines and without files that no
+    longer exist (B13: every apply, swap and undo appended a line, and nothing
+    ever removed one). A file whose FOLDER is missing is kept — an unmounted
+    drive must not make the app forget its own files. Touches only the registry,
+    never the files. Returns the number of lines dropped. Never raises."""
+    try:
+        if not os.path.exists(MANAGED_FILE):
+            return 0
+        with open(MANAGED_FILE, encoding="utf-8") as f:
+            lines = [l.strip() for l in f if l.strip()]
+        keep = [p for p in dict.fromkeys(lines)
+                if os.path.exists(p) or not os.path.isdir(os.path.dirname(p))]
+        if len(keep) != len(lines):
+            write_text_atomic(MANAGED_FILE, "".join(f"{p}\n" for p in keep))
+        return len(lines) - len(keep)
+    except Exception:
+        _debug("prune_managed_files")
+        return 0
 
 def load_managed_files():
     if not os.path.exists(MANAGED_FILE): return set()
@@ -230,19 +254,41 @@ def get_cache_size():
                 if os.path.isfile(os.path.join(CACHE_FOLDER, f)))
     return round(total / (1024 * 1024), 2)
 
+def remove_files(paths, context):
+    """Delete each path, going on past a failure (B14: one locked file — on
+    Windows, an image open in a viewer — used to stop a cleanup half-way, out of
+    a Tk callback). Returns (removed, failed_paths)."""
+    removed, failed = 0, []
+    for p in paths:
+        try:
+            os.remove(p)
+            removed += 1
+        except OSError:
+            _debug(context)
+            failed.append(p)
+    return removed, failed
+
 def clear_cache():
-    if not os.path.exists(CACHE_FOLDER): return
-    for f in os.listdir(CACHE_FOLDER):
-        p = os.path.join(CACHE_FOLDER, f)
-        if os.path.isfile(p): os.remove(p)
+    """Empty the preview cache. Returns the number of files that could not be
+    removed."""
+    if not os.path.exists(CACHE_FOLDER): return 0
+    paths = [os.path.join(CACHE_FOLDER, f) for f in os.listdir(CACHE_FOLDER)]
+    return len(remove_files([p for p in paths if os.path.isfile(p)], "clear_cache")[1])
 
 def clean_old_cache(days=30):
-    if not os.path.exists(CACHE_FOLDER): return
+    """Drop cached previews older than `days`. Returns the number that could not
+    be removed."""
+    if not os.path.exists(CACHE_FOLDER): return 0
     cutoff = datetime.now() - timedelta(days=days)
+    old = []
     for f in os.listdir(CACHE_FOLDER):
         p = os.path.join(CACHE_FOLDER, f)
-        if os.path.isfile(p) and datetime.fromtimestamp(os.path.getmtime(p)) < cutoff:
-            os.remove(p)
+        try:
+            if os.path.isfile(p) and datetime.fromtimestamp(os.path.getmtime(p)) < cutoff:
+                old.append(p)
+        except OSError:
+            _debug("clean_old_cache stat")
+    return len(remove_files(old, "clean_old_cache")[1])
 
 
 # --- Factory reset ------------------------------------------------------------------------

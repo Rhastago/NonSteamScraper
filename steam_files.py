@@ -68,11 +68,12 @@ def legacy_backup_size():
     return round(total / (1024 * 1024), 2)
 
 def clear_backup():
-    if not os.path.exists(appfiles.BACKUP_FOLDER): return
-    for f in os.listdir(appfiles.BACKUP_FOLDER):
-        if _is_shortcuts_backup(f): continue
-        p = os.path.join(appfiles.BACKUP_FOLDER, f)
-        if os.path.isfile(p): os.remove(p)
+    """Delete the old art copies in ~/.steamart_backup, never a shortcuts.vdf
+    backup. Returns the number of files that could not be removed (B14)."""
+    if not os.path.exists(appfiles.BACKUP_FOLDER): return 0
+    paths = [os.path.join(appfiles.BACKUP_FOLDER, f) for f in os.listdir(appfiles.BACKUP_FOLDER)
+             if not _is_shortcuts_backup(f)]
+    return len(appfiles.remove_files([p for p in paths if os.path.isfile(p)], "clear_backup")[1])
 
 def get_non_steam_games():
     if not os.path.exists(steam_env.SHORTCUTS_PATH): return []

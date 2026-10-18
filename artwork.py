@@ -22,15 +22,21 @@ import steam_files
 
 
 def clear_managed_artwork():
-    managed = appfiles.load_managed_files(); deleted = 0
-    for p in managed:
-        if os.path.exists(p): os.remove(p); deleted += 1
-    if os.path.exists(appfiles.MANAGED_FILE): os.remove(appfiles.MANAGED_FILE)
+    """Clear All Artwork: delete every file in the managed registry. Goes on past
+    a file that cannot be removed (B14) and keeps THAT file registered — it is
+    still this app's — so a later Clear can retry it. Returns (deleted, failed)."""
+    managed = appfiles.load_managed_files()
+    deleted, failed = appfiles.remove_files([p for p in managed if os.path.exists(p)],
+                                            "clear_managed_artwork")
+    if failed:
+        appfiles.write_text_atomic(appfiles.MANAGED_FILE, "".join(f"{p}\n" for p in failed))
+    elif os.path.exists(appfiles.MANAGED_FILE):
+        os.remove(appfiles.MANAGED_FILE)
     # The restore point snapshots the very art being cleared; leaving it behind
     # would let a later Undo silently re-copy and re-register everything the
     # operator just removed ("Clear All Artwork" promises to remove it all).
     restore.clear_restore_point()
-    return deleted
+    return deleted, len(failed)
 
 def download_artwork(url, save_path, register=True):
     # Download to a temp file and only swap it into place once it's complete, so a
