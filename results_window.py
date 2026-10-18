@@ -17,6 +17,7 @@ from tkinter import ttk
 from appcommon import open_url
 from theming import FONT_UI
 import find_games as fg
+import steam_env
 import operations
 from imaging import _update_badge, _display_image_on_label, update_view
 
@@ -197,7 +198,7 @@ class ResultsWindow:
         # label — so we keep the full parse on the has-pending path.
         pending_count = len(fg.load_pending_icons()) if fg.has_pending_icons() else 0
         pending_active = pending_count > 0
-        steam_running_now = fg.is_steam_running()
+        steam_running_now = steam_env.is_steam_running()
 
         # Only rebuild when the observable state actually changes — otherwise the 3s
         # poll would destroy+recreate the status line and action button every tick,
@@ -382,7 +383,7 @@ class ResultsWindow:
                      icon="applied")
             # Sync the cached render-state to what we just drew so the poll treats this
             # terminal message as current and won't rebuild over it until state changes.
-            self.steam_state = (fg.is_steam_running(), len(fg.load_pending_icons()))
+            self.steam_state = (steam_env.is_steam_running(), len(fg.load_pending_icons()))
 
         def on_fail(msg):
             # Flow ended (failed) — clear the guard so the poll resumes refreshing.
@@ -397,19 +398,19 @@ class ResultsWindow:
                     pass
             # Pin the cached state to the live values so the poll preserves this error
             # message until something actually changes (e.g. the user closes Steam).
-            self.steam_state = (fg.is_steam_running(), len(fg.load_pending_icons()))
+            self.steam_state = (steam_env.is_steam_running(), len(fg.load_pending_icons()))
 
         def worker():
             # Runs OFF the UI thread. All widget writes go back via results_window.after.
-            fg.stop_steam()
+            steam_env.stop_steam()
             results_window.after(0, lambda: set_loader("Closing Steam"))
             # Poll until Steam is REALLY gone (force=True bypasses the stale cache),
             # up to ~20s. No fixed sleep — we must confirm before writing.
             deadline = time.monotonic() + 20.0
-            closed = not fg.is_steam_running(force=True)
+            closed = not steam_env.is_steam_running(force=True)
             while not closed and time.monotonic() < deadline:
                 time.sleep(1.5)
-                closed = not fg.is_steam_running(force=True)
+                closed = not steam_env.is_steam_running(force=True)
             if not closed:
                 results_window.after(0, lambda:
                     on_fail("Couldn't close Steam — close it manually and try again."))

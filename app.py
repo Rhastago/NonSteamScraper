@@ -3,6 +3,7 @@ from tkinter import messagebox
 import sys
 from concurrent.futures import ThreadPoolExecutor
 import find_games as fg  # live access to rebound globals (e.g. fg.GRID_FOLDER after account switch)
+import steam_env
 from appfiles import clean_old_cache
 
 from theming import resolve_theme, load_theme, load_accent
@@ -31,7 +32,7 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
     ROW_THUMB_W  = 39
 
     def __init__(self, window):
-        if fg.STEAM_NOT_FOUND:
+        if steam_env.STEAM_NOT_FOUND:
             messagebox.showerror(
                 "Steam Not Found",
                 "Could not find Steam user data.\n\n"
@@ -132,6 +133,8 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
 
 
 if __name__ == "__main__":
+    # Find Steam and the active account before anything reads them.
+    steam_env.init()
     window = tk.Tk()
     app = SteamArtApp(window)
     window.mainloop()

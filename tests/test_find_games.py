@@ -36,6 +36,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import find_games as fg  # noqa: E402
+import steam_env
 import appfiles
 
 from PIL import Image  # noqa: E402
@@ -44,7 +45,7 @@ from PIL import Image  # noqa: E402
 # that OWNS a name, or the code that reads it never sees the patch (and a path
 # patch then falls back to the sandbox HOME, which G-HOME fails). Helpers that
 # patch a name held in a variable go through _owner().
-_OWNER_MODULES = (appfiles, fg)
+_OWNER_MODULES = (appfiles, steam_env, fg)
 
 
 def _owner(name):
@@ -976,7 +977,7 @@ def _read_shortcuts(path):
 def _setup_shortcuts(tmp_path, monkeypatch, shortcuts):
     sc = tmp_path / "shortcuts.vdf"
     _write_shortcuts(str(sc), shortcuts)
-    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", str(sc))
     monkeypatch.setattr(appfiles, "BACKUP_FOLDER", str(tmp_path / "backup"))
     return sc
 
@@ -1012,7 +1013,7 @@ def test_set_shortcut_icons_appid_masked_to_unsigned(tmp_path, monkeypatch):
 
 def test_set_shortcut_icons_backs_up_once(tmp_path, monkeypatch):
     sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""}})
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "111")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "111")
     fg.set_shortcut_icons({100: "/a/i.png"})
     bak = os.path.join(appfiles.BACKUP_FOLDER, "shortcuts.vdf.111.bak")
     assert os.path.exists(bak)
@@ -1040,8 +1041,8 @@ def _two_accounts(tmp_path, monkeypatch):
 
 
 def _use_account(monkeypatch, uid, paths):
-    monkeypatch.setattr(fg, "STEAM_USER_ID", uid)
-    monkeypatch.setattr(fg, "SHORTCUTS_PATH", paths[uid])
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", uid)
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", paths[uid])
 
 
 def test_set_shortcut_icons_backs_up_each_account_separately(tmp_path, monkeypatch):
@@ -1086,7 +1087,7 @@ def test_set_shortcut_icons_empty_mapping_returns_zero(tmp_path, monkeypatch):
 
 
 def test_set_shortcut_icons_missing_file_returns_zero(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(tmp_path / "nope.vdf"))
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", str(tmp_path / "nope.vdf"))
     assert fg.set_shortcut_icons({100: "/a/i.png"}) == 0
 
 
@@ -1115,7 +1116,7 @@ def test_set_shortcut_icons_concurrent_writers_both_land(tmp_path, monkeypatch):
     import time
     sc = _setup_shortcuts(tmp_path, monkeypatch, {
         "0": {"appid": 100, "icon": ""}, "1": {"appid": 200, "icon": ""}})
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "111")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "111")
     real_write = fg._write_shortcuts_atomic
     a_writing = threading.Event()
 
@@ -1140,7 +1141,7 @@ def test_set_shortcut_icons_concurrent_writers_both_land(tmp_path, monkeypatch):
 
 def test_write_shortcuts_atomic_unique_temp_fsync_then_replace(tmp_path, monkeypatch):
     sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""}})
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "111")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "111")
     os.chmod(sc, 0o644)
     events = []
     real_fsync, real_replace = os.fsync, os.replace
@@ -1165,7 +1166,7 @@ def test_write_shortcuts_atomic_unique_temp_fsync_then_replace(tmp_path, monkeyp
 
 def test_write_shortcuts_atomic_failure_leaves_original_and_no_temp(tmp_path, monkeypatch):
     sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": "old"}})
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "111")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "111")
     before = sc.read_bytes()
 
     def boom(src, dst):
@@ -1183,10 +1184,10 @@ def test_write_shortcuts_atomic_failure_leaves_original_and_no_temp(tmp_path, mo
 
 def test_restart_steam_calls_stop_sleep_start_in_order(monkeypatch):
     calls = []
-    monkeypatch.setattr(fg, "stop_steam", lambda: calls.append("stop"))
-    monkeypatch.setattr(fg, "start_steam", lambda: calls.append("start"))
+    monkeypatch.setattr(steam_env, "stop_steam", lambda: calls.append("stop"))
+    monkeypatch.setattr(steam_env, "start_steam", lambda: calls.append("start"))
     monkeypatch.setattr(fg.time, "sleep", lambda *_: calls.append("sleep"))
-    fg.restart_steam()
+    steam_env.restart_steam()
     assert calls == ["stop", "sleep", "start"]
 
 
@@ -1194,15 +1195,15 @@ def test_is_steam_running_force_bypasses_stale_true_cache(monkeypatch):
     # A recent cache says Steam is running (True) but psutil now reports no steam
     # process. Plain is_steam_running() must trust the fresh cache (stale True),
     # while force=True bypasses it, rescans, returns False, AND refreshes the cache.
-    monkeypatch.setattr(fg, "PSUTIL_AVAILABLE", True)
-    monkeypatch.setattr(fg, "_steam_cache", (fg.time.monotonic(), True))
+    monkeypatch.setattr(steam_env, "PSUTIL_AVAILABLE", True)
+    monkeypatch.setattr(steam_env, "_steam_cache", (fg.time.monotonic(), True))
     # psutil sees no processes named "steam".
-    monkeypatch.setattr(fg.psutil, "process_iter", lambda *_a, **_k: iter([]))
+    monkeypatch.setattr(steam_env.psutil, "process_iter", lambda *_a, **_k: iter([]))
 
-    assert fg.is_steam_running() is True            # stale cache trusted
-    assert fg.is_steam_running(force=True) is False  # cache bypassed → real scan
+    assert steam_env.is_steam_running() is True            # stale cache trusted
+    assert steam_env.is_steam_running(force=True) is False  # cache bypassed → real scan
     # The forced scan refreshed the shared cache, so the next plain call sees False.
-    assert fg.is_steam_running() is False
+    assert steam_env.is_steam_running() is False
 
 
 # ---------------------------------------------------------------------------
@@ -1571,12 +1572,12 @@ def test_download_all_artwork_defer_icon_shape_consumable(tmp_path, monkeypatch)
     helpers. This is the regression test that would have caught the hang: a game
     with an icon yields FetchedArt.icon_write as a tuple, and the consumer must
     not choke on it."""
-    monkeypatch.setattr(fg, "GRID_FOLDER", str(tmp_path / "grid"))
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(tmp_path / "grid"))
     monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(tmp_path / "cache"))
     monkeypatch.setattr(appfiles, "BACKUP_FOLDER", str(tmp_path / "backup"))
     monkeypatch.setattr(appfiles, "MANAGED_FILE", str(tmp_path / "managed"))
     monkeypatch.setattr(appfiles, "RESTORE_FOLDER", str(tmp_path / "restore"))
-    os.makedirs(fg.GRID_FOLDER, exist_ok=True)
+    os.makedirs(steam_env.GRID_FOLDER, exist_ok=True)
 
     # Every slot returns one static PNG option so each slot auto-applies (incl.
     # icons -> exercises the deferred icon write).
@@ -1656,8 +1657,8 @@ def test_has_and_clear_pending_icons_reflect_state(tmp_path, monkeypatch):
 
 def test_apply_pending_icons_skips_and_keeps_file_when_steam_running(tmp_path, monkeypatch):
     monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
-    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(tmp_path / "shortcuts.vdf"))
-    monkeypatch.setattr(fg, "is_steam_running", lambda: True)
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", str(tmp_path / "shortcuts.vdf"))
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda: True)
     called = []
     monkeypatch.setattr(fg, "set_shortcut_icons", lambda m: called.append(m) or len(m))
     fg.save_pending_icons({100: "/a/i.png"})
@@ -1672,8 +1673,8 @@ def test_apply_pending_icons_writes_and_clears_when_steam_closed(tmp_path, monke
     sc = tmp_path / "shortcuts.vdf"
     sc.write_bytes(b"x")  # SHORTCUTS_PATH just needs to exist for the guard
     monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
-    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
-    monkeypatch.setattr(fg, "is_steam_running", lambda: False)
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", str(sc))
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda: False)
     captured = {}
     monkeypatch.setattr(fg, "set_shortcut_icons", lambda m: captured.update(m) or len(m))
     fg.save_pending_icons({100: str(icon)})
@@ -1685,8 +1686,8 @@ def test_apply_pending_icons_writes_and_clears_when_steam_closed(tmp_path, monke
 def test_apply_pending_icons_drops_missing_icon_paths(tmp_path, monkeypatch):
     sc = tmp_path / "shortcuts.vdf"; sc.write_bytes(b"x")
     monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
-    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
-    monkeypatch.setattr(fg, "is_steam_running", lambda: False)
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", str(sc))
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda: False)
     captured = []
     monkeypatch.setattr(fg, "set_shortcut_icons", lambda m: captured.append(m) or len(m))
     fg.save_pending_icons({100: str(tmp_path / "gone.png")})  # path does not exist
@@ -1702,17 +1703,17 @@ def test_pending_icons_are_namespaced_per_account(tmp_path, monkeypatch):
     file path is derived from the live STEAM_USER_ID."""
     monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
 
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "AAA")
     fg.save_pending_icons({100: "/a/iA.png"})
 
     # Switch to account B: B's queue is independent and starts empty.
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "BBB")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "BBB")
     assert fg.load_pending_icons() == {}
     assert fg.has_pending_icons() is False
     fg.save_pending_icons({200: "/b/iB.png"})
 
     # Back to A: its original queue is untouched by anything B did.
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "AAA")
     assert fg.load_pending_icons() == {100: "/a/iA.png"}
     # And the two queues live in distinct files.
     assert (tmp_path / "pending_AAA").exists()
@@ -1725,20 +1726,20 @@ def test_apply_pending_icons_does_not_clear_other_accounts_queue(tmp_path, monke
     account-agnostic, so applying under B wiped A's icons forever."""
     sc = tmp_path / "shortcuts.vdf"; sc.write_bytes(b"x")
     monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
-    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
-    monkeypatch.setattr(fg, "is_steam_running", lambda: False)
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", str(sc))
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda: False)
     monkeypatch.setattr(fg, "set_shortcut_icons", lambda m: len(m))
 
     # Account A queues an icon.
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "AAA")
     fg.save_pending_icons({100: "/a/iA.png"})
 
     # Account B is active when the poll fires with Steam closed.
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "BBB")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "BBB")
     assert fg.apply_pending_icons() == 0      # B has nothing to write
 
     # A's queue must still be intact (the old code cleared it here).
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "AAA")
     assert fg.load_pending_icons() == {100: "/a/iA.png"}
 
 
@@ -1747,7 +1748,7 @@ def test_pending_icons_legacy_file_migrates_to_active_account(tmp_path, monkeypa
     not orphaned."""
     base = tmp_path / "pending"
     monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(base))
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "AAA")
     # Simulate a leftover legacy (un-namespaced) queue from v1.3.0.
     base.write_text('{"100": "/a/legacy.png"}', encoding="utf-8")
 
@@ -1782,7 +1783,7 @@ def test_full_reset_preserves_art_but_clears_settings(tmp_path, monkeypatch):
 
     # A pending (un-applied) icon queue — should be swept.
     monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
-    monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "AAA")
     fg.save_pending_icons({100: "/a/i.png"})
 
     appfiles.full_reset()
@@ -1830,7 +1831,7 @@ def _install_fetch_mocks(monkeypatch, tmp_path, slot_assets,
     stops immediately."""
     grid = tmp_path / "grid"
     cache = tmp_path / "cache"
-    monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(grid))
     monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(cache))
     monkeypatch.setattr(appfiles, "BACKUP_FOLDER", str(tmp_path / "backup"))
     os.makedirs(grid, exist_ok=True)
@@ -1855,7 +1856,7 @@ def _install_fetch_mocks(monkeypatch, tmp_path, slot_assets,
     monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
     monkeypatch.setattr(appfiles, "register_managed_file", lambda *a, **k: None)
     monkeypatch.setattr(fg, "snapshot_for_restore", lambda *a, **k: None)
-    monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: False)
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: False)
     monkeypatch.setattr(appfiles, "load_api_key", lambda *a, **k: "FAKEKEY")
     if record_icon:
         monkeypatch.setattr(
@@ -2063,7 +2064,7 @@ def test_remove_partial_downloads_only_the_runs_part_files(tmp_path, monkeypatch
 def _grid_and_cache(tmp_path, monkeypatch):
     grid, cache = tmp_path / "grid", tmp_path / "cache"
     grid.mkdir(); cache.mkdir()
-    monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(grid))
     monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(cache))
     monkeypatch.setattr(appfiles, "register_managed_file", lambda p: None)
     return grid, cache
@@ -2530,7 +2531,7 @@ def test_restore_snapshot_wipes_store_on_grid_folder_change(tmp_path, monkeypatc
     fg.snapshot_for_restore(12345)  # unsealed entry under the first account
     other_grid = tmp_path / "grid2"
     other_grid.mkdir()
-    monkeypatch.setattr(fg, "GRID_FOLDER", str(other_grid))
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(other_grid))
     _touch(os.path.join(str(other_grid), "12345p.webp"))
 
     fg.snapshot_for_restore(12345)
@@ -2629,7 +2630,7 @@ def test_restore_has_restore_point_states(tmp_path, monkeypatch):
     assert fg.has_restore_point() is False          # no manifest
     fg.snapshot_for_restore(12345)
     assert fg.has_restore_point() is True           # one entry
-    monkeypatch.setattr(fg, "GRID_FOLDER", str(tmp_path / "other_grid"))  # account switch
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(tmp_path / "other_grid"))  # account switch
     assert fg.has_restore_point() is False          # grid-folder mismatch
 
 
@@ -2644,14 +2645,14 @@ def test_restore_undo_refuses_account_switch(tmp_path, monkeypatch):
     os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))
     other_grid = tmp_path / "other_grid"
     other_grid.mkdir()
-    monkeypatch.setattr(fg, "GRID_FOLDER", str(other_grid))
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(other_grid))
 
     summary = fg.undo_restore_point()
 
     assert isinstance(summary, dict)
     assert summary.get("games", 0) == 0
     assert summary.get("files", 0) == 0
-    assert os.listdir(fg.GRID_FOLDER) == []          # nothing written across accounts
+    assert os.listdir(steam_env.GRID_FOLDER) == []          # nothing written across accounts
     assert os.path.exists(os.path.join(p["RESTORE_FOLDER"], "manifest.json"))  # store untouched
 
 
@@ -2746,7 +2747,7 @@ def test_restore_undo_writes_icon_back_when_steam_closed(tmp_path, monkeypatch):
     # vacuous: the value would still be "/old/icon.png" simply because nothing
     # ever disturbed it, so an undo that skips icons entirely would pass.
     _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/new/icon.png"}})
-    monkeypatch.setattr(fg, "is_steam_running", lambda: False)
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda: False)
 
     fg.undo_restore_point()
 
@@ -2763,7 +2764,7 @@ def test_restore_undo_queues_icon_when_steam_running(tmp_path, monkeypatch):
     monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/old/icon.png"}})
     fg.snapshot_for_restore(12345)
-    monkeypatch.setattr(fg, "is_steam_running", lambda: True)
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda: True)
 
     fg.undo_restore_point()
 
@@ -2779,7 +2780,7 @@ def test_restore_queued_empty_icon_survives_apply(tmp_path, monkeypatch):
     monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/a/current.png"}})
     fg.save_pending_icons({12345: ""})  # queued while Steam was running
-    monkeypatch.setattr(fg, "is_steam_running", lambda: False)
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda: False)
 
     n = fg.apply_pending_icons()
 
@@ -3095,8 +3096,8 @@ def test_ignored_game_lands_in_hidden(tmp_path, monkeypatch):
         "1": {"appid": 200, "AppName": "Game Two"},
     })
     monkeypatch.setattr(appfiles, "SKIP_FILE", str(skip_file))
-    monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
-    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(grid))
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", str(sc))
 
     before = fg.get_non_steam_games()
     assert _find_game(before, 100)["skipped"] is False
@@ -3181,7 +3182,7 @@ def _install_option_env(monkeypatch, installed=True, steam_running=False):
         rec["installed"].append((save_path, animated))
         return installed
     monkeypatch.setattr(fg, "install_into_slot", fake_install)
-    monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: steam_running)
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: steam_running)
     monkeypatch.setattr(fg, "set_shortcut_icon",
                         lambda uid, path: rec["written"].append((uid, path)) or True)
     monkeypatch.setattr(fg, "save_pending_icons", lambda m: rec["queued"].append(dict(m)))

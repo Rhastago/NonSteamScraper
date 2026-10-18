@@ -3,14 +3,10 @@ from requests.adapters import HTTPAdapter
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote as _url_quote
 from datetime import datetime, timedelta, timezone
-try:
-    import psutil
-    PSUTIL_AVAILABLE = True
-except ImportError:
-    PSUTIL_AVAILABLE = False
 import appfiles
 
 from appcommon import DEBUG, debug as _debug
+import steam_env
 
 
 # The app installs a callable taking one message string; find_games stays UI-free.
@@ -145,136 +141,6 @@ def search_sgdb_autocomplete(query):
     return []
 
 
-def _windows_steam_install():
-    """Return Steam's install directory on Windows by reading the registry."""
-    try:
-        import winreg
-        for hive in (r"SOFTWARE\WOW6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"):
-            try:
-                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, hive)
-                path, _ = winreg.QueryValueEx(key, "InstallPath")
-                winreg.CloseKey(key)
-                if path: return path
-            except OSError:
-                continue
-    except ImportError:
-        pass
-    return None
-
-def get_steam_path():
-    s = platform.system()
-    if s == "Linux":
-        for p in [
-            os.path.expanduser("~/.steam/steam/userdata"),
-            os.path.expanduser("~/.local/share/Steam/userdata"),
-            os.path.expanduser("~/.steam/root/userdata"),
-        ]:
-            if os.path.exists(p): return p
-        return os.path.expanduser("~/.steam/steam/userdata")
-    if s == "Windows":
-        install = _windows_steam_install()
-        if install:
-            p = os.path.join(install, "userdata")
-            if os.path.exists(p): return p
-        for p in [os.path.expandvars(r"%PROGRAMFILES(X86)%\Steam\userdata"),
-                  os.path.expandvars(r"%PROGRAMFILES%\Steam\userdata")]:
-            if os.path.exists(p): return p
-    if s == "Darwin": return os.path.expanduser("~/Library/Application Support/Steam/userdata")
-    return None
-
-def find_steam_user():
-    udp = get_steam_path()
-    if not udp or not os.path.exists(udp): return None, None
-    for uid in os.listdir(udp):
-        if uid != "0" and os.path.exists(os.path.join(udp, uid, "config", "shortcuts.vdf")):
-            return udp, uid
-    return None, None
-
-def get_all_steam_users():
-    udp = get_steam_path()
-    if not udp or not os.path.exists(udp): return []
-    return [u for u in os.listdir(udp)
-            if u != "0" and os.path.exists(os.path.join(udp, u, "config", "shortcuts.vdf"))]
-
-
-STEAM_USERDATA, STEAM_USER_ID = find_steam_user()
-if STEAM_USER_ID is None:
-    _udp = get_steam_path()
-    if _udp and os.path.exists(_udp):
-        _c = [u for u in os.listdir(_udp) if u != "0" and os.path.isdir(os.path.join(_udp, u))]
-        if _c: STEAM_USERDATA, STEAM_USER_ID = _udp, _c[0]
-# Prefer a previously chosen account (~/.steamart_account) if it's still valid.
-# This only changes behavior when 2+ accounts exist; with 0 or 1 account the
-# saved id either matches the sole account or is invalid, so the fallback stands.
-if STEAM_USER_ID is not None:
-    try:
-        with open(appfiles.ACCOUNT_FILE, encoding="utf-8") as _f:
-            _saved = _f.read().strip()
-        _udp = get_steam_path()
-        if _saved and _udp and os.path.exists(os.path.join(_udp, _saved, "config", "shortcuts.vdf")):
-            STEAM_USERDATA, STEAM_USER_ID = _udp, _saved
-    except Exception:
-        _debug("restore_active_user")
-STEAM_NOT_FOUND = STEAM_USER_ID is None
-if STEAM_NOT_FOUND:
-    SHORTCUTS_PATH = GRID_FOLDER = ""
-else:
-    SHORTCUTS_PATH = os.path.join(STEAM_USERDATA, STEAM_USER_ID, "config", "shortcuts.vdf")
-    GRID_FOLDER    = os.path.join(STEAM_USERDATA, STEAM_USER_ID, "config", "grid")
-    os.makedirs(GRID_FOLDER, exist_ok=True)
-
-def get_active_user():
-    """Return the currently active userdata folder id (or None if Steam not found)."""
-    return STEAM_USER_ID
-
-def set_active_user(user_id):
-    """Switch the active Steam account by rebinding the module globals
-    (STEAM_USERDATA, STEAM_USER_ID, SHORTCUTS_PATH, GRID_FOLDER) and persisting
-    the choice to ~/.steamart_account. Backend functions read these globals, so
-    the switch takes effect for subsequent calls. Returns True on success, False
-    if user_id is not a valid account folder with a shortcuts.vdf."""
-    global STEAM_USERDATA, STEAM_USER_ID, SHORTCUTS_PATH, GRID_FOLDER
-    udp = get_steam_path()
-    if not udp or not user_id or not os.path.exists(os.path.join(udp, user_id, "config", "shortcuts.vdf")):
-        return False
-    STEAM_USERDATA = udp
-    STEAM_USER_ID  = user_id
-    SHORTCUTS_PATH = os.path.join(udp, user_id, "config", "shortcuts.vdf")
-    GRID_FOLDER    = os.path.join(udp, user_id, "config", "grid")
-    os.makedirs(GRID_FOLDER, exist_ok=True)
-    try:
-        with open(appfiles.ACCOUNT_FILE, "w", encoding="utf-8") as f:
-            f.write(user_id)
-    except Exception:
-        _debug("set_active_user persist")
-    return True
-
-def get_steam_user_personas():
-    """Return {folder_user_id: persona_name} parsed from loginusers.vdf (text VDF).
-    loginusers.vdf top-level keys are SteamID64 strings; the userdata folder id is
-    the low 32 bits of that id (int(steamid64) & 0xFFFFFFFF). Ids without a known
-    persona simply won't appear. Never raises."""
-    personas = {}
-    try:
-        udp = get_steam_path()
-        if not udp:
-            return personas
-        path = os.path.join(os.path.dirname(udp), "config", "loginusers.vdf")
-        with open(path, encoding="utf-8") as f:
-            data = vdf.loads(f.read())
-        for sid64, info in (data.get("users") or {}).items():
-            try:
-                folder_id = str(int(sid64) & 0xFFFFFFFF)
-                name = info.get("PersonaName")
-                if name:
-                    personas[folder_id] = name
-            except (ValueError, TypeError, AttributeError):
-                continue
-    except Exception:
-        _debug("get_steam_user_personas")
-    return personas
-
-
 _STYLE_MAP = {
     "grids":  {"grid_no_logo": "no_logo", "grid_blurred": "blurred",
                "grid_alternate": "alternate", "grid_material": "material"},
@@ -347,10 +213,10 @@ def _icon_from_shortcuts_vdf(unsigned_id):
     """Read the shortcut's current `icon` value from shortcuts.vdf: "" when the
     shortcut has no icon, None (JSON null) when no shortcut matched. Never
     raises."""
-    if not os.path.exists(SHORTCUTS_PATH):
+    if not os.path.exists(steam_env.SHORTCUTS_PATH):
         return None
     try:
-        with open(SHORTCUTS_PATH, "rb") as f:
+        with open(steam_env.SHORTCUTS_PATH, "rb") as f:
             data = vdf.binary_loads(f.read())
         for _key, game in data.get("shortcuts", {}).items():
             aid = game.get("appid")
@@ -381,7 +247,7 @@ def snapshot_for_restore(unsigned_id, existing_files=None, pending=False):
     Never raises."""
     try:
         m = _load_restore_manifest()
-        if m.get("grid_folder") and m.get("grid_folder") != GRID_FOLDER:
+        if m.get("grid_folder") and m.get("grid_folder") != steam_env.GRID_FOLDER:
             shutil.rmtree(appfiles.RESTORE_FOLDER, ignore_errors=True)
             m = {"version": 1, "grid_folder": "", "entries": {}}
         eid = str(unsigned_id)
@@ -395,7 +261,7 @@ def snapshot_for_restore(unsigned_id, existing_files=None, pending=False):
         managed = appfiles.load_managed_files()
         if existing_files is None:
             try:
-                existing_files = os.listdir(GRID_FOLDER)
+                existing_files = os.listdir(steam_env.GRID_FOLDER)
             except OSError:
                 existing_files = []
         entry_dir = os.path.join(appfiles.RESTORE_FOLDER, eid)
@@ -403,7 +269,7 @@ def snapshot_for_restore(unsigned_id, existing_files=None, pending=False):
         files = []
         managed_subset = []
         for fname in _files_matching_id(existing_files, unsigned_id):
-            src = os.path.join(GRID_FOLDER, fname)
+            src = os.path.join(steam_env.GRID_FOLDER, fname)
             try:
                 shutil.copy2(src, os.path.join(entry_dir, fname))
             except OSError:
@@ -412,7 +278,7 @@ def snapshot_for_restore(unsigned_id, existing_files=None, pending=False):
             files.append(fname)
             if src in managed:
                 managed_subset.append(fname)
-        m["grid_folder"] = GRID_FOLDER
+        m["grid_folder"] = steam_env.GRID_FOLDER
         m["entries"][eid] = {
             "files": files,
             "managed": managed_subset,
@@ -435,12 +301,12 @@ def clear_game_art(unsigned_id):
     snapshot_for_restore(unsigned_id, pending=True)
     removed = 0
     try:
-        fnames = os.listdir(GRID_FOLDER)
+        fnames = os.listdir(steam_env.GRID_FOLDER)
     except OSError:
         return 0
     for fname in _files_matching_id(fnames, unsigned_id):
         try:
-            os.remove(os.path.join(GRID_FOLDER, fname))
+            os.remove(os.path.join(steam_env.GRID_FOLDER, fname))
             removed += 1
         except OSError:
             _debug("clear_game_art remove")
@@ -485,7 +351,7 @@ def has_restore_point():
     Never raises."""
     try:
         m = _load_restore_manifest()
-        return bool(m.get("entries")) and m.get("grid_folder") == GRID_FOLDER
+        return bool(m.get("entries")) and m.get("grid_folder") == steam_env.GRID_FOLDER
     except Exception:
         _debug("has_restore_point")
         return False
@@ -518,8 +384,8 @@ def undo_restore_point():
         for eid, entry in m.get("entries", {}).items():
             # 1. delete current files in the managed registry matching this id
             try:
-                for fname in _files_matching_id(os.listdir(GRID_FOLDER), eid):
-                    cur = os.path.join(GRID_FOLDER, fname)
+                for fname in _files_matching_id(os.listdir(steam_env.GRID_FOLDER), eid):
+                    cur = os.path.join(steam_env.GRID_FOLDER, fname)
                     if cur in managed:
                         try:
                             os.remove(cur)
@@ -530,7 +396,7 @@ def undo_restore_point():
                 _debug("undo_restore_point listdir")
             # 2. copy the snapshot's files back; re-register the managed subset
             for fname in entry.get("files", []):
-                dst = os.path.join(GRID_FOLDER, fname)
+                dst = os.path.join(steam_env.GRID_FOLDER, fname)
                 try:
                     shutil.copy2(os.path.join(appfiles.RESTORE_FOLDER, eid, fname), dst)
                     restored += 1
@@ -551,7 +417,7 @@ def undo_restore_point():
                     _debug("undo_restore_point icon key")
         queued = False
         if icons:
-            if is_steam_running():
+            if steam_env.is_steam_running():
                 save_pending_icons(icons)
                 queued = True
             else:
@@ -594,7 +460,7 @@ def _shortcuts_backup_path():
     """The ACTIVE account's shortcuts.vdf backup. Per account (B10): one shared
     file meant only the first account ever written got a backup. Reads the live
     STEAM_USER_ID, so an account switch is honored."""
-    return os.path.join(appfiles.BACKUP_FOLDER, f"shortcuts.vdf.{STEAM_USER_ID}.bak")
+    return os.path.join(appfiles.BACKUP_FOLDER, f"shortcuts.vdf.{steam_env.STEAM_USER_ID}.bak")
 
 def legacy_backup_size():
     """MB of the art copies still sitting in ~/.steamart_backup from every past
@@ -623,70 +489,9 @@ def clear_backup():
         if os.path.isfile(p): os.remove(p)
 
 
-# ---------------------------------------------------------------------------
-# is_steam_running TTL cache (Task #10)
-# Invariant: _steam_cache holds (timestamp, bool_result).
-#   - If the cached result is younger than _STEAM_RUNNING_TTL seconds, return
-#     it immediately without iterating processes (cheap path for UI events).
-#   - Otherwise, call psutil and refresh the cache.
-# No lock needed: a float read/write is atomic on CPython, and a stale read
-# in a tiny race window just causes one redundant psutil scan — not a hazard.
-# ---------------------------------------------------------------------------
-_STEAM_RUNNING_TTL = 2.5   # seconds between full process-list scans
-_steam_cache = (0.0, False)  # (last_check_monotonic, last_result)
-
-def is_steam_running(force=False):
-    global _steam_cache
-    if not PSUTIL_AVAILABLE:
-        return False
-    now = time.monotonic()
-    last_ts, last_result = _steam_cache
-    # force=True bypasses the TTL cache and always runs the psutil scan, then
-    # refreshes the shared cache below. Callers use this right after stop_steam()
-    # so a cached True can't linger up to _STEAM_RUNNING_TTL and make us think
-    # Steam is still running. Refreshing _steam_cache here also means the very
-    # next plain is_steam_running() (e.g. inside apply_pending_icons) sees the
-    # same fresh False instead of the stale True.
-    if not force and now - last_ts < _STEAM_RUNNING_TTL:
-        return last_result   # cache still fresh — skip the process scan
-    target = {"Linux": "steam", "Windows": "steam.exe", "Darwin": "steam"}.get(platform.system(), "steam").lower()
-    try:
-        result = any(p.info["name"] and p.info["name"].lower() == target
-                     for p in psutil.process_iter(["name"]))
-    except Exception:
-        result = False
-    _steam_cache = (now, result)
-    return result
-
-def stop_steam():
-    """Kill the running Steam process (no relaunch). Factored out of restart_steam so
-    callers can do stop → (write shortcuts.vdf) → start with the file write happening
-    while Steam is closed and can't clobber it."""
-    s = platform.system()
-    try:
-        if s == "Linux":     subprocess.Popen(["pkill", "-x", "steam"])
-        elif s == "Windows": subprocess.Popen(["taskkill", "/F", "/IM", "steam.exe"])
-        elif s == "Darwin":  subprocess.Popen(["pkill", "-x", "Steam"])
-    except Exception as e: print(f"Failed to stop Steam: {e}")
-
-def start_steam():
-    """Launch Steam (no kill first). Pair with stop_steam() for a stop→write→start."""
-    s = platform.system()
-    try:
-        if s == "Linux":     subprocess.Popen(["steam"])
-        elif s == "Windows":
-            install = _windows_steam_install() or r"C:\Program Files (x86)\Steam"
-            subprocess.Popen([os.path.join(install, "steam.exe")])
-        elif s == "Darwin":  subprocess.Popen(["open", "-a", "Steam"])
-    except Exception as e: print(f"Failed to start Steam: {e}")
-
-def restart_steam():
-    # Unchanged behavior: stop, wait for the process to exit, then relaunch.
-    stop_steam(); time.sleep(3); start_steam()
-
 def get_non_steam_games():
-    if not os.path.exists(SHORTCUTS_PATH): return []
-    with open(SHORTCUTS_PATH, "rb") as f:
+    if not os.path.exists(steam_env.SHORTCUTS_PATH): return []
+    with open(steam_env.SHORTCUTS_PATH, "rb") as f:
         data = vdf.binary_loads(f.read())
     shortcuts = data.get("shortcuts", {})
     skip_list = appfiles.load_skip_list(); seen = set(); games = []
@@ -709,7 +514,7 @@ def get_non_steam_games():
     # so has_art falls through to the skip-list check without crashing.
     uids_with_art = set()
     try:
-        for fname in os.listdir(GRID_FOLDER):
+        for fname in os.listdir(steam_env.GRID_FOLDER):
             m = re.match(r"(\d+)", fname)
             if m:
                 uids_with_art.add(m.group(1))
@@ -743,7 +548,7 @@ def _write_shortcuts_atomic(data):
     disk before the rename (a power loss right after a write on ext4 can otherwise
     leave an empty file). The caller holds _SHORTCUTS_LOCK."""
     payload = vdf.binary_dumps(data)
-    folder = os.path.dirname(SHORTCUTS_PATH)
+    folder = os.path.dirname(steam_env.SHORTCUTS_PATH)
     fd, tmp = tempfile.mkstemp(prefix="shortcuts.vdf.", suffix=".tmp", dir=folder)
     try:
         with os.fdopen(fd, "wb") as f:
@@ -752,10 +557,10 @@ def _write_shortcuts_atomic(data):
             os.fsync(f.fileno())
         # mkstemp creates the file owner-only; keep the original file's mode.
         try:
-            shutil.copymode(SHORTCUTS_PATH, tmp)
+            shutil.copymode(steam_env.SHORTCUTS_PATH, tmp)
         except OSError:
             _debug("_write_shortcuts_atomic copymode")
-        os.replace(tmp, SHORTCUTS_PATH)
+        os.replace(tmp, steam_env.SHORTCUTS_PATH)
     except BaseException:
         try:
             os.remove(tmp)
@@ -771,13 +576,13 @@ def set_shortcut_icons(mapping):
     count of shortcuts changed. Never raises (matches set_shortcut_icon's style).
     The backup is per account (shortcuts.vdf.<userid>.bak), taken on that account's
     first write; the legacy shortcuts.vdf.bak is left as it is."""
-    if not mapping or not os.path.exists(SHORTCUTS_PATH): return 0
+    if not mapping or not os.path.exists(steam_env.SHORTCUTS_PATH): return 0
     try:
         with _SHORTCUTS_LOCK:
             os.makedirs(appfiles.BACKUP_FOLDER, exist_ok=True)
             bak = _shortcuts_backup_path()
-            if not os.path.exists(bak): shutil.copy2(SHORTCUTS_PATH, bak)
-            with open(SHORTCUTS_PATH, "rb") as f: data = vdf.binary_loads(f.read())
+            if not os.path.exists(bak): shutil.copy2(steam_env.SHORTCUTS_PATH, bak)
+            with open(steam_env.SHORTCUTS_PATH, "rb") as f: data = vdf.binary_loads(f.read())
             changed = 0
             for _key, game in data.get("shortcuts", {}).items():
                 aid = game.get("appid")
@@ -814,9 +619,9 @@ def _pending_path():
     the LIVE STEAM_USER_ID global so a set_active_user() switch is honored immediately,
     and fall back to the un-namespaced base path when no account is resolved."""
     base = appfiles.PENDING_ICONS_FILE
-    if not STEAM_USER_ID:
+    if not steam_env.STEAM_USER_ID:
         return base
-    namespaced = f"{base}_{STEAM_USER_ID}"
+    namespaced = f"{base}_{steam_env.STEAM_USER_ID}"
     # A v1.3.0 queue (un-namespaced) belongs to whichever account is active at upgrade
     # time; move it under that account so it isn't orphaned forever. Best-effort.
     try:
@@ -873,9 +678,9 @@ def apply_pending_icons():
     (never when we skipped because Steam was running). If filtering leaves nothing valid to
     write, we still clear: those icon files are gone, so there's nothing to retry. Never raises."""
     try:
-        if is_steam_running(): return 0
+        if steam_env.is_steam_running(): return 0
         pending = load_pending_icons()
-        if not pending or not os.path.exists(SHORTCUTS_PATH): return 0
+        if not pending or not os.path.exists(steam_env.SHORTCUTS_PATH): return 0
         # "" is a valid queued value: Undo restores "this game had no icon" by
         # queueing exactly "", and os.path.exists("") is False would drop it.
         valid = {uid: path for uid, path in pending.items() if path == "" or os.path.exists(path)}
@@ -1133,7 +938,7 @@ def apply_icon(unsigned_id, icon_path):
     Steam is closed, QUEUED in the pending-icon file while it runs (Steam rewrites
     shortcuts.vdf on exit and would drop the write; the poll applies the queue once
     Steam closes). Returns True when the icon was queued, False when written."""
-    if is_steam_running():
+    if steam_env.is_steam_running():
         save_pending_icons({unsigned_id: icon_path})
         return True
     set_shortcut_icon(unsigned_id, icon_path)
@@ -1397,7 +1202,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
     # slot has a distinct filename base, so a slot's freshly written file never affects
     # another slot's clear. (Taken fresh per call — never shared across games.)
     try:
-        existing_files = os.listdir(GRID_FOLDER)
+        existing_files = os.listdir(steam_env.GRID_FOLDER)
     except OSError:
         existing_files = []
     snapshot_for_restore(unsigned_id, existing_files=existing_files)
@@ -1464,7 +1269,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
         if applied_index is not None:
             top = options[applied_index]
             ext = top["url"].split(".")[-1].split("?")[0]
-            save_path = os.path.join(GRID_FOLDER, f"{base}.{ext}")
+            save_path = os.path.join(steam_env.GRID_FOLDER, f"{base}.{ext}")
             bump(f"Downloading {art_label}")
             if not install_into_slot(save_path, top["url"], existing_files=existing_files):
                 # The download failed and the old art is untouched. Nothing was
@@ -1480,7 +1285,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
                 else:
                     set_shortcut_icon(unsigned_id, save_path)
         else:
-            save_path = os.path.join(GRID_FOLDER, f"{base}.png")
+            save_path = os.path.join(steam_env.GRID_FOLDER, f"{base}.png")
             bump(f"{art_label} — animated, apply to commit")
 
         # Previews: first 3 options, downloaded at FULL resolution (img["url"]) using

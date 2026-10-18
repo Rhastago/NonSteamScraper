@@ -16,6 +16,7 @@ import time
 
 from appcommon import debug as _debug
 import find_games as fg
+import steam_env
 import appfiles
 
 
@@ -180,7 +181,7 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
     fg.seal_restore_point()
 
     if icons_to_set:
-        if fg.is_steam_running():
+        if steam_env.is_steam_running():
             fg.save_pending_icons(icons_to_set)
             on_log(f"Steam is running — {len(icons_to_set)} icon(s) queued; "
                    "they'll apply automatically when you close Steam.", "warning")

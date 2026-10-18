@@ -26,6 +26,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import steam_env
 import appfiles  # noqa: E402
 
 
@@ -310,8 +311,8 @@ def make_settings_app(ui, monkeypatch, busy=False, users=("111",)):
     monkeypatch.setattr(sw, "is_steam_running", lambda *a, **k: False)
     monkeypatch.setattr(sw, "get_cache_size", lambda: 1.5)
     monkeypatch.setattr(sw, "load_api_key", lambda: "KEY")
-    monkeypatch.setattr(fg, "get_steam_user_personas", lambda: {})
-    monkeypatch.setattr(fg, "get_active_user", lambda: users[0])
+    monkeypatch.setattr(steam_env, "get_steam_user_personas", lambda: {})
+    monkeypatch.setattr(steam_env, "get_active_user", lambda: users[0])
     monkeypatch.setattr(fg, "restore_point_size", lambda: 0.0)
     monkeypatch.setattr(fg, "legacy_backup_size", lambda: 0.0)
     app = make_app(ui)
@@ -377,7 +378,7 @@ def fetch_env(ui, tmp_path, monkeypatch):
     monkeypatch.setattr(fg, "check_api_key", lambda key=None: fg.KEY_ACCEPTED)
     monkeypatch.setattr(fg, "begin_restore_run", lambda: rec.calls.append("begin"))
     monkeypatch.setattr(fg, "seal_restore_point", lambda: rec.calls.append("seal"))
-    monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: False)
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: False)
     monkeypatch.setattr(fg, "set_shortcut_icons", lambda m: len(m))
     monkeypatch.setattr(fg, "save_pending_icons", lambda m: None)
     monkeypatch.setattr(fg, "has_restore_point", lambda: True)
@@ -668,7 +669,7 @@ def test_close_during_fetch_stops_between_games_and_removes_its_parts(
     for f in ("1p.png", "1p.png.part", "2_hero.png.part", "10p.png.part"):
         (grid / f).write_bytes(b"x")
     (cache / "1p_0.png.part").write_bytes(b"x")
-    monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(grid))
     monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(cache))
     fetch_env.library = [_game(1), _game(2), _game(3)]
     app = make_app(ui, fetch_env.library)
@@ -842,7 +843,7 @@ def results_env(ui, fetch_env, monkeypatch):
         rec.installed.append((save_path, url, animated))
         return rec.install_ok
     monkeypatch.setattr(fg, "install_into_slot", fake_install)
-    monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: rec.steam_running)
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: rec.steam_running)
     monkeypatch.setattr(fg, "set_shortcut_icon",
                         lambda uid, path: rec.written.append((uid, path)) or True)
     monkeypatch.setattr(fg, "save_pending_icons", lambda m: rec.queued.append(dict(m)))
@@ -1099,10 +1100,10 @@ def test_main_poll_holds_off_while_the_results_apply_flow_runs(ui, results_env, 
     file). After the flow ends, the poll works again."""
     app = results_env.app
     world = types.SimpleNamespace(steam=True, pending={7: "/grid/7_icon.png"}, applied=[])
-    monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: world.steam)
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: world.steam)
     monkeypatch.setattr(fg, "has_pending_icons", lambda: bool(world.pending))
     monkeypatch.setattr(fg, "load_pending_icons", lambda: dict(world.pending))
-    monkeypatch.setattr(fg, "stop_steam", lambda: setattr(world, "steam", False))
+    monkeypatch.setattr(steam_env, "stop_steam", lambda: setattr(world, "steam", False))
 
     def apply_pending():
         world.applied.append(dict(world.pending))

@@ -21,6 +21,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import steam_env
 import appfiles
 import operations  # noqa: E402
 
@@ -57,7 +58,7 @@ def run_env(monkeypatch, tmp_path):
     monkeypatch.setattr(fg, "search_game", search)
     monkeypatch.setattr(fg, "download_all_artwork", download)
     monkeypatch.setattr(appfiles, "add_to_skip_list", lambda uid: rec.calls.append(("skip", uid)))
-    monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: rec.steam_running)
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: rec.steam_running)
     monkeypatch.setattr(fg, "set_shortcut_icons",
                         lambda m: rec.calls.append(("write_icons", dict(m))) or len(m))
     monkeypatch.setattr(fg, "save_pending_icons",
@@ -160,8 +161,8 @@ def files(tmp_path, monkeypatch):
     grid.mkdir()
     for f in ("12345p.png", "12345_hero.jpg", "123456p.png", "123456_logo.png"):
         (grid / f).write_bytes(f.encode())
-    monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
-    monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(tmp_path / "shortcuts.vdf"))
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(grid))
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", str(tmp_path / "shortcuts.vdf"))
     monkeypatch.setattr(appfiles, "RESTORE_FOLDER", str(tmp_path / "restore"))
     monkeypatch.setattr(appfiles, "MANAGED_FILE", str(tmp_path / "managed"))
     monkeypatch.setattr(appfiles, "SKIP_FILE", str(tmp_path / "skip"))

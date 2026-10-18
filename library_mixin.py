@@ -10,6 +10,7 @@ from tkinter import ttk
 from theming import PAD_XS, PAD_S, PAD_M, PAD_L, FONT_UI, FONT_MONO
 from imaging import _decode_row_thumb
 import find_games as fg
+import steam_env
 import operations
 import appfiles
 from find_games import get_non_steam_games
@@ -391,7 +392,7 @@ class LibraryMixin:
                 app_id = g.get("app_id")
                 mt = 0.0
                 try:
-                    path = fg.row_thumbnail_path(fg.GRID_FOLDER, app_id)
+                    path = fg.row_thumbnail_path(steam_env.GRID_FOLDER, app_id)
                     if path and os.path.exists(path):
                         mt = os.path.getmtime(path)
                 except Exception:
@@ -461,7 +462,7 @@ class LibraryMixin:
         on the bounded thumbnail executor; assignment happens on the UI thread."""
         t = self.theme
         # fg.GRID_FOLDER (not the by-value import) so account switches are honored.
-        path = fg.row_thumbnail_path(fg.GRID_FOLDER, game["app_id"])
+        path = fg.row_thumbnail_path(steam_env.GRID_FOLDER, game["app_id"])
         if path:
             try:
                 st = os.stat(path)

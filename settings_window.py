@@ -11,7 +11,9 @@ from tkinter import messagebox
 from appcommon import VERSION, open_url
 from theming import ACCENTS, PAD_XS, PAD_S, FONT_UI, FONT_MONO
 import find_games as fg
-from find_games import verify_api_key, clear_managed_artwork, is_steam_running, get_all_steam_users
+import steam_env
+from find_games import verify_api_key, clear_managed_artwork
+from steam_env import is_steam_running, get_all_steam_users
 from appfiles import load_api_key, save_api_key, get_cache_size, clear_cache, full_reset
 
 
@@ -383,23 +385,23 @@ def open_settings(app):
               bg=t["bg"], fg=t["fg"]).pack(side="left")
     if len(users) > 1:
         # Build display labels "PersonaName (id)" when known, else the bare id.
-        personas = fg.get_steam_user_personas()
+        personas = steam_env.get_steam_user_personas()
         label_to_id = {}
         id_to_label = {}
         for u in users:
             label = f"{personas[u]} ({u})" if u in personas else u
             label_to_id[label] = u
             id_to_label[u] = label
-        active = fg.get_active_user()
+        active = steam_env.get_active_user()
         account_var = tk.StringVar(value=id_to_label.get(active, users[0]))
 
         def on_account_change(label):
             # A switch rebinds fg.GRID_FOLDER, which a running fetch reads live (B2).
             if app._refuse_if_busy():
-                account_var.set(id_to_label.get(fg.get_active_user(), users[0]))
+                account_var.set(id_to_label.get(steam_env.get_active_user(), users[0]))
                 return
             uid = label_to_id.get(label)
-            if uid and fg.set_active_user(uid):
+            if uid and steam_env.set_active_user(uid):
                 app.log(f"Switched to Steam account {label}.", icon="refresh")
                 app.load_games()  # reload shortcuts for the newly active account
 

@@ -13,8 +13,9 @@ from tkinter import messagebox
 from appcommon import DEBUG
 from theming import PAD_XS, PAD_L
 import find_games as fg
+import steam_env
 import operations
-from find_games import is_steam_running, restart_steam
+from steam_env import is_steam_running, restart_steam
 from appfiles import load_api_key, load_prefs
 
 class FetchMixin:
@@ -95,7 +96,7 @@ class FetchMixin:
         view = self._results_view
         if view is not None and view.is_applying():
             return
-        if fg.has_pending_icons() and not fg.is_steam_running():
+        if fg.has_pending_icons() and not steam_env.is_steam_running():
             n = fg.apply_pending_icons()
             if n > 0:
                 self.log(f"Applied {n} queued icon(s) — restart Steam to see them.",
@@ -156,7 +157,7 @@ class FetchMixin:
         self._fetch_cancel = threading.Event()
         # What a stopped run may leave behind, for _finish_close's .part cleanup.
         targets = games if games is not None else [g for g in self.games if not g["has_art"]]
-        self._fetch_run = {"grid": fg.GRID_FOLDER, "ids": [g["app_id"] for g in targets]}
+        self._fetch_run = {"grid": steam_env.GRID_FOLDER, "ids": [g["app_id"] for g in targets]}
         self.fetch_button.config(state="disabled", text="Fetching...")
         self.undo_button.config(state="disabled")
         self._set_status("Working...")
