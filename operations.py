@@ -87,7 +87,7 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
          while Steam runs (it rewrites shortcuts.vdf on exit), written when closed.
 
     Returns a report dict: outcome (FETCH_*), results (one {name, app_id,
-    results} per game whose art was fetched), total, stopped (None, or the status
+    results: FetchedArt} per game whose art was fetched), total, stopped (None, or the status
     line saying why the run stopped early)."""
     report = {"outcome": FETCH_NOTHING, "results": [], "total": len(games),
               "stopped": None}
@@ -160,18 +160,17 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
         elapsed = time.monotonic() - start
         # Never say "saved" for a slot whose download failed (B5): name the failed
         # slots, whose previous art was kept.
-        failed = fg.failed_slots_from_results(results)
+        failed = results.failed_labels()
         if not failed:
             on_log(f"Artwork saved for {name} ({elapsed:.1f}s)", "applied")
-        elif fg.applied_paths_from_results(results):
+        elif results.applied_paths():
             on_log(f"Artwork saved for {name} ({elapsed:.1f}s) — download failed "
                    f"for {', '.join(failed)}; the previous art was kept", "warning")
         else:
             on_log(f"Download failed for {name} ({elapsed:.1f}s) — "
                    f"{', '.join(failed)}; the previous art was kept", "error")
-        icon_pair = fg.icon_write_from_results(results)
-        if icon_pair:
-            uid, icon_path = icon_pair
+        if results.icon_write:
+            uid, icon_path = results.icon_write
             icons_to_set[uid] = icon_path
         fetch_results.append({"name": name, "app_id": app_id, "results": results})
 

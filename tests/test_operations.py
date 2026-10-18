@@ -42,10 +42,12 @@ def run_env(monkeypatch, tmp_path):
         rec.calls.append(("download", app_id))
         assert defer_icon is True, "the run batches icon writes"
         progress_cb("Downloading Cover", 1, 4)
-        icon = (app_id, f"/g/{app_id}_icon.png") if app_id in rec.icon_for else None
-        return {"grids": {"label": "Cover", "failed": False, "applied_index": 0,
-                          "applied_path": f"/g/{app_id}p.png"},
-                "icon_to_set": icon}
+        art = fg.FetchedArt()
+        art.slots["grids"] = {"label": "Cover", "failed": False, "applied_index": 0,
+                              "applied_path": f"/g/{app_id}p.png"}
+        if app_id in rec.icon_for:
+            art.icon_write = (app_id, f"/g/{app_id}_icon.png")
+        return art
 
     monkeypatch.setattr(fg, "check_api_key",
                         lambda key=None: rec.calls.append("check") or rec.key)

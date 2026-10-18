@@ -174,7 +174,6 @@ class FetchMixin:
         """Background-thread entry point. Wraps the real work so that ANY exception
         is logged and the UI is reset to a usable state instead of silently hanging
         on "Fetching…" forever (this thread has no Tk event loop to recover it).
-        See the icon_to_set/tuple hazard in find_games for the bug this guards.
         The finally block is the ONE way out: whatever happened, _end_fetch runs on
         the Tk thread and clears the busy state."""
         fetch_results = None

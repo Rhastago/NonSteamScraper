@@ -337,6 +337,12 @@ def widget_by_text(widgets, text):
     return hits[0]
 
 
+def _fetched_art(slots):
+    art = fg.FetchedArt()
+    art.slots.update(slots)
+    return art
+
+
 def _game(app_id, name=None, has_art=False):
     return {"name": name or f"Game {app_id}", "app_id": app_id,
             "has_art": has_art, "skipped": False}
@@ -359,7 +365,7 @@ def fetch_env(ui, tmp_path, monkeypatch):
 
     def fake_download(sgdb_id, app_id, prefs, progress_cb=None, defer_icon=False):
         rec.downloaded.append(app_id)
-        return {"icon_to_set": None}
+        return fg.FetchedArt()
 
     # operations.run_fetch reads find_games live, so these are patched on fg.
     monkeypatch.setattr(fg, "search_game", fake_search)
@@ -504,7 +510,7 @@ def _slot(label, failed, applied=True):
 ])
 def test_fetch_log_reports_failed_slots(ui, fetch_env, monkeypatch, slots, expect_start, expect_in):
     def fake_download(sgdb_id, app_id, prefs, progress_cb=None, defer_icon=False):
-        return dict(slots, icon_to_set=None)
+        return _fetched_art(slots)
     monkeypatch.setattr(fg, "download_all_artwork", fake_download)
     app = make_app(ui, [_game(1, name="G")])
 
@@ -862,7 +868,7 @@ def _slot_data(base, urls, animated, applied_index):
 def build_results_section(env, app_id, slots):
     StandInWidget.created = []
     env.view.build_game_result_section(
-        StandInWidget(), {"name": "G", "app_id": app_id, "results": slots})
+        StandInWidget(), {"name": "G", "app_id": app_id, "results": _fetched_art(slots)})
     return list(StandInWidget.created)
 
 
@@ -1107,8 +1113,8 @@ def test_main_poll_holds_off_while_the_results_apply_flow_runs(ui, results_env, 
     view = ui.results_window.ResultsWindow(app)
     app._results_view = view
     StandInWidget.created = []
-    view.show([{"name": "G", "app_id": 7, "results": {
-        "icons": _slot_data("7_icon", ["https://x/i.png"], [False], applied_index=0)}}])
+    view.show([{"name": "G", "app_id": 7, "results": _fetched_art({
+        "icons": _slot_data("7_icon", ["https://x/i.png"], [False], applied_index=0)})}])
     widgets = list(StandInWidget.created)
 
     widget_by_text(widgets, "Close Steam & Apply Icons").opts["command"]()

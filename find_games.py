@@ -1563,7 +1563,35 @@ def steam_official_images(steam_appid, metadata):
                      "nsfw": False, "humor": False, "steam_official": True}
     return out
 
+class FetchedArt:
+    """What download_all_artwork did for one game, in two separate fields so no
+    consumer can mistake one kind of value for the other (T-A6: one dict used to
+    hold the slot dicts AND the deferred icon tuple, and a loop over its values
+    crashed on the tuple and left the UI on "Fetching…").
+      slots       {slot key: slot dict, or None when the slot found nothing}, in
+                  slot order: grids, grids_wide, heroes, logos, icons.
+      icon_write  (unsigned_id, icon_path) of an icon installed with
+                  defer_icon=True, for the caller's batched shortcuts.vdf write;
+                  None otherwise."""
+
+    def __init__(self):
+        self.slots = {}
+        self.icon_write = None
+
+    def applied_paths(self):
+        """The applied_path of every slot that auto-applied a static image."""
+        return [d["applied_path"] for d in self.slots.values()
+                if d and d.get("applied_index") is not None and d.get("applied_path")]
+
+    def failed_labels(self):
+        """The label ("Cover", "Icon", …) of every slot whose download failed."""
+        return [d.get("label") or key for key, d in self.slots.items()
+                if d and d.get("failed")]
+
 def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, defer_icon=False):
+    """Fetch and install one game's artwork from SGDB id `sgdb_id`; returns a
+    FetchedArt. With defer_icon=True the icon's shortcuts.vdf write is left to the
+    caller (FetchedArt.icon_write) so a whole run writes once."""
     if prefs is None:
         prefs = load_prefs()
     # slot key -> (label, SGDB endpoint, filename base, dimensions filter)
@@ -1585,10 +1613,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
         existing_files = []
     snapshot_for_restore(unsigned_id, existing_files=existing_files)
     os.makedirs(CACHE_FOLDER, exist_ok=True)
-    results = {}
-    # When defer_icon=True, the icon's vdf write is deferred to the caller (batch write
-    # at end of fetch-all). Surfaced via results["icon_to_set"] = (unsigned_id, path).
-    results["icon_to_set"] = None
+    results = FetchedArt()
     # N slots × (1 main + 3 previews) steps max
     total_steps = len(slots) * 4
     step = 0
@@ -1632,7 +1657,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
             # reaches 100% exactly (same accounting as the serial version).
             for _ in range(4):
                 bump(f"{art_label} — none found")
-            results[slot] = None
+            results.slots[slot] = None
             continue
         # Keep SGDB's original ranking so animated options stay visible in the results
         # (don't resort static-first — that can push animated past the 5-option cap).
@@ -1654,7 +1679,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
             bump(f"Downloading {art_label}")
             if not install_into_slot(save_path, top["url"], existing_files=existing_files):
                 # The download failed and the old art is untouched. Nothing was
-                # applied, so applied_index is None (applied_paths_from_results skips
+                # applied, so applied_index is None (FetchedArt.applied_paths skips
                 # the slot) and no icon write may point Steam at a missing file.
                 failed = True
                 applied_index = None
@@ -1662,7 +1687,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
                 if defer_icon:
                     # Defer the shortcuts.vdf write so the caller can batch + write all
                     # icons in ONE atomic pass (and while Steam is closed).
-                    results["icon_to_set"] = (unsigned_id, save_path)
+                    results.icon_write = (unsigned_id, save_path)
                 else:
                     set_shortcut_icon(unsigned_id, save_path)
         else:
@@ -1692,64 +1717,22 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
         else:
             thumbs = []
 
-        results[slot] = {"applied_path": save_path,
-                              "applied_index": applied_index,
-                              "failed": failed,
-                              "label": art_label,
-                              "option_urls": [img["url"] for img in options],
-                              "option_meta": [
-                                  {
-                                      "animated": is_animated_image(img),
-                                      "nsfw":     bool(img.get("nsfw", False)),
-                                      "humor":    bool(img.get("humor", False)),
-                                      "steam":    bool(img.get("steam_official", False)),
-                                  }
-                                  for img in options
-                              ],
-                              "thumb_paths": thumbs, "filename_base": base}
+        results.slots[slot] = {"applied_path": save_path,
+                               "applied_index": applied_index,
+                               "failed": failed,
+                               "label": art_label,
+                               "option_urls": [img["url"] for img in options],
+                               "option_meta": [
+                                   {
+                                       "animated": is_animated_image(img),
+                                       "nsfw":     bool(img.get("nsfw", False)),
+                                       "humor":    bool(img.get("humor", False)),
+                                       "steam":    bool(img.get("steam_official", False)),
+                                   }
+                                   for img in options
+                               ],
+                               "thumb_paths": thumbs, "filename_base": base}
     return results
-
-# --- Consuming a download_all_artwork() results dict ------------------------
-# HAZARD: the results dict mixes two kinds of values. Art-slot keys
-# ("grids"/"grids_wide"/"heroes"/"logos"/"icons") map to slot dicts (or None),
-# but the reserved "icon_to_set" key maps to a TUPLE (unsigned_id, path) or None
-# in defer_icon mode. A naive `for v in results.values(): v.get(...)` loop blows
-# up with AttributeError on that tuple (tuples have no .get), and because the
-# consumer runs in a daemon thread that crash silently hangs the UI on
-# "Fetching…" forever. These helpers are the ONLY supported way to consume the
-# dict: they iterate art slots and the icon entry separately, so the tuple can
-# never reach .get(). Do NOT re-inline a values()-loop over results.
-ICON_TO_SET_KEY = "icon_to_set"
-
-def applied_paths_from_results(results):
-    """Return the applied_path of every ART SLOT that auto-applied a static image
-    (applied_index is not None and applied_path is set). Iterates only slot dicts
-    and skips the reserved icon_to_set entry / any non-dict value, so the
-    icon_to_set tuple can't trip a .get() call."""
-    paths = []
-    for key, art_data in results.items():
-        if key == ICON_TO_SET_KEY or not isinstance(art_data, dict):
-            continue
-        if art_data.get("applied_index") is not None and art_data.get("applied_path"):
-            paths.append(art_data["applied_path"])
-    return paths
-
-def icon_write_from_results(results):
-    """Return the deferred icon write (unsigned_id, path) tuple, or None. This is
-    the ONLY value in results that is a tuple rather than a slot dict."""
-    return results.get(ICON_TO_SET_KEY)
-
-def failed_slots_from_results(results):
-    """Return the label ("Cover", "Icon", …) of every ART SLOT whose download
-    failed, in slot order. Skips the icon_to_set tuple like the helpers above."""
-    labels = []
-    for key, art_data in results.items():
-        if key == ICON_TO_SET_KEY or not isinstance(art_data, dict):
-            continue
-        if art_data.get("failed"):
-            labels.append(art_data.get("label") or key)
-    return labels
-
 
 # ---------------------------------------------------------------------------
 # Window-placement helpers — pure arithmetic, no tkinter dependency.

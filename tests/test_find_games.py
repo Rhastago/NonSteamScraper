@@ -1494,75 +1494,68 @@ def test_check_for_update_uses_10s_timeout(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Consuming download_all_artwork results — applied_paths_from_results /
-# icon_write_from_results.
+# FetchedArt — what download_all_artwork returns (T-A6).
 #
-# REGRESSION GUARD: results mixes art-slot dicts with the icon_to_set TUPLE.
-# The old consumer did `for v in results.values(): v.get(...)`, which raised
-# AttributeError ('tuple' object has no attribute 'get') the moment a game had
-# an icon — and because run_fetch ran in a daemon thread with no try/except,
-# the UI hung on "Fetching…" forever. These tests pin the helper contracts AND
-# drive the real defer_icon=True assembly to prove the consumer survives it.
+# REGRESSION HISTORY: the return value used to be ONE dict mixing art-slot
+# dicts with an "icon_to_set" tuple. A consumer doing
+# `for v in results.values(): v.get(...)` raised AttributeError the moment a
+# game had an icon, in a daemon thread, and the UI hung on "Fetching…". The
+# slots and the icon write are now separate fields, so that mistake cannot be
+# written; these tests pin the two accessors and drive the real assembly.
 # ---------------------------------------------------------------------------
 
-def _slot(applied_index, applied_path):
+def _slot(applied_index, applied_path, failed=False, label="Cover"):
     """Minimal art-slot dict shaped like download_all_artwork emits."""
     return {
-        "applied_path": applied_path,
+        "applied_path": applied_path, "failed": failed, "label": label,
         "applied_index": applied_index, "option_urls": [],
         "option_meta": [], "thumb_paths": [],
         "filename_base": "x",
     }
 
 
-def test_applied_paths_from_results_collects_only_applied_slots():
-    results = {
+def _fetched(slots, icon_write=None):
+    art = fg.FetchedArt()
+    art.slots.update(slots)
+    art.icon_write = icon_write
+    return art
+
+
+def test_fetched_art_applied_paths_collects_only_applied_slots():
+    art = _fetched({
         "grids":      _slot(0, "/g/123p.png"),       # applied
         "grids_wide": _slot(None, "/g/123.png"),     # not applied (animated)
         "heroes":     None,                          # missing slot
         "logos":      _slot(2, "/g/123_logo.png"),   # applied
         "icons":      _slot(0, "/g/123_icon.png"),   # applied
-        "icon_to_set": (12345, "/g/12345_icon.png"), # the TUPLE hazard
-    }
-    paths = fg.applied_paths_from_results(results)
-    assert paths == ["/g/123p.png", "/g/123_logo.png", "/g/123_icon.png"]
+    }, icon_write=(12345, "/g/12345_icon.png"))
+    assert art.applied_paths() == ["/g/123p.png", "/g/123_logo.png", "/g/123_icon.png"]
 
 
-def test_applied_paths_from_results_does_not_raise_on_icon_tuple():
-    # The exact shape that crashed the old inline loop: an icon_to_set tuple
-    # alongside slots. Must NOT raise AttributeError.
-    results = {
-        "grids": _slot(0, "/g/p.png"),
-        "icon_to_set": (999, "/g/999_icon.png"),
-    }
-    assert fg.applied_paths_from_results(results) == ["/g/p.png"]
+def test_fetched_art_applied_paths_skips_applied_index_none_and_no_path():
+    art = _fetched({"a": _slot(None, "/g/a.png"), "b": _slot(0, "")})
+    assert art.applied_paths() == []
 
 
-def test_applied_paths_from_results_skips_applied_index_none_and_no_path():
-    results = {
-        "a": _slot(None, "/g/a.png"),  # index None -> skipped
-        "b": _slot(0, ""),             # no path    -> skipped
-        "icon_to_set": None,
-    }
-    assert fg.applied_paths_from_results(results) == []
+def test_fetched_art_failed_labels_in_slot_order():
+    art = _fetched({"grids": _slot(None, "/g/p.png", failed=True, label="Cover"),
+                    "heroes": _slot(0, "/g/h.png"),
+                    "logos": None,
+                    "icons": _slot(None, "/g/i.png", failed=True, label="Icon")})
+    assert art.failed_labels() == ["Cover", "Icon"]
 
 
-def test_icon_write_from_results_returns_tuple():
-    results = {"grids": _slot(0, "/g/p.png"),
-               "icon_to_set": (12345, "/g/12345_icon.png")}
-    assert fg.icon_write_from_results(results) == (12345, "/g/12345_icon.png")
-
-
-def test_icon_write_from_results_none_when_no_icon():
-    assert fg.icon_write_from_results({"grids": _slot(0, "/g/p.png"),
-                                       "icon_to_set": None}) is None
+def test_fetched_art_keeps_the_icon_write_out_of_the_slots():
+    art = _fetched({"grids": _slot(0, "/g/p.png")}, icon_write=(12345, "/g/12345_icon.png"))
+    assert art.icon_write == (12345, "/g/12345_icon.png")
+    assert all(v is None or isinstance(v, dict) for v in art.slots.values())
 
 
 def test_download_all_artwork_defer_icon_shape_consumable(tmp_path, monkeypatch):
     """Drive the REAL defer_icon=True assembly with network mocked at the lowest
     seam (get_artwork / download_artwork), then feed its return into the consumer
     helpers. This is the regression test that would have caught the hang: a game
-    with an icon yields results['icon_to_set'] as a tuple, and the consumer must
+    with an icon yields FetchedArt.icon_write as a tuple, and the consumer must
     not choke on it."""
     monkeypatch.setattr(fg, "GRID_FOLDER", str(tmp_path / "grid"))
     monkeypatch.setattr(fg, "CACHE_FOLDER", str(tmp_path / "cache"))
@@ -1572,7 +1565,7 @@ def test_download_all_artwork_defer_icon_shape_consumable(tmp_path, monkeypatch)
     os.makedirs(fg.GRID_FOLDER, exist_ok=True)
 
     # Every slot returns one static PNG option so each slot auto-applies (incl.
-    # icons -> exercises the deferred icon_to_set tuple path).
+    # icons -> exercises the deferred icon write).
     def fake_get_artwork(sgdb_id, art_type, prefs=None, dimensions=None):
         return [{"url": f"https://sgdb/{art_type}.png", "mime": "image/png"}]
 
@@ -1593,22 +1586,22 @@ def test_download_all_artwork_defer_icon_shape_consumable(tmp_path, monkeypatch)
 
     results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
-    # 1) icon_to_set is present and is the deferred TUPLE, not a slot dict.
-    assert "icon_to_set" in results
-    assert results["icon_to_set"][0] == 12345
-    assert isinstance(results["icon_to_set"], tuple)
+    # 1) the deferred icon write is present, apart from the slots.
+    assert results.icon_write is not None
+    assert results.icon_write[0] == 12345
+    assert isinstance(results.icon_write, tuple)
 
     # 2) Feeding the real return into the consumer helpers must NOT raise.
-    paths = fg.applied_paths_from_results(results)         # would AttributeError pre-fix
+    paths = results.applied_paths()         # would AttributeError pre-fix
     assert all(isinstance(p, str) for p in paths)
     # The auto-applied icon path is collected as an applied slot path.
-    icon_uid, icon_path = fg.icon_write_from_results(results)
+    icon_uid, icon_path = results.icon_write
     assert icon_uid == 12345
     assert icon_path in paths
 
-    # 3) Shape sanity: every art-slot key maps to a dict, icon_to_set to a tuple.
+    # 3) Shape sanity: every art slot maps to a dict.
     for slot in ("grids", "grids_wide", "heroes", "logos", "icons"):
-        assert isinstance(results[slot], dict)
+        assert isinstance(results.slots[slot], dict)
 
 
 # ---------------------------------------------------------------------------
@@ -1795,7 +1788,7 @@ def test_full_reset_preserves_art_but_clears_settings(tmp_path, monkeypatch):
 # These drive the REAL download_all_artwork end-to-end, mocking the network at
 # the LOWEST seam — fg._sgdb_get — so the genuine get_artwork tiered-fallback,
 # is_animated_image classification, applied_index selection, option_meta vote
-# plumbing, and the icon_to_set tuple contract all execute for real. Only the
+# plumbing, and the deferred icon write all execute for real. Only the
 # byte-level downloads (fg.download_artwork) and the OS/Steam side effects are
 # stubbed. This is the seam whose worst historical bug — a tuple reaching a
 # `.get()` in a values()-loop — silently hung the UI on "Fetching…" forever.
@@ -1892,7 +1885,7 @@ def test_download_all_artwork_happy_path_all_slots_populated(tmp_path, monkeypat
     results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
 
     for slot in ("grids", "grids_wide", "heroes", "logos", "icons"):
-        sd = results[slot]
+        sd = results.slots[slot]
         assert isinstance(sd, dict), f"{slot} should be a populated dict"
         # The only option is static -> auto-applied at index 0.
         assert sd["applied_index"] == 0
@@ -1900,23 +1893,23 @@ def test_download_all_artwork_happy_path_all_slots_populated(tmp_path, monkeypat
         assert sd["option_meta"][0]["animated"] is False
 
     # grids and grids_wide both come from the "grids" endpoint assets.
-    assert results["grids"]["option_urls"] == ["https://sgdb/grids.png"]
-    assert results["grids_wide"]["option_urls"] == ["https://sgdb/grids.png"]
-    assert results["heroes"]["option_urls"] == ["https://sgdb/heroes.png"]
+    assert results.slots["grids"]["option_urls"] == ["https://sgdb/grids.png"]
+    assert results.slots["grids_wide"]["option_urls"] == ["https://sgdb/grids.png"]
+    assert results.slots["heroes"]["option_urls"] == ["https://sgdb/heroes.png"]
 
     # Per-slot metadata flows through verbatim.
-    gm = results["grids"]["option_meta"][0]
+    gm = results.slots["grids"]["option_meta"][0]
     assert gm["nsfw"] is True and gm["humor"] is False
-    hm = results["heroes"]["option_meta"][0]
+    hm = results.slots["heroes"]["option_meta"][0]
     assert hm["nsfw"] is False and hm["humor"] is True
 
-    # Non-defer mode: the icon was written immediately, icon_to_set stays None.
-    assert results["icon_to_set"] is None
+    # Non-defer mode: the icon was written immediately, icon_write stays None.
+    assert results.icon_write is None
     assert len(icon_calls) == 1 and icon_calls[0][0] == 12345
 
 
-def test_download_all_artwork_icon_to_set_tuple_contract(tmp_path, monkeypatch):
-    """THE regression guard. defer_icon=True with a static icon -> icon_to_set is
+def test_download_all_artwork_deferred_icon_write_contract(tmp_path, monkeypatch):
+    """THE regression guard. defer_icon=True with a static icon -> icon_write is
     the (unsigned_id, path) TUPLE; both consumers handle the results dict without
     choking on that tuple, and the deferred icon is NOT written eagerly."""
     slot_assets = {
@@ -1930,25 +1923,24 @@ def test_download_all_artwork_icon_to_set_tuple_contract(tmp_path, monkeypatch):
 
     results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
-    # icon_to_set is the deferred TUPLE, not a slot dict.
-    assert isinstance(results["icon_to_set"], tuple)
-    uid, path = results["icon_to_set"]
+    # icon_write is the deferred (uid, path) pair, kept apart from the slots.
+    assert isinstance(results.icon_write, tuple)
+    uid, path = results.icon_write
     assert uid == 12345
-    assert path == results["icons"]["applied_path"]
+    assert path == results.slots["icons"]["applied_path"]
 
-    # icon_write_from_results returns exactly that tuple.
-    assert fg.icon_write_from_results(results) == (12345, path)
+    # ...and it is exactly that pair.
+    assert results.icon_write == (12345, path)
 
-    # applied_paths_from_results must iterate the slots AND the icon_to_set tuple
-    # without raising (the tuple has no .get()) and return a list of str paths.
-    paths = fg.applied_paths_from_results(results)
+    # applied_paths() returns a list of str paths, the icon's among them.
+    paths = results.applied_paths()
     assert isinstance(paths, list)
     assert all(isinstance(p, str) for p in paths)
     assert path in paths  # the icon's applied path is collected as a slot path
 
 
 def test_download_all_artwork_non_defer_writes_icon(tmp_path, monkeypatch):
-    """defer_icon=False with a static icon -> icon_to_set is None and
+    """defer_icon=False with a static icon -> icon_write is None and
     set_shortcut_icon WAS called with (unsigned_id, icon_path)."""
     slot_assets = {
         "grids":  [_static("https://sgdb/grids.png")],
@@ -1960,8 +1952,8 @@ def test_download_all_artwork_non_defer_writes_icon(tmp_path, monkeypatch):
 
     results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
 
-    assert results["icon_to_set"] is None
-    assert icon_calls == [(12345, results["icons"]["applied_path"])]
+    assert results.icon_write is None
+    assert icon_calls == [(12345, results.slots["icons"]["applied_path"])]
 
 
 def _failing_downloads(monkeypatch, bad_urls):
@@ -2002,11 +1994,11 @@ def test_download_all_artwork_failed_download_keeps_the_old_file(tmp_path, monke
 
     assert (grid / "12345p.jpg").read_bytes() == b"OLD-JPG"
     assert (grid / "12345p.png").read_bytes() == b"OLD-PNG"
-    assert results["grids"]["failed"] is True
-    assert results["grids"]["applied_index"] is None
-    assert results["grids"]["applied_path"] not in fg.applied_paths_from_results(results)
+    assert results.slots["grids"]["failed"] is True
+    assert results.slots["grids"]["applied_index"] is None
+    assert results.slots["grids"]["applied_path"] not in results.applied_paths()
     # The mocks serve grids.png to the wide cover too, so it fails the same way.
-    assert fg.failed_slots_from_results(results) == ["Cover", "Wide Cover"]
+    assert results.failed_labels() == ["Cover", "Wide Cover"]
 
 
 def test_download_all_artwork_failed_icon_makes_no_icon_write(tmp_path, monkeypatch):
@@ -2014,11 +2006,11 @@ def test_download_all_artwork_failed_icon_makes_no_icon_write(tmp_path, monkeypa
     _failing_downloads(monkeypatch, {"https://sgdb/icons.png"})
 
     deferred = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
-    assert deferred["icon_to_set"] is None
-    assert fg.icon_write_from_results(deferred) is None
+    assert deferred.icon_write is None
+    assert deferred.icon_write is None
     # Non-defer mode: record_icon=False fails the test if set_shortcut_icon runs.
     direct = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
-    assert direct["icons"]["failed"] is True
+    assert direct.slots["icons"]["failed"] is True
 
 
 def test_download_all_artwork_success_replaces_a_different_extension(tmp_path, monkeypatch):
@@ -2033,8 +2025,8 @@ def test_download_all_artwork_success_replaces_a_different_extension(tmp_path, m
     assert not (grid / "12345p.jpg").exists(), "the old extension must be cleared"
     assert (grid / "12345p.png").read_bytes() == b"NEW"
     assert (grid / "123456p.jpg").read_bytes() == b"NEIGHBOUR"
-    assert results["grids"]["failed"] is False
-    assert fg.failed_slots_from_results(results) == []
+    assert results.slots["grids"]["failed"] is False
+    assert results.failed_labels() == []
 
 
 def test_remove_partial_downloads_only_the_runs_part_files(tmp_path, monkeypatch):
@@ -2172,7 +2164,7 @@ def test_download_all_artwork_all_animated_slot_not_auto_applied(tmp_path, monke
 
     results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
 
-    icons = results["icons"]
+    icons = results.slots["icons"]
     assert icons is not None  # options exist, just none auto-applied
     assert icons["applied_index"] is None
     assert icons["applied_path"].endswith(".png")
@@ -2180,13 +2172,13 @@ def test_download_all_artwork_all_animated_slot_not_auto_applied(tmp_path, monke
 
     # No static icon was applied -> no eager write, no deferred tuple.
     assert icon_calls == []
-    assert results["icon_to_set"] is None
+    assert results.icon_write is None
     # A static slot still auto-applies normally alongside the animated one.
-    assert results["grids"]["applied_index"] == 0
+    assert results.slots["grids"]["applied_index"] == 0
 
 
 def test_download_all_artwork_missing_slot_is_none_and_consumable(tmp_path, monkeypatch):
-    """A slot whose _sgdb_get returns empty data -> results[slot] is None, and
+    """A slot whose _sgdb_get returns empty data -> results.slots[slot] is None, and
     both consumer helpers tolerate the None slot without crashing."""
     slot_assets = {
         "grids":  [_static("https://sgdb/grids.png")],
@@ -2198,11 +2190,11 @@ def test_download_all_artwork_missing_slot_is_none_and_consumable(tmp_path, monk
 
     results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
-    assert results["heroes"] is None
+    assert results.slots["heroes"] is None
     # Consumers must skip the None slot (and the icon tuple) without raising.
-    paths = fg.applied_paths_from_results(results)
+    paths = results.applied_paths()
     assert isinstance(paths, list)
-    assert fg.icon_write_from_results(results)[0] == 12345
+    assert results.icon_write[0] == 12345
 
 
 # ---------------------------------------------------------------------------
@@ -3000,15 +2992,15 @@ def test_download_all_artwork_steam_first_and_applied(tmp_path, monkeypatch):
     results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
     for slot in ("grids", "grids_wide", "heroes", "logos", "icons"):
-        sd = results[slot]
+        sd = results.slots[slot]
         assert sd["option_urls"][0] == steam_images[slot]["url"], slot
         assert len(sd["option_urls"]) == 5, slot
         assert sd["applied_index"] == 0, slot
         assert sd["option_meta"][0]["steam"] is True, slot
         assert all(m["steam"] is False for m in sd["option_meta"][1:]), slot
 
-    assert results["grids"]["applied_path"].endswith("12345p.jpg")
-    icon_uid, icon_path = results["icon_to_set"]
+    assert results.slots["grids"]["applied_path"].endswith("12345p.jpg")
+    icon_uid, icon_path = results.icon_write
     assert icon_uid == 12345
     assert icon_path.endswith("12345_icon.ico")
 
@@ -3021,7 +3013,7 @@ def test_download_all_artwork_steam_fills_empty_slot(tmp_path, monkeypatch):
     results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
     for slot in ("grids", "grids_wide", "heroes", "logos", "icons"):
-        sd = results[slot]
+        sd = results.slots[slot]
         assert isinstance(sd, dict), slot
         assert sd["option_urls"] == [steam_images[slot]["url"]], slot
         assert sd["applied_index"] == 0, slot
@@ -3042,12 +3034,12 @@ def test_download_all_artwork_steam_excluded_by_official_never(tmp_path, monkeyp
     results = fg.download_all_artwork(42, 12345, prefs=prefs, defer_icon=True)
 
     for slot in ("logos", "icons"):
-        sd = results[slot]
+        sd = results.slots[slot]
         assert steam_images[slot]["url"] not in sd["option_urls"], slot
         assert sd["option_meta"][0]["steam"] is False, slot
 
     for slot in ("grids", "grids_wide", "heroes"):
-        sd = results[slot]
+        sd = results.slots[slot]
         assert sd["option_urls"][0] == steam_images[slot]["url"], slot
 
 
@@ -3067,7 +3059,7 @@ def test_download_all_artwork_no_steam_link_unchanged(tmp_path, monkeypatch):
                 "heroes": slot_assets["heroes"], "logos": slot_assets["logos"],
                 "icons": slot_assets["icons"]}
     for slot, assets in expected.items():
-        sd = results[slot]
+        sd = results.slots[slot]
         assert sd["option_urls"] == [a["url"] for a in assets[:5]], slot
         assert all(m["steam"] is False for m in sd["option_meta"]), slot
 

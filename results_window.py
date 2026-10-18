@@ -535,7 +535,7 @@ class ResultsWindow:
         t = app.theme
         name    = game_result["name"]
         app_id  = game_result["app_id"]
-        results = game_result["results"]
+        slots   = game_result["results"].slots
         frame = tk.LabelFrame(parent, text=f" {name}", font=(FONT_UI, 12, "bold"),
                                padx=10, pady=10, bg=t["bg"], fg=t["link"])
         frame.pack(fill="x", padx=10, pady=8)
@@ -543,7 +543,7 @@ class ResultsWindow:
         art_labels = {"grids": "Cover", "grids_wide": "Wide Cover",
                       "heroes": "Hero/Background", "logos": "Logo", "icons": "Icon"}
         for art_type, label in art_labels.items():
-            art_data = results.get(art_type)
+            art_data = slots.get(art_type)
             if not art_data:
                 continue
 
