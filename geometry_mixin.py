@@ -14,7 +14,7 @@ from appcommon import resource_path
 from theming import PAD_XS, PAD_L
 import find_games as fg
 import artwork
-from find_games import parse_net_workarea, compute_window_fit
+from winplace import parse_net_workarea, compute_window_fit
 
 class GeometryMixin:
 

@@ -36,6 +36,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import find_games as fg  # noqa: E402
+import winplace
 import artwork
 import restore
 import steam_files
@@ -49,7 +50,7 @@ from PIL import Image  # noqa: E402
 # that OWNS a name, or the code that reads it never sees the patch (and a path
 # patch then falls back to the sandbox HOME, which G-HOME fails). Helpers that
 # patch a name held in a variable go through _owner().
-_OWNER_MODULES = (appfiles, steam_env, sgdb, steam_files, restore, artwork, fg)
+_OWNER_MODULES = (appfiles, steam_env, sgdb, steam_files, restore, artwork, winplace, fg)
 
 
 def _owner(name):
@@ -765,7 +766,7 @@ def test_search_game_found_returns_first_hit(tmp_path, monkeypatch):
 def test_parse_net_workarea_single_desktop():
     # Typical single-desktop output: four numbers after the "=".
     line = "_NET_WORKAREA(CARDINAL) = 0, 0, 1920, 1053"
-    result = fg.parse_net_workarea(line)
+    result = winplace.parse_net_workarea(line)
     assert result == (0, 0, 1920, 1053)
 
 
@@ -773,43 +774,43 @@ def test_parse_net_workarea_multi_desktop_takes_first_four():
     # Multi-desktop output: repeated sets of four numbers — only the first set
     # (desktop 0) should be returned.
     line = "_NET_WORKAREA(CARDINAL) = 0, 0, 1920, 1053, 0, 0, 1920, 1053"
-    result = fg.parse_net_workarea(line)
+    result = winplace.parse_net_workarea(line)
     assert result == (0, 0, 1920, 1053)
 
 
 def test_parse_net_workarea_not_found_sentinel():
     # xprop writes this string when the property does not exist.
     line = "_NET_WORKAREA:  not found."
-    assert fg.parse_net_workarea(line) is None
+    assert winplace.parse_net_workarea(line) is None
 
 
 def test_parse_net_workarea_empty_string():
-    assert fg.parse_net_workarea("") is None
+    assert winplace.parse_net_workarea("") is None
 
 
 def test_parse_net_workarea_whitespace_only():
-    assert fg.parse_net_workarea("   \n  ") is None
+    assert winplace.parse_net_workarea("   \n  ") is None
 
 
 def test_parse_net_workarea_too_few_numbers():
     # Only three integers present — not enough for (x, y, w, h).
     line = "_NET_WORKAREA(CARDINAL) = 0, 0, 1920"
-    assert fg.parse_net_workarea(line) is None
+    assert winplace.parse_net_workarea(line) is None
 
 
 def test_parse_net_workarea_malformed_no_numbers():
-    assert fg.parse_net_workarea("_NET_WORKAREA(CARDINAL) = garbage text only") is None
+    assert winplace.parse_net_workarea("_NET_WORKAREA(CARDINAL) = garbage text only") is None
 
 
 def test_parse_net_workarea_non_zero_origin():
     # Panel on the left/top pushes the work area's origin off (0, 0).
     line = "_NET_WORKAREA(CARDINAL) = 72, 30, 1848, 1023"
-    assert fg.parse_net_workarea(line) == (72, 30, 1848, 1023)
+    assert winplace.parse_net_workarea(line) == (72, 30, 1848, 1023)
 
 
 def test_parse_net_workarea_none_input():
     # Callers may pass None when subprocess returned nothing.
-    assert fg.parse_net_workarea(None) is None
+    assert winplace.parse_net_workarea(None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -825,42 +826,42 @@ def _fits_inside(wa_x, wa_y, wa_w, wa_h, w, h, x, y):
 
 def test_compute_window_fit_smaller_than_workarea_stays_desired():
     # A 900x750 window on a 1920x1080 work area should not be shrunk.
-    w, h, x, y = fg.compute_window_fit(0, 0, 1920, 1080, 900, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(0, 0, 1920, 1080, 900, 750, reserve=80)
     assert w == 900
     assert h == 750
 
 
 def test_compute_window_fit_smaller_than_workarea_centered():
     # On a 1920x1080 screen the window should be horizontally centred.
-    w, h, x, y = fg.compute_window_fit(0, 0, 1920, 1080, 900, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(0, 0, 1920, 1080, 900, 750, reserve=80)
     expected_x = (1920 - 900) // 2   # 510
     assert x == expected_x
 
 
 def test_compute_window_fit_smaller_than_workarea_fully_inside():
     wa_x, wa_y, wa_w, wa_h = 0, 0, 1920, 1080
-    w, h, x, y = fg.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
     assert _fits_inside(wa_x, wa_y, wa_w, wa_h, w, h, x, y)
 
 
 def test_compute_window_fit_height_caps_to_avail_h():
     # Work area is 1280x800; with reserve=80, avail_h = 720.
     # A 900x750 desired window should be capped vertically.
-    w, h, x, y = fg.compute_window_fit(0, 0, 1280, 800, 900, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(0, 0, 1280, 800, 900, 750, reserve=80)
     assert h == 720   # capped to avail_h (800 - 80)
     assert w == 900   # width unchanged — 900 < 1280
 
 
 def test_compute_window_fit_small_screen_fully_inside_1920x1080():
     wa_x, wa_y, wa_w, wa_h = 0, 0, 1920, 1080
-    w, h, x, y = fg.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
     assert _fits_inside(wa_x, wa_y, wa_w, wa_h, w, h, x, y), (
         f"Window ({w}x{h} at +{x}+{y}) is outside work area (1920x1080)")
 
 
 def test_compute_window_fit_small_screen_fully_inside_1280x800():
     wa_x, wa_y, wa_w, wa_h = 0, 0, 1280, 800
-    w, h, x, y = fg.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
     assert _fits_inside(wa_x, wa_y, wa_w, wa_h, w, h, x, y), (
         f"Window ({w}x{h} at +{x}+{y}) is outside work area (1280x800)")
 
@@ -868,20 +869,20 @@ def test_compute_window_fit_small_screen_fully_inside_1280x800():
 def test_compute_window_fit_bottom_not_past_workarea_bottom_1920x1080():
     # The bottom-buttons-clear-of-taskbar invariant: y + h <= wa_h.
     wa_h = 1080
-    w, h, x, y = fg.compute_window_fit(0, 0, 1920, wa_h, 900, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(0, 0, 1920, wa_h, 900, 750, reserve=80)
     assert y + h <= wa_h, f"Bottom edge {y + h} exceeds work area bottom {wa_h}"
 
 
 def test_compute_window_fit_bottom_not_past_workarea_bottom_1280x800():
     wa_h = 800
-    w, h, x, y = fg.compute_window_fit(0, 0, 1280, wa_h, 900, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(0, 0, 1280, wa_h, 900, 750, reserve=80)
     assert y + h <= wa_h, f"Bottom edge {y + h} exceeds work area bottom {wa_h}"
 
 
 def test_compute_window_fit_non_zero_origin_fully_inside():
     # Simulate a panel on the left (wa_x=72) and top (wa_y=30).
     wa_x, wa_y, wa_w, wa_h = 72, 30, 1848, 1023
-    w, h, x, y = fg.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
     assert _fits_inside(wa_x, wa_y, wa_w, wa_h, w, h, x, y), (
         f"Window ({w}x{h} at +{x}+{y}) outside offset work area")
     # Must not be left of the panel.
@@ -892,19 +893,19 @@ def test_compute_window_fit_non_zero_origin_fully_inside():
 def test_compute_window_fit_non_zero_origin_x_not_less_than_wa_x():
     # Even if centering math would place us left of wa_x, the clamp must fix it.
     wa_x, wa_y, wa_w, wa_h = 500, 0, 200, 1080
-    w, h, x, y = fg.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
     assert x >= wa_x
 
 
 def test_compute_window_fit_desired_larger_than_width_caps_width():
     # 4000-wide window on a 1920-wide work area must be clamped.
-    w, h, x, y = fg.compute_window_fit(0, 0, 1920, 1080, 4000, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(0, 0, 1920, 1080, 4000, 750, reserve=80)
     assert w == 1920
 
 
 def test_compute_window_fit_very_small_workarea_height_minimum():
     # avail_h is max(wa_h - reserve, 200); even a tiny screen must give at least 200.
-    w, h, x, y = fg.compute_window_fit(0, 0, 400, 300, 400, 300, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(0, 0, 400, 300, 400, 300, reserve=80)
     # avail_h = max(300 - 80, 200) = 220; h = min(300, 220) = 220
     assert h == 220
     assert w >= 1 and h >= 1
@@ -914,7 +915,7 @@ def test_compute_window_fit_degenerate_screen_never_exceeds_workarea():
     # When the work area is smaller than the 200px reserve-floor, the window must
     # still not exceed (and overflow) the work area — the bottom-edge invariant.
     wa_x, wa_y, wa_w, wa_h = 0, 0, 300, 150
-    w, h, x, y = fg.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
+    w, h, x, y = winplace.compute_window_fit(wa_x, wa_y, wa_w, wa_h, 900, 750, reserve=80)
     assert h <= wa_h and w <= wa_w
     assert y + h <= wa_y + wa_h
     assert x + w <= wa_x + wa_w
@@ -924,7 +925,7 @@ def test_parse_net_workarea_negative_origin_reported_honestly():
     # A negative origin must be parsed as-is (so the caller's sanity check can
     # reject it) rather than having the minus stripped into a wrong positive.
     line = "_NET_WORKAREA(CARDINAL) = -10, 0, 1920, 1053"
-    assert fg.parse_net_workarea(line) == (-10, 0, 1920, 1053)
+    assert winplace.parse_net_workarea(line) == (-10, 0, 1920, 1053)
 
 
 # ---------------------------------------------------------------------------
