@@ -1,28 +1,116 @@
 """Off-thread image helpers for NonSteamScraper's results/list views.
 
-All PIL decoding happens on a worker thread; ImageTk.PhotoImage creation and every
-widget mutation are marshaled back to the Tk thread via ``widget.after(0, ...)``
-(Tk requires that). Staleness tokens stamped on the target label let a slow decode
-self-discard if a newer image has since been requested, and PhotoImage references
-are kept (on the widget and/or a cache) so they aren't garbage-collected to blank.
+Decoding (Image.open, every animation frame's seek + thumbnail) runs on a small
+BOUNDED pool of daemon workers, never one thread per image (B12). A worker
+touches nothing in Tk: it only fills a Future. The Tk thread polls that Future
+with widget.after (_when_done) and builds the ImageTk.PhotoImage and changes
+the widget there. Staleness tokens stamped on the target label let a slow
+decode self-discard if a newer image has since been requested, and PhotoImage
+references are kept (on the widget and/or a cache) so they aren't
+garbage-collected to blank.
 """
 
+import queue
 import threading
+from concurrent.futures import Future
+
 import artwork
 from PIL import Image, ImageTk
 
 
-def _run_animation(lbl, img, frame):
-    """Advance one frame of an animated image on a label. Silently stops if the widget is destroyed."""
+class _DaemonPool:
+    """At most `workers` daemon threads draining a job queue; submit() returns a
+    concurrent.futures.Future. Daemon, so a stalled job never holds the app open
+    at exit (a ThreadPoolExecutor's workers are joined at interpreter exit)."""
+
+    def __init__(self, workers):
+        self._workers = workers
+        self._jobs = queue.Queue()
+        self._threads = []
+        self._lock = threading.Lock()
+
+    def submit(self, fn, *args):
+        future = Future()
+        self._jobs.put((future, fn, args))
+        with self._lock:
+            if len(self._threads) < self._workers:
+                t = threading.Thread(target=self._run, daemon=True)
+                self._threads.append(t)
+                t.start()
+        return future
+
+    def _run(self):
+        while True:
+            future, fn, args = self._jobs.get()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn(*args))
+            except BaseException as e:
+                future.set_exception(e)
+
+
+# Previews decode two at a time; on-demand preview downloads run two at a time.
+_DECODE_POOL = _DaemonPool(2)
+_FETCH_POOL = _DaemonPool(2)
+
+# How often the Tk thread looks at a pending Future (ms).
+POLL_MS = 20
+
+
+def _when_done(widget, future, on_done):
+    """Tk thread: call on_done(future) on the Tk thread once `future` has finished
+    — now if it already has, else by polling with widget.after. Stops quietly if
+    the widget is destroyed first. This is how worker results reach Tk: the
+    worker never calls into Tk itself."""
+    def poll():
+        try:
+            if not widget.winfo_exists():
+                return
+        except Exception:
+            return
+        if future.done():
+            on_done(future)
+        else:
+            try:
+                widget.after(POLL_MS, poll)
+            except Exception:
+                pass  # widget gone
+    poll()
+
+
+def _decode_preview(path):
+    """Worker: open `path` and pre-decode it for a 300x200 preview. Returns
+    ("static", image, None) or ("animated", [frame, ...], [delay_ms, ...]) —
+    every frame seeked and thumbnailed HERE, once, so the Tk thread only shows
+    them (B12: each tick used to re-seek and re-thumbnail on the Tk thread)."""
+    img = Image.open(path)
+    n = getattr(img, "n_frames", 1)
+    if n > 1:
+        frames, delays = [], []
+        for i in range(n):
+            img.seek(i)
+            frame = img.copy()
+            frame.thumbnail((300, 200))
+            frames.append(frame)
+            delays.append(img.info.get("duration", 100))
+        return "animated", frames, delays
+    img.thumbnail((300, 200))
+    # Copy so the original can be GC'd; thumbnail mutates in-place.
+    return "static", img.copy(), None
+
+
+def _play_frames(lbl, frames, delays, i=0):
+    """Tk thread: show pre-decoded frame i on lbl, then schedule the next. Builds
+    one PhotoImage per tick from the ready thumbnail (no decode, no resize) and
+    keeps only the current one, so Tk holds one image per label. Silently stops
+    if the widget is destroyed."""
     try:
-        img.seek(frame % img.n_frames)
-        copy = img.copy()
-        copy.thumbnail((300, 200))
-        photo = ImageTk.PhotoImage(copy)
+        i %= len(frames)
+        photo = ImageTk.PhotoImage(frames[i])
         lbl.config(image=photo, text="", width=photo.width(), height=photo.height())
         lbl.image = photo
-        delay = img.info.get("duration", 100)
-        lbl._anim_id = lbl.after(delay, lambda: _run_animation(lbl, img, frame + 1))
+        lbl._anim_id = lbl.after(delays[i], lambda: _play_frames(lbl, frames, delays, i + 1))
     except Exception:
         pass
 
@@ -46,16 +134,16 @@ def _display_image_on_label(lbl, path, on_animated=None, cache=None, cache_key=N
     """Display the image at path on lbl. Plays frame-by-frame if the image is animated.
     on_animated(bool) is called with the actual animation status detected from the file.
 
-    PIL work (Image.open + thumbnail) happens on a worker thread; ImageTk.PhotoImage
-    and all widget mutations happen back on the UI thread (Tk requirement).
+    The decode runs on the bounded _DECODE_POOL; ImageTk.PhotoImage and every
+    widget change happen back on the Tk thread (_when_done).
 
-    Staleness guard: a token is stamped on the label before the worker starts; if the
-    token has been replaced by the time the worker finishes (user moved to a different
+    Staleness guard: a token is stamped on the label before the decode starts; if the
+    token has been replaced by the time it finishes (user moved to a different
     image), the result is silently discarded.
 
     cache/cache_key (#6): when both are given, a successfully-built STATIC PhotoImage is
     stored as cache[cache_key] so a later revisit can assign it synchronously and skip
-    this off-thread decode. Animated images are never cached.
+    the off-thread decode. Animated images are never cached.
     """
     # Cancel any in-flight animation — this runs on the UI thread (safe).
     if hasattr(lbl, "_anim_id") and lbl._anim_id:
@@ -69,60 +157,42 @@ def _display_image_on_label(lbl, path, on_animated=None, cache=None, cache_key=N
     token = object()
     lbl._load_token = token
 
-    def worker():
+    def show(future):
+        # Tk thread.
+        if lbl._load_token is not token:
+            return  # stale — a newer image won the race
         try:
-            img = Image.open(path)
-            is_animated = getattr(img, "n_frames", 1) > 1
-
-            if is_animated:
-                # Image object is opened in the worker; frame iteration starts on the
-                # UI thread (via after) because _run_animation calls lbl.after internally.
-                def apply_animated():
-                    if lbl._load_token is not token:
-                        return  # stale — a newer image won the race
-                    if on_animated:
-                        on_animated(True)
-                    _run_animation(lbl, img, 0)
-                lbl.after(0, apply_animated)
-            else:
-                img.thumbnail((300, 200))
-                # Copy so the original can be GC'd; thumbnail mutates in-place.
-                copy = img.copy()
-
-                def apply_static():
-                    if lbl._load_token is not token:
-                        return  # stale
-                    if on_animated:
-                        on_animated(False)
-                    photo = ImageTk.PhotoImage(copy)
-                    lbl.config(image=photo, text="",
-                               width=photo.width(), height=photo.height())
-                    lbl.image = photo  # keep a reference so GC doesn't collect it
-                    # Static-only cache for the results cycle (#6): store the built
-                    # PhotoImage so a revisit to this index assigns it synchronously.
-                    if cache is not None and cache_key is not None:
-                        cache[cache_key] = photo
-                lbl.after(0, apply_static)
+            kind, image, delays = future.result()
         except Exception:
-            def apply_error():
-                if lbl._load_token is not token:
-                    return
-                lbl.config(text="preview\nunavailable")
-            lbl.after(0, apply_error)
+            lbl.config(text="preview\nunavailable")
+            return
+        if on_animated:
+            on_animated(kind == "animated")
+        if kind == "animated":
+            _play_frames(lbl, image, delays)
+            return
+        photo = ImageTk.PhotoImage(image)
+        lbl.config(image=photo, text="", width=photo.width(), height=photo.height())
+        lbl.image = photo  # keep a reference so GC doesn't collect it
+        # Static-only cache for the results cycle (#6): store the built
+        # PhotoImage so a revisit to this index assigns it synchronously.
+        if cache is not None and cache_key is not None:
+            cache[cache_key] = photo
 
-    threading.Thread(target=worker, daemon=True).start()
+    _when_done(lbl, _DECODE_POOL.submit(_decode_preview, path), show)
 
 
 def _decode_row_thumb(executor, lbl, path, box, cache, cache_key, on_done=None):
     """Decode a small row-cover thumbnail OFF the UI thread on a bounded `executor`,
-    then create the ImageTk.PhotoImage and assign it ON the UI thread via lbl.after().
+    then create the ImageTk.PhotoImage and assign it ON the UI thread (_when_done
+    polls the executor's Future; the worker never calls into Tk).
 
     Correctness guards (a past project bug came from off-thread image handling):
       * Staleness token — a fresh token is stamped on `lbl` before the work is queued;
         if the label is rebuilt/re-targeted (e.g. the list re-renders mid-decode) the
         token changes and the stale result self-discards.
       * winfo_exists() — the label may be destroyed by a re-render before the worker
-        finishes; assigning to a dead widget would raise, so we check first.
+        finishes; _when_done stops polling a dead widget.
       * `box` is (w, h); thumbnail() keeps aspect within it. PhotoImage is created on
         the UI thread (Tk requirement) and stored in `cache[cache_key]` AND on the
         widget so neither is garbage-collected (a dropped reference renders blank).
@@ -131,43 +201,35 @@ def _decode_row_thumb(executor, lbl, path, box, cache, cache_key, on_done=None):
     token = object()
     lbl._thumb_token = token
 
-    def worker():
+    def decode():
+        img = Image.open(path)
+        # Animated covers: just show the first frame as a static thumbnail — rows
+        # don't animate. convert() flattens any palette/alpha for a clean resize.
+        if getattr(img, "n_frames", 1) > 1:
+            img.seek(0)
+        img = img.convert("RGBA")
+        img.thumbnail(box)
+        return img.copy()
+
+    def show(future):
+        if getattr(lbl, "_thumb_token", None) is not token:
+            return  # stale — a newer render won the race
         try:
-            img = Image.open(path)
-            # Animated covers: just show the first frame as a static thumbnail — rows
-            # don't animate. convert() flattens any palette/alpha for a clean resize.
-            if getattr(img, "n_frames", 1) > 1:
-                img.seek(0)
-            img = img.convert("RGBA")
-            img.thumbnail(box)
-            copy = img.copy()
+            copy = future.result()
         except Exception:
             return  # unreadable file: leave whatever placeholder is already shown
-
-        def apply_static():
-            if getattr(lbl, "_thumb_token", None) is not token:
-                return  # stale — a newer render won the race
-            try:
-                if not lbl.winfo_exists():
-                    return  # widget destroyed by a re-render
-            except Exception:
-                return
-            photo = ImageTk.PhotoImage(copy)
-            lbl.config(image=photo, text="", width=photo.width(), height=photo.height())
-            lbl.image = photo            # widget reference: GC guard
-            cache[cache_key] = photo     # cache reference: reuse + GC guard
-            if on_done:
-                on_done(photo)
-
-        try:
-            lbl.after(0, apply_static)
-        except Exception:
-            pass  # window/label gone
+        photo = ImageTk.PhotoImage(copy)
+        lbl.config(image=photo, text="", width=photo.width(), height=photo.height())
+        lbl.image = photo            # widget reference: GC guard
+        cache[cache_key] = photo     # cache reference: reuse + GC guard
+        if on_done:
+            on_done(photo)
 
     try:
-        executor.submit(worker)
+        future = executor.submit(decode)
     except Exception:
-        pass  # executor shut down (window closing)
+        return  # executor shut down (window closing)
+    _when_done(lbl, future, show)
 
 
 # update_view is a standalone helper rather than a class method because it
@@ -238,28 +300,25 @@ def update_view(state, img_label, counter_label):
         # The {base}_{i} cache name the fetch's own previews use — never renamed.
         cache_path = state["paths"][0].rsplit("_", 1)[0] + f"_{index}.{ext}"
 
-        def fetch(expected=index, _on_anim=on_animated):
-            # Worker thread: no widget calls except through after(). The download
-            # goes through the HTTP seam with a status check (a non-200 writes no
-            # file) and lands atomically (.part + os.replace).
-            ok = artwork.download_artwork(url, cache_path, register=False)
-
-            def land():
-                # Tk thread: file the preview under ITS index (B9: appending in
-                # finish order showed option 5's image under option 4).
-                loading.discard(expected)
-                if ok:
-                    state["paths"][expected] = cache_path
-                if state["index"] != expected:
-                    return
-                if ok:
-                    _display_image_on_label(img_label, cache_path, _on_anim)
-                    counter_label.config(text=f"{expected + 1} / {len(state['option_urls'])}")
-                else:
-                    img_label.config(text="preview\nunavailable")
+        def land(future, expected=index, _on_anim=on_animated):
+            # Tk thread: file the preview under ITS index (B9: appending in
+            # finish order showed option 5's image under option 4).
             try:
-                img_label.after(0, land)
+                ok = future.result()
             except Exception:
-                pass  # the results window is gone
+                ok = False
+            loading.discard(expected)
+            if ok:
+                state["paths"][expected] = cache_path
+            if state["index"] != expected:
+                return
+            if ok:
+                _display_image_on_label(img_label, cache_path, _on_anim)
+                counter_label.config(text=f"{expected + 1} / {len(state['option_urls'])}")
+            else:
+                img_label.config(text="preview\nunavailable")
 
-        threading.Thread(target=fetch, daemon=True).start()
+        # The download (worker) goes through the HTTP seam with a status check (a
+        # non-200 writes no file) and lands atomically (.part + os.replace).
+        _when_done(img_label, _FETCH_POOL.submit(artwork.download_artwork, url,
+                                                 cache_path, False), land)

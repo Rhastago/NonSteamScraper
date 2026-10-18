@@ -89,10 +89,23 @@ class StandInWidget:
         self.opts[key] = value
 
     def after(self, ms, fn=None, *args):
-        # like FakeWindow: the Tk thread is the test thread; delayed calls never run
+        # like FakeWindow: the Tk thread is the test thread; after(0) runs at once,
+        # a delayed call is recorded in .delayed (pump() runs them).
         if ms == 0 and fn is not None:
             fn(*args)
+        elif fn is not None:
+            self.opts.setdefault("_delayed", []).append((fn, args))
         return "after#"
+
+    def pump(self, rounds=50):
+        """Run the recorded delayed calls (a poll that reschedules is run again),
+        up to `rounds` passes."""
+        for _ in range(rounds):
+            pending = self.opts.pop("_delayed", [])
+            if not pending:
+                return
+            for fn, args in pending:
+                fn(*args)
 
     def __getattr__(self, name):
         if name.startswith("__"):
@@ -808,6 +821,32 @@ def test_closing_settings_before_the_fetch_ends_drops_the_release(ui, fetch_env,
 # Results window, built headless — "Apply this one" (B6/B7, C4)
 # ---------------------------------------------------------------------------
 
+class _ManualPool:
+    """Stand-in for imaging's daemon pools: submit() returns a PENDING Future and
+    records the job; a test finishes jobs in the order it chooses."""
+    def __init__(self):
+        from concurrent.futures import Future
+        self._Future = Future
+        self.jobs = []
+
+    def submit(self, fn, *args):
+        f = self._Future()
+        self.jobs.append((f, fn, args))
+        return f
+
+    def finish(self, i):
+        f, fn, args = self.jobs[i]
+        try:
+            f.set_result(fn(*args))
+        except Exception as e:
+            f.set_exception(e)
+
+    def finish_all(self):
+        for i in range(len(self.jobs)):
+            if not self.jobs[i][0].done():
+                self.finish(i)
+
+
 class _InlineThreads:
     """Stand-in for a module's `threading`: Thread(...).start() is RECORDED, so a
     test can check nothing ran on the Tk thread, then run the worker itself."""
@@ -836,7 +875,7 @@ def results_env(ui, fetch_env, monkeypatch):
     rw = ui.results_window
     threads = _InlineThreads()
     monkeypatch.setattr(rw, "threading", threads)
-    monkeypatch.setattr(ui.imaging, "threading", _InlineThreads())   # decodes never run
+    monkeypatch.setattr(ui.imaging, "_DECODE_POOL", _ManualPool())   # decodes never run
     monkeypatch.setattr(rw, "_display_image_on_label", lambda *a, **k: None)
     rec = types.SimpleNamespace(installed=[], written=[], queued=[], threads=threads,
                                 install_ok=True, steam_running=False)
@@ -1024,8 +1063,8 @@ class _Resp:
 @pytest.fixture
 def preview_env(ui, tmp_path, monkeypatch):
     im = ui.imaging
-    threads = _InlineThreads()
-    monkeypatch.setattr(im, "threading", threads)
+    pool = _ManualPool()
+    monkeypatch.setattr(im, "_FETCH_POOL", pool)
     shown = []
     monkeypatch.setattr(im, "_display_image_on_label",
                         lambda lbl, path, on_anim=None, cache=None, cache_key=None:
@@ -1040,7 +1079,7 @@ def preview_env(ui, tmp_path, monkeypatch):
              "paths": {i: str(cache / f"7p_{i}.png") for i in range(3)},
              "option_urls": [f"https://x/opt{i}.png" for i in range(5)],
              "option_meta": [{} for _ in range(5)]}
-    return types.SimpleNamespace(state=state, threads=threads, shown=shown,
+    return types.SimpleNamespace(state=state, pool=pool, shown=shown,
                                  bodies=bodies, cache=cache, img=StandInWidget(),
                                  counter=StandInWidget())
 
@@ -1059,9 +1098,11 @@ def test_previews_finishing_out_of_order_still_map_to_their_options(ui, preview_
                        "https://x/opt4.png": _Resp(200, b"option 5")})
     _view(ui, env, 3)
     _view(ui, env, 4)
-    fetch_3, fetch_4 = env.threads.started
-    env.threads.started[:] = [fetch_4, fetch_3]   # option 5 finishes first
-    env.threads.run_all()
+    assert len(env.pool.jobs) == 2
+    env.pool.finish(1)                             # option 5 finishes first
+    env.img.pump()
+    env.pool.finish(0)
+    env.img.pump()
 
     assert env.state["paths"][3].endswith("7p_3.png")
     assert env.state["paths"][4].endswith("7p_4.png")
@@ -1076,7 +1117,8 @@ def test_a_non_200_preview_writes_no_file(ui, preview_env):
     env = preview_env
     env.bodies["https://x/opt3.png"] = _Resp(404, b"<html>not found</html>")
     _view(ui, env, 3)
-    env.threads.run_all()
+    env.pool.finish_all()
+    env.img.pump()
     assert 3 not in env.state["paths"]
     assert sorted(os.listdir(env.cache)) == ["7p_0.png", "7p_1.png", "7p_2.png"], (
         "an error page must not be cached as an image")
@@ -1089,7 +1131,7 @@ def test_revisiting_an_option_while_it_downloads_starts_no_second_download(ui, p
     _view(ui, env, 3)
     _view(ui, env, 2)
     _view(ui, env, 3)
-    assert len(env.threads.started) == 1
+    assert len(env.pool.jobs) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1195,7 +1237,7 @@ def test_a_list_render_lists_the_grid_folder_once(ui, fetch_env, monkeypatch, tm
     app.selected_row = app.selected_btn = None
     app._row_thumb_cache = {}
     app.ROW_THUMB_W, app.ROW_THUMB_H = 39, 59
-    app._thumb_executor = types.SimpleNamespace(submit=lambda fn: None)
+    app._thumb_executor = _ManualPool()
     app.window.winfo_screenheight = lambda: 800
     StandInWidget.created = []
 
@@ -1206,3 +1248,108 @@ def test_a_list_render_lists_the_grid_folder_once(ui, fetch_env, monkeypatch, tm
     labels_with_rows = [w for w in StandInWidget.created if type(w).__name__ == "Label"
                         and str(w.opts.get("text", "")).startswith("  Game")]
     assert len(labels_with_rows) == 40
+
+
+# ---------------------------------------------------------------------------
+# T8 / B12 — bounded image pool, pre-decoded frames, workers never touch Tk
+# ---------------------------------------------------------------------------
+
+def test_the_image_pool_never_runs_more_than_its_workers(ui):
+    import threading
+    import time as _time
+    pool = ui.imaging._DaemonPool(2)
+    running, peak, lock = [0], [0], threading.Lock()
+
+    def job(i):
+        with lock:
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        _time.sleep(0.02)
+        with lock:
+            running[0] -= 1
+        return i * i
+    futures = [pool.submit(job, i) for i in range(10)]
+    assert [f.result(timeout=5) for f in futures] == [i * i for i in range(10)]
+    assert len(pool._threads) == 2 and peak[0] <= 2
+    assert all(t.daemon for t in pool._threads), "a stalled job must not hold the app open"
+
+
+class _ThreadCheckedLabel(StandInWidget):
+    """Records the thread of every Tk-side call made on it."""
+    def __init__(self, calls):
+        super().__init__()
+        self._calls = calls
+
+    def _note(self, what):
+        import threading
+        self._calls.append((what, threading.get_ident()))
+
+    def config(self, **kw):
+        self._note("config")
+        super().config(**kw)
+
+    def after(self, ms, fn=None, *args):
+        self._note("after")
+        return super().after(ms, fn, *args)
+
+    def after_cancel(self, ident):
+        self._note("after_cancel")
+
+    def winfo_exists(self):
+        self._note("winfo_exists")
+        return True
+
+
+@pytest.mark.parametrize("animated", [False, True])
+def test_decodes_run_on_the_pool_and_only_the_tk_thread_touches_tk(ui, tmp_path, monkeypatch, animated):
+    """B12: the decode (and, for an animation, every frame's seek + thumbnail)
+    runs on a pool worker; every widget call and every PhotoImage happens on the
+    Tk (test) thread; a playing animation never resizes on the Tk thread."""
+    import threading
+    import time as _time
+    from PIL import Image
+    im = ui.imaging
+    main = threading.get_ident()
+    path = str(tmp_path / ("a.webp" if animated else "s.png"))
+    if animated:
+        frames = [Image.new("RGBA", (600, 400), (i * 40, 0, 0, 255)) for i in range(5)]
+        frames[0].save(path, save_all=True, append_images=frames[1:], duration=50, loop=0)
+    else:
+        Image.new("RGB", (600, 400), (0, 90, 0)).save(path)
+
+    calls, photos, thumbs = [], [], []
+
+    class FakePhoto:
+        def __init__(self, image):
+            photos.append(threading.get_ident())
+            self._size = image.size
+
+        def width(self):
+            return self._size[0]
+
+        def height(self):
+            return self._size[1]
+    monkeypatch.setattr(im.ImageTk, "PhotoImage", FakePhoto)
+    real_thumbnail = Image.Image.thumbnail
+
+    def spy_thumbnail(self, *a, **k):
+        thumbs.append(threading.get_ident())
+        return real_thumbnail(self, *a, **k)
+    monkeypatch.setattr(Image.Image, "thumbnail", spy_thumbnail)
+    monkeypatch.setattr(im, "_DECODE_POOL", im._DaemonPool(2))   # real worker threads
+    lbl = _ThreadCheckedLabel(calls)
+    seen = []
+
+    im._display_image_on_label(lbl, path, on_animated=seen.append)
+    deadline = _time.monotonic() + 5
+    while not photos and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+        lbl.pump(rounds=1)
+    lbl.pump(rounds=8)   # an animation keeps ticking: several frames shown
+
+    assert seen == [animated]
+    assert photos and set(photos) == {main}, "PhotoImage only on the Tk thread"
+    assert calls and {t for _w, t in calls} == {main}, "widget calls only on the Tk thread"
+    assert thumbs and main not in thumbs, "every resize happens on a pool worker"
+    if animated:
+        assert len(photos) >= 5, "the animation played its pre-decoded frames"
