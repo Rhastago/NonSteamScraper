@@ -11,6 +11,7 @@ from tkinter import messagebox
 from appcommon import VERSION, open_url
 from theming import ACCENTS, PAD_XS, PAD_S, FONT_UI, FONT_MONO
 import find_games as fg
+import updates
 import restore
 import steam_files
 import steam_env
@@ -318,7 +319,7 @@ def open_settings(app):
             w.destroy()
 
         def worker():
-            result = fg.check_for_update(VERSION)
+            result = updates.check_for_update(VERSION)
 
             def finish():
                 try:
@@ -358,7 +359,7 @@ def open_settings(app):
                              font=(FONT_UI, 9, "underline"),
                              fg=t["link"], bg=t["bg"], cursor="hand2")
     releases_link.pack(anchor="w", pady=(4, 0))
-    releases_link.bind("<Button-1>", lambda e: open_url(fg.RELEASES_URL))
+    releases_link.bind("<Button-1>", lambda e: open_url(updates.RELEASES_URL))
 
     # Steam — status + restart. Kept directly above Steam Account so the two
     # Steam-related sections sit together at the bottom (Status above Account).

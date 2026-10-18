@@ -36,6 +36,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import find_games as fg  # noqa: E402
+import updates
 import winplace
 import artwork
 import restore
@@ -50,7 +51,7 @@ from PIL import Image  # noqa: E402
 # that OWNS a name, or the code that reads it never sees the patch (and a path
 # patch then falls back to the sandbox HOME, which G-HOME fails). Helpers that
 # patch a name held in a variable go through _owner().
-_OWNER_MODULES = (appfiles, steam_env, sgdb, steam_files, restore, artwork, winplace, fg)
+_OWNER_MODULES = (appfiles, steam_env, sgdb, steam_files, restore, artwork, winplace, updates, fg)
 
 
 def _owner(name):
@@ -1224,19 +1225,19 @@ def test_is_steam_running_force_bypasses_stale_true_cache(monkeypatch):
     ("10.0.0",  (10, 0, 0)),
 ])
 def test_version_tuple_parses(s, expected):
-    assert fg._version_tuple(s) == expected
+    assert updates._version_tuple(s) == expected
 
 
 def test_version_tuple_newer_beats_older():
-    assert fg._version_tuple("1.2.6") > fg._version_tuple("1.2.5")
+    assert updates._version_tuple("1.2.6") > updates._version_tuple("1.2.5")
 
 
 def test_version_tuple_major_beats_minor():
-    assert fg._version_tuple("2.0.0") > fg._version_tuple("1.99.99")
+    assert updates._version_tuple("2.0.0") > updates._version_tuple("1.99.99")
 
 
 def test_version_tuple_equal_versions():
-    assert fg._version_tuple("1.2.5") == fg._version_tuple("v1.2.5")
+    assert updates._version_tuple("1.2.5") == updates._version_tuple("v1.2.5")
 
 
 # ---------------------------------------------------------------------------
@@ -1263,7 +1264,7 @@ def _fake_release(tag, assets=None, html_url="https://github.com/example/release
 def test_check_for_update_available(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0")))
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result is not None
     assert result["available"] is True
     assert result["latest"] == "1.3.0"
@@ -1273,7 +1274,7 @@ def test_check_for_update_available(monkeypatch):
 def test_check_for_update_up_to_date(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.2.5")))
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result is not None
     assert result["available"] is False
 
@@ -1281,7 +1282,7 @@ def test_check_for_update_up_to_date(monkeypatch):
 def test_check_for_update_older_release_not_available(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.0.0")))
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result["available"] is False
 
 
@@ -1291,7 +1292,7 @@ def test_check_for_update_network_error_returns_error_dict(monkeypatch):
         raise fg.requests.exceptions.RequestException("no network")
     monkeypatch.setattr(sgdb, "http_get", boom)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result is not None
     assert result["available"] is False
     assert result["error"] is not None
@@ -1307,7 +1308,7 @@ def test_check_for_update_picks_linux_asset(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result["url"] == "https://dl/linux"
 
 
@@ -1319,7 +1320,7 @@ def test_check_for_update_picks_windows_asset(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Windows")
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result["url"] == "https://dl/win.zip"
 
 
@@ -1330,7 +1331,7 @@ def test_check_for_update_falls_back_to_html_url_when_no_matching_asset(monkeypa
         lambda *a, **kw: _FakeResponse(
             _fake_release("v1.3.0", assets=assets, html_url=release_page)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     # "checksums.txt" has an extension ("txt") so bare-binary fallback doesn't
     # match; the function should fall back to html_url.
     assert result["url"] == release_page
@@ -1345,14 +1346,14 @@ def test_check_for_update_linux_bare_binary_fallback(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result["url"] == "https://dl/bin"
 
 
 def test_check_for_update_empty_tag_returns_error_dict(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse({"tag_name": "", "html_url": "x", "assets": []}))
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result is not None
     assert result["available"] is False
     assert result["error"] is not None
@@ -1372,7 +1373,7 @@ def test_check_for_update_retry_on_request_exception_then_success(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result is not None
     assert result["available"] is True
     assert result["latest"] == "1.3.0"
@@ -1390,7 +1391,7 @@ def test_check_for_update_exhausts_retries_returns_error_dict(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result is not None
     assert result["available"] is False
     assert result["error"] is not None
@@ -1413,7 +1414,7 @@ def test_check_for_update_non200_returns_error_immediately(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result is not None
     assert result["available"] is False
     assert "500" in result["error"]
@@ -1436,7 +1437,7 @@ def test_check_for_update_403_returns_rate_limit_error_no_retry(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert result is not None
     assert result["available"] is False
     assert "rate limit" in result["error"].lower()
@@ -1463,7 +1464,7 @@ def test_check_for_update_403_reports_minutes_until_reset(monkeypatch):
     monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert "rate limit" in result["error"].lower()
     assert "try again in" in result["error"].lower()
     # Parse the "~N min" figure out of the message and check it's ~30.
@@ -1480,7 +1481,7 @@ def test_check_for_update_403_without_reset_header_is_generic(monkeypatch):
         headers = {}
 
     monkeypatch.setattr(sgdb, "http_get", lambda *a, **kw: _Forbidden())
-    result = fg.check_for_update("1.2.5")
+    result = updates.check_for_update("1.2.5")
     assert "rate limit" in result["error"].lower()
     assert "try again later" in result["error"].lower()
 
@@ -1494,7 +1495,7 @@ def test_check_for_update_sends_user_agent_header(monkeypatch):
         return _FakeResponse(_fake_release("v1.3.0"))
 
     monkeypatch.setattr(sgdb, "http_get", fake_get)
-    fg.check_for_update("1.2.5")
+    updates.check_for_update("1.2.5")
     assert seen_headers, "requests.get was never called"
     assert "User-Agent" in seen_headers[0]
     assert seen_headers[0]["User-Agent"]   # non-empty
@@ -1509,7 +1510,7 @@ def test_check_for_update_uses_10s_timeout(monkeypatch):
         return _FakeResponse(_fake_release("v1.3.0"))
 
     monkeypatch.setattr(sgdb, "http_get", fake_get)
-    fg.check_for_update("1.2.5")
+    updates.check_for_update("1.2.5")
     assert seen_timeouts == [10]
 
 
