@@ -25,6 +25,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import artwork
 import restore
 import steam_files
 import sgdb
@@ -95,9 +96,9 @@ def test_a_fetch_download_after_the_switch_lands_in_the_new_account(two_accounts
         with open(save_path, "wb") as f:
             f.write(b"png")
         return True
-    monkeypatch.setattr(fg, "download_artwork", fake_download)
+    monkeypatch.setattr(artwork, "download_artwork", fake_download)
 
-    fg.download_all_artwork(1, APP_ID, prefs={}, defer_icon=True)
+    artwork.download_all_artwork(1, APP_ID, prefs={}, defer_icon=True)
 
     assert sorted(os.listdir(grid_b)) == [f"{APP_ID}.png", f"{APP_ID}p.png"]
     assert os.listdir(grid_a) == [], "nothing may land in the old account's grid"

@@ -21,6 +21,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import artwork
 import restore
 import steam_files
 import sgdb
@@ -47,7 +48,7 @@ def run_env(monkeypatch, tmp_path):
         rec.calls.append(("download", app_id))
         assert defer_icon is True, "the run batches icon writes"
         progress_cb("Downloading Cover", 1, 4)
-        art = fg.FetchedArt()
+        art = artwork.FetchedArt()
         art.slots["grids"] = {"label": "Cover", "failed": False, "applied_index": 0,
                               "applied_path": f"/g/{app_id}p.png"}
         if app_id in rec.icon_for:
@@ -59,7 +60,7 @@ def run_env(monkeypatch, tmp_path):
     monkeypatch.setattr(restore, "begin_restore_run", lambda: rec.calls.append("begin"))
     monkeypatch.setattr(restore, "seal_restore_point", lambda: rec.calls.append("seal"))
     monkeypatch.setattr(sgdb, "search_game", search)
-    monkeypatch.setattr(fg, "download_all_artwork", download)
+    monkeypatch.setattr(artwork, "download_all_artwork", download)
     monkeypatch.setattr(appfiles, "add_to_skip_list", lambda uid: rec.calls.append(("skip", uid)))
     monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: rec.steam_running)
     monkeypatch.setattr(steam_files, "set_shortcut_icons",
@@ -210,7 +211,7 @@ def test_restore_from_skip_touches_only_the_skip_list(files):
 def test_apply_option_never_raises(monkeypatch):
     def boom(*a, **k):
         raise OSError("disk gone")
-    monkeypatch.setattr(fg, "install_option", boom)
+    monkeypatch.setattr(artwork, "install_option", boom)
     assert operations.apply_option("/g/1p.png", "u", 1) == (False, False)
 
 
@@ -219,12 +220,12 @@ def test_run_fetch_uses_a_picked_sgdb_id_without_searching(run_env, monkeypatch)
     THAT id; a name search could land on a same-named game (DOOM 2016)."""
     run_env.ids_file.write_text("2|1993\n", encoding="utf-8")
     downloaded = []
-    recorded_download = fg.download_all_artwork   # run_env's stand-in
+    recorded_download = artwork.download_all_artwork   # run_env's stand-in
 
     def record(sgdb_id, app_id, prefs, progress_cb=None, defer_icon=False):
         downloaded.append((app_id, sgdb_id))
         return recorded_download(sgdb_id, app_id, prefs, progress_cb, defer_icon)
-    monkeypatch.setattr(fg, "download_all_artwork", record)
+    monkeypatch.setattr(artwork, "download_all_artwork", record)
 
     _run(run_env, _games(1, 2))
 

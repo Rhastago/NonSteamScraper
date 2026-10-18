@@ -13,6 +13,7 @@ from PIL import Image, ImageTk
 from appcommon import resource_path
 from theming import PAD_XS, PAD_L
 import find_games as fg
+import artwork
 from find_games import parse_net_workarea, compute_window_fit
 
 class GeometryMixin:
@@ -278,7 +279,7 @@ class GeometryMixin:
         self._closed = True
         run = self._fetch_run
         if run:
-            fg.remove_partial_downloads(run["grid"], run["ids"])
+            artwork.remove_partial_downloads(run["grid"], run["ids"])
         # We deliberately do not persist or restore the window position — the window
         # always re-centers on launch — so there is nothing to save here.
         # Stop the thumbnail decode pool so no worker survives the window. Don't wait

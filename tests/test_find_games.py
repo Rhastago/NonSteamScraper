@@ -36,6 +36,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import find_games as fg  # noqa: E402
+import artwork
 import restore
 import steam_files
 import sgdb
@@ -48,7 +49,7 @@ from PIL import Image  # noqa: E402
 # that OWNS a name, or the code that reads it never sees the patch (and a path
 # patch then falls back to the sandbox HOME, which G-HOME fails). Helpers that
 # patch a name held in a variable go through _owner().
-_OWNER_MODULES = (appfiles, steam_env, sgdb, steam_files, restore, fg)
+_OWNER_MODULES = (appfiles, steam_env, sgdb, steam_files, restore, artwork, fg)
 
 
 def _owner(name):
@@ -132,12 +133,12 @@ def test_pref_params_nsfw_humor_absent_default_any():
 
 @pytest.mark.parametrize("mime", ["image/webp", "image/gif"])
 def test_is_animated_image_true(mime):
-    assert fg.is_animated_image({"mime": mime}) is True
+    assert artwork.is_animated_image({"mime": mime}) is True
 
 
 @pytest.mark.parametrize("img", [{"mime": "image/png"}, {"mime": "image/jpeg"}, {}])
 def test_is_animated_image_false(img):
-    assert fg.is_animated_image(img) is False
+    assert artwork.is_animated_image(img) is False
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +213,7 @@ def test_clear_slot_files_portrait_slot_isolated(tmp_path):
     _touch(tmp_path / "123_hero.png")
     _touch(tmp_path / "999p.png")
 
-    fg.clear_slot_files(str(tmp_path / "123p.webp"))
+    artwork.clear_slot_files(str(tmp_path / "123p.webp"))
 
     assert not (tmp_path / "123p.png").exists()       # removed: same slot, diff ext
     assert (tmp_path / "123.png").exists()             # kept: wide slot
@@ -226,7 +227,7 @@ def test_clear_slot_files_wide_slot_isolated(tmp_path):
     _touch(tmp_path / "123_hero.png")
     _touch(tmp_path / "999p.png")
 
-    fg.clear_slot_files(str(tmp_path / "123.gif"))
+    artwork.clear_slot_files(str(tmp_path / "123.gif"))
 
     assert not (tmp_path / "123.png").exists()         # removed: wide slot match
     assert (tmp_path / "123p.png").exists()            # kept: portrait slot
@@ -236,7 +237,7 @@ def test_clear_slot_files_wide_slot_isolated(tmp_path):
 
 def test_clear_slot_files_missing_folder_no_error(tmp_path):
     # listdir on a nonexistent folder raises OSError, which the function swallows.
-    fg.clear_slot_files(str(tmp_path / "no_such_dir" / "123p.webp"))  # must not raise
+    artwork.clear_slot_files(str(tmp_path / "no_such_dir" / "123p.webp"))  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -247,14 +248,14 @@ def test_row_thumbnail_prefers_portrait_over_wide(tmp_path):
     _touch(tmp_path / "123p.png")   # portrait cover (preferred)
     _touch(tmp_path / "123.jpg")    # wide grid
     _touch(tmp_path / "123_hero.png")
-    assert fg.row_thumbnail_path(str(tmp_path), 123) == str(tmp_path / "123p.png")
+    assert artwork.row_thumbnail_path(str(tmp_path), 123) == str(tmp_path / "123p.png")
 
 
 def test_row_thumbnail_falls_back_to_wide(tmp_path):
     _touch(tmp_path / "123.webp")   # only the wide slot exists
     _touch(tmp_path / "123_hero.png")
     _touch(tmp_path / "123_logo.png")
-    assert fg.row_thumbnail_path(str(tmp_path), 123) == str(tmp_path / "123.webp")
+    assert artwork.row_thumbnail_path(str(tmp_path), 123) == str(tmp_path / "123.webp")
 
 
 def test_row_thumbnail_ignores_hero_logo_icon_only(tmp_path):
@@ -262,23 +263,23 @@ def test_row_thumbnail_ignores_hero_logo_icon_only(tmp_path):
     _touch(tmp_path / "123_hero.png")
     _touch(tmp_path / "123_logo.png")
     _touch(tmp_path / "123_icon.png")
-    assert fg.row_thumbnail_path(str(tmp_path), 123) is None
+    assert artwork.row_thumbnail_path(str(tmp_path), 123) is None
 
 
 def test_row_thumbnail_none_when_no_art(tmp_path):
     _touch(tmp_path / "999p.png")   # different appid
-    assert fg.row_thumbnail_path(str(tmp_path), 123) is None
+    assert artwork.row_thumbnail_path(str(tmp_path), 123) is None
 
 
 def test_row_thumbnail_slot_isolation_no_prefix_bleed(tmp_path):
     # "1234.png" must not be mistaken for app_id 123's wide slot.
     _touch(tmp_path / "1234.png")
     _touch(tmp_path / "1230.png")
-    assert fg.row_thumbnail_path(str(tmp_path), 123) is None
+    assert artwork.row_thumbnail_path(str(tmp_path), 123) is None
 
 
 def test_row_thumbnail_missing_folder_returns_none(tmp_path):
-    assert fg.row_thumbnail_path(str(tmp_path / "no_such_dir"), 123) is None
+    assert artwork.row_thumbnail_path(str(tmp_path / "no_such_dir"), 123) is None
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +431,7 @@ def test_convert_animated_to_apng_frame_count_and_callbacks(tmp_path):
     progress = []
     status = []
 
-    ok = fg.convert_animated_to_apng(
+    ok = artwork.convert_animated_to_apng(
         str(src), str(out),
         progress_cb=lambda done, total: progress.append((done, total)),
         status_cb=lambda msg: status.append(msg),
@@ -454,7 +455,7 @@ def test_convert_animated_to_apng_none_callbacks_ok(tmp_path):
     src = tmp_path / "anim2.webp"
     _make_animated_webp(src, n=4)
     out = tmp_path / "out2.png"
-    assert fg.convert_animated_to_apng(str(src), str(out)) is True
+    assert artwork.convert_animated_to_apng(str(src), str(out)) is True
     assert Image.open(str(out)).n_frames == 4
 
 
@@ -469,7 +470,7 @@ def test_apng_frame_counter_passthrough_and_counts():
             return len(b)
 
     calls = []
-    counter = fg._ApngFrameCounter(FakeFP(), total=3, progress_cb=lambda d, t: calls.append((d, t)))
+    counter = artwork._ApngFrameCounter(FakeFP(), total=3, progress_cb=lambda d, t: calls.append((d, t)))
 
     counter.write(b"\x00\x00\x00\x00fcTL")   # 8 bytes ending fcTL -> counts
     counter.write(b"not-eight")               # wrong length -> ignored
@@ -489,7 +490,7 @@ def test_apng_frame_counter_getattr_delegates():
         def tell(self):
             return 42
 
-    counter = fg._ApngFrameCounter(FakeFP(), total=1, progress_cb=None)
+    counter = artwork._ApngFrameCounter(FakeFP(), total=1, progress_cb=None)
     # Attribute not defined on the wrapper delegates to the wrapped fp.
     assert counter.tell() == 42
 
@@ -938,7 +939,7 @@ def test_clear_slot_files_uses_provided_snapshot(tmp_path):
     _touch(tmp_path / "123p.jpg")  # on disk but intentionally NOT in the snapshot
     snapshot = ["123p.png", "ghost123p.removed"]  # ghost entry must not raise
 
-    fg.clear_slot_files(str(tmp_path / "123p.webp"), existing_files=snapshot)
+    artwork.clear_slot_files(str(tmp_path / "123p.webp"), existing_files=snapshot)
 
     assert not (tmp_path / "123p.png").exists()  # in snapshot + matches prefix -> removed
     assert (tmp_path / "123p.jpg").exists()      # not in snapshot -> untouched
@@ -1533,7 +1534,7 @@ def _slot(applied_index, applied_path, failed=False, label="Cover"):
 
 
 def _fetched(slots, icon_write=None):
-    art = fg.FetchedArt()
+    art = artwork.FetchedArt()
     art.slots.update(slots)
     art.icon_write = icon_write
     return art
@@ -1597,12 +1598,12 @@ def test_download_all_artwork_defer_icon_shape_consumable(tmp_path, monkeypatch)
         return True
 
     monkeypatch.setattr(sgdb, "get_artwork", fake_get_artwork)
-    monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
+    monkeypatch.setattr(artwork, "download_artwork", fake_download_artwork)
     # set_shortcut_icon must NOT be called in defer mode; fail loudly if it is.
     monkeypatch.setattr(steam_files, "set_shortcut_icon",
                         lambda *a, **k: pytest.fail("icon write not deferred"))
 
-    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+    results = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
     # 1) the deferred icon write is present, apart from the slots.
     assert results.icon_write is not None
@@ -1766,7 +1767,7 @@ def test_full_reset_preserves_art_but_clears_settings(tmp_path, monkeypatch):
     and only the regenerable thumbnail cache + settings/pending files are removed."""
     calls = []
     monkeypatch.setattr(appfiles, "clear_cache", lambda: calls.append("cache"))
-    monkeypatch.setattr(fg, "clear_managed_artwork", lambda: calls.append("art"))
+    monkeypatch.setattr(artwork, "clear_managed_artwork", lambda: calls.append("art"))
     monkeypatch.setattr(steam_files, "clear_backup", lambda: calls.append("backup"))
 
     # Settings/state files — these SHOULD be removed.
@@ -1856,7 +1857,7 @@ def _install_fetch_mocks(monkeypatch, tmp_path, slot_assets,
 
     icon_calls = []
     monkeypatch.setattr(sgdb, "_sgdb_get", fake_sgdb_get)
-    monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
+    monkeypatch.setattr(artwork, "download_artwork", fake_download_artwork)
     monkeypatch.setattr(appfiles, "register_managed_file", lambda *a, **k: None)
     monkeypatch.setattr(restore, "snapshot_for_restore", lambda *a, **k: None)
     monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: False)
@@ -1900,7 +1901,7 @@ def test_download_all_artwork_happy_path_all_slots_populated(tmp_path, monkeypat
     }
     icon_calls = _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
 
-    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
+    results = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
 
     for slot in ("grids", "grids_wide", "heroes", "logos", "icons"):
         sd = results.slots[slot]
@@ -1939,7 +1940,7 @@ def test_download_all_artwork_deferred_icon_write_contract(tmp_path, monkeypatch
     # record_icon=False -> fail loudly if set_shortcut_icon fires in defer mode.
     _install_fetch_mocks(monkeypatch, tmp_path, slot_assets, record_icon=False)
 
-    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+    results = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
     # icon_write is the deferred (uid, path) pair, kept apart from the slots.
     assert isinstance(results.icon_write, tuple)
@@ -1968,7 +1969,7 @@ def test_download_all_artwork_non_defer_writes_icon(tmp_path, monkeypatch):
     }
     icon_calls = _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
 
-    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
+    results = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
 
     assert results.icon_write is None
     assert icon_calls == [(12345, results.slots["icons"]["applied_path"])]
@@ -1986,7 +1987,7 @@ def _failing_downloads(monkeypatch, bad_urls):
         with open(save_path, "wb") as f:
             f.write(b"NEW")
         return True
-    monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
+    monkeypatch.setattr(artwork, "download_artwork", fake_download_artwork)
     return attempted
 
 
@@ -2008,7 +2009,7 @@ def test_download_all_artwork_failed_download_keeps_the_old_file(tmp_path, monke
     (grid / "12345p.png").write_bytes(b"OLD-PNG")
     _failing_downloads(monkeypatch, {"https://sgdb/grids.png"})
 
-    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+    results = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
     assert (grid / "12345p.jpg").read_bytes() == b"OLD-JPG"
     assert (grid / "12345p.png").read_bytes() == b"OLD-PNG"
@@ -2023,11 +2024,11 @@ def test_download_all_artwork_failed_icon_makes_no_icon_write(tmp_path, monkeypa
     _install_fetch_mocks(monkeypatch, tmp_path, _ALL_STATIC, record_icon=False)
     _failing_downloads(monkeypatch, {"https://sgdb/icons.png"})
 
-    deferred = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+    deferred = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
     assert deferred.icon_write is None
     assert deferred.icon_write is None
     # Non-defer mode: record_icon=False fails the test if set_shortcut_icon runs.
-    direct = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
+    direct = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
     assert direct.slots["icons"]["failed"] is True
 
 
@@ -2038,7 +2039,7 @@ def test_download_all_artwork_success_replaces_a_different_extension(tmp_path, m
     (grid / "123456p.jpg").write_bytes(b"NEIGHBOUR")
     _failing_downloads(monkeypatch, set())
 
-    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+    results = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
     assert not (grid / "12345p.jpg").exists(), "the old extension must be cleared"
     assert (grid / "12345p.png").read_bytes() == b"NEW"
@@ -2058,7 +2059,7 @@ def test_remove_partial_downloads_only_the_runs_part_files(tmp_path, monkeypatch
     (cache / "12345p_1.png").write_bytes(b"x")
     monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(cache))
 
-    assert fg.remove_partial_downloads(str(grid), [12345]) == 3
+    assert artwork.remove_partial_downloads(str(grid), [12345]) == 3
 
     assert sorted(os.listdir(grid)) == sorted(keep)
     assert os.listdir(cache) == ["12345p_1.png"]
@@ -2088,7 +2089,7 @@ def test_install_into_slot_failed_static_download_keeps_old_file_no_partial(tmp_
             raise fg.requests.exceptions.ConnectionError("reset")
     monkeypatch.setattr(sgdb, "http_get", lambda *a, **k: _Dying())
 
-    assert fg.install_into_slot(str(grid / "12345p.png"), "https://x/new.png") is False
+    assert artwork.install_into_slot(str(grid / "12345p.png"), "https://x/new.png") is False
     assert sorted(os.listdir(grid)) == ["12345p.jpg"]
     assert (grid / "12345p.jpg").read_bytes() == b"OLD"
 
@@ -2107,10 +2108,10 @@ def test_install_into_slot_failed_apng_encode_keeps_old_file_no_partial(tmp_path
         with open(out, "wb") as f:
             f.write(b"half an apng")
         raise RuntimeError("encoder crashed")
-    monkeypatch.setattr(fg, "download_artwork", fake_download)
-    monkeypatch.setattr(fg, "convert_animated_to_apng", failing_encode)
+    monkeypatch.setattr(artwork, "download_artwork", fake_download)
+    monkeypatch.setattr(artwork, "convert_animated_to_apng", failing_encode)
 
-    assert fg.install_into_slot(str(grid / "12345p.png"), "https://x/a.webp",
+    assert artwork.install_into_slot(str(grid / "12345p.png"), "https://x/a.webp",
                                 animated=True) is False
     assert sorted(os.listdir(grid)) == ["12345p.jpg", "12345p.png"]
     assert (grid / "12345p.png").read_bytes() == b"OLD"
@@ -2138,10 +2139,10 @@ def test_install_into_slot_apng_appears_only_after_the_encode(tmp_path, monkeypa
         with open(out, "wb") as f:
             f.write(b"APNG")
         return True
-    monkeypatch.setattr(fg, "download_artwork", fake_download)
-    monkeypatch.setattr(fg, "convert_animated_to_apng", watching_encode)
+    monkeypatch.setattr(artwork, "download_artwork", fake_download)
+    monkeypatch.setattr(artwork, "convert_animated_to_apng", watching_encode)
 
-    assert fg.install_into_slot(str(out_path), "https://x/a.webp", animated=True) is True
+    assert artwork.install_into_slot(str(out_path), "https://x/a.webp", animated=True) is True
 
     assert seen["src_dir"] == str(cache), "the source download must not sit in the grid folder"
     assert seen["out_dir"] == str(cache), "the encode must not write in the grid folder"
@@ -2161,7 +2162,7 @@ def test_install_into_slot_same_extension_success_keeps_the_new_file(tmp_path, m
     monkeypatch.setattr(appfiles, "register_managed_file", lambda p: None)
     _failing_downloads(monkeypatch, set())
 
-    assert fg.install_into_slot(str(grid / "12345p.png"), "https://x/a.png",
+    assert artwork.install_into_slot(str(grid / "12345p.png"), "https://x/a.png",
                                 existing_files=listing) is True
     assert (grid / "12345p.png").read_bytes() == b"NEW"
 
@@ -2180,7 +2181,7 @@ def test_download_all_artwork_all_animated_slot_not_auto_applied(tmp_path, monke
     }
     icon_calls = _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
 
-    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
+    results = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=False)
 
     icons = results.slots["icons"]
     assert icons is not None  # options exist, just none auto-applied
@@ -2206,7 +2207,7 @@ def test_download_all_artwork_missing_slot_is_none_and_consumable(tmp_path, monk
     }
     _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
 
-    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+    results = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
     assert results.slots["heroes"] is None
     # Consumers must skip the None slot (and the icon tuple) without raising.
@@ -2283,7 +2284,7 @@ def test_http_seam_download_artwork_uses_seam_with_stream_and_timeout(monkeypatc
     monkeypatch.setattr(appfiles, "MANAGED_FILE", str(tmp_path / "managed"))
 
     save_path = str(tmp_path / "12345p.png")
-    assert fg.download_artwork("http://x/img.png", save_path) is True
+    assert artwork.download_artwork("http://x/img.png", save_path) is True
 
     assert seen["url"] == "http://x/img.png"
     assert seen.get("stream") is True
@@ -2853,7 +2854,7 @@ def test_restore_clear_managed_artwork_wipes_restore_point(tmp_path, monkeypatch
     manifest_path = os.path.join(p["RESTORE_FOLDER"], "manifest.json")
     assert os.path.exists(manifest_path)
 
-    fg.clear_managed_artwork()
+    artwork.clear_managed_artwork()
 
     assert not os.path.exists(manifest_path)
 
@@ -2892,7 +2893,7 @@ def test_steam_official_images_old_layout_urls():
         assert record["style"] == "official", slot
         assert record["nsfw"] is False, slot
         assert record["humor"] is False, slot
-        assert fg.is_animated_image(record) is False, slot
+        assert artwork.is_animated_image(record) is False, slot
 
 
 def test_steam_official_images_fallbacks():
@@ -3007,7 +3008,7 @@ def test_download_all_artwork_steam_first_and_applied(tmp_path, monkeypatch):
     _steam_link_patch(monkeypatch)
     steam_images = sgdb.steam_official_images("620", _STEAM_META_PORTAL2)
 
-    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+    results = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
     for slot in ("grids", "grids_wide", "heroes", "logos", "icons"):
         sd = results.slots[slot]
@@ -3028,7 +3029,7 @@ def test_download_all_artwork_steam_fills_empty_slot(tmp_path, monkeypatch):
     _steam_link_patch(monkeypatch)
     steam_images = sgdb.steam_official_images("620", _STEAM_META_PORTAL2)
 
-    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+    results = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
     for slot in ("grids", "grids_wide", "heroes", "logos", "icons"):
         sd = results.slots[slot]
@@ -3049,7 +3050,7 @@ def test_download_all_artwork_steam_excluded_by_official_never(tmp_path, monkeyp
     steam_images = sgdb.steam_official_images("620", _STEAM_META_PORTAL2)
 
     prefs = {"logo_official": "never", "icon_official": "never", "grid_no_logo": "never"}
-    results = fg.download_all_artwork(42, 12345, prefs=prefs, defer_icon=True)
+    results = artwork.download_all_artwork(42, 12345, prefs=prefs, defer_icon=True)
 
     for slot in ("logos", "icons"):
         sd = results.slots[slot]
@@ -3071,7 +3072,7 @@ def test_download_all_artwork_no_steam_link_unchanged(tmp_path, monkeypatch):
     _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
     monkeypatch.setattr(sgdb, "get_steam_platform_data", lambda sgdb_id: None)
 
-    results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
+    results = artwork.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
     expected = {"grids": slot_assets["grids"], "grids_wide": slot_assets["grids"],
                 "heroes": slot_assets["heroes"], "logos": slot_assets["logos"],
@@ -3137,7 +3138,7 @@ def test_download_artwork_gzip_length_mismatch_still_saves(tmp_path, monkeypatch
     monkeypatch.setattr(sgdb, "http_get", fake_http_get, raising=False)
 
     save_path = tmp_path / "a.ico"
-    assert fg.download_artwork("https://x/icon.ico", str(save_path), register=False) is True
+    assert artwork.download_artwork("https://x/icon.ico", str(save_path), register=False) is True
 
     with open(save_path, "rb") as f:
         assert f.read() == b"abcdefgh"
@@ -3153,7 +3154,7 @@ def test_download_artwork_unencoded_length_mismatch_fails(tmp_path, monkeypatch)
     monkeypatch.setattr(sgdb, "http_get", fake_http_get, raising=False)
 
     save_path = tmp_path / "b.png"
-    assert fg.download_artwork("https://x/b.png", str(save_path), register=False) is False
+    assert artwork.download_artwork("https://x/b.png", str(save_path), register=False) is False
     assert not save_path.exists()
     assert not (tmp_path / "b.png.part").exists()
 
@@ -3168,7 +3169,7 @@ def test_download_artwork_identity_encoding_length_mismatch_fails(tmp_path, monk
     monkeypatch.setattr(sgdb, "http_get", fake_http_get, raising=False)
 
     save_path = tmp_path / "c.png"
-    assert fg.download_artwork("https://x/c.png", str(save_path), register=False) is False
+    assert artwork.download_artwork("https://x/c.png", str(save_path), register=False) is False
     assert not save_path.exists()
     assert not (tmp_path / "c.png.part").exists()
 
@@ -3184,7 +3185,7 @@ def _install_option_env(monkeypatch, installed=True, steam_running=False):
                      progress_cb=None, status_cb=None):
         rec["installed"].append((save_path, animated))
         return installed
-    monkeypatch.setattr(fg, "install_into_slot", fake_install)
+    monkeypatch.setattr(artwork, "install_into_slot", fake_install)
     monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: steam_running)
     monkeypatch.setattr(steam_files, "set_shortcut_icon",
                         lambda uid, path: rec["written"].append((uid, path)) or True)
@@ -3195,7 +3196,7 @@ def _install_option_env(monkeypatch, installed=True, steam_running=False):
 def test_install_option_animated_icon_with_steam_closed_writes_the_vdf(monkeypatch):
     """C4: an animated icon pick is placed AND written to shortcuts.vdf."""
     rec = _install_option_env(monkeypatch, steam_running=False)
-    ok, queued = fg.install_option("/g/7_icon.png", "https://x/i.png", 7,
+    ok, queued = artwork.install_option("/g/7_icon.png", "https://x/i.png", 7,
                                    is_icon=True, animated=True)
     assert (ok, queued) == (True, False)
     assert rec["installed"] == [("/g/7_icon.png", True)]
@@ -3205,7 +3206,7 @@ def test_install_option_animated_icon_with_steam_closed_writes_the_vdf(monkeypat
 
 def test_install_option_animated_icon_with_steam_running_queues(monkeypatch):
     rec = _install_option_env(monkeypatch, steam_running=True)
-    ok, queued = fg.install_option("/g/7_icon.png", "https://x/i.png", 7,
+    ok, queued = artwork.install_option("/g/7_icon.png", "https://x/i.png", 7,
                                    is_icon=True, animated=True)
     assert (ok, queued) == (True, True)
     assert rec["written"] == []
@@ -3214,13 +3215,13 @@ def test_install_option_animated_icon_with_steam_running_queues(monkeypatch):
 
 def test_install_option_failed_install_writes_no_icon(monkeypatch):
     rec = _install_option_env(monkeypatch, installed=False)
-    assert fg.install_option("/g/7_icon.png", "u", 7, is_icon=True) == (False, False)
+    assert artwork.install_option("/g/7_icon.png", "u", 7, is_icon=True) == (False, False)
     assert rec["written"] == [] and rec["queued"] == []
 
 
 def test_install_option_non_icon_slot_writes_no_icon(monkeypatch):
     rec = _install_option_env(monkeypatch)
-    assert fg.install_option("/g/7p.png", "u", 7, animated=True) == (True, False)
+    assert artwork.install_option("/g/7p.png", "u", 7, animated=True) == (True, False)
     assert rec["written"] == [] and rec["queued"] == []
 
 

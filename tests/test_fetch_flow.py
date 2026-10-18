@@ -26,6 +26,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import artwork
 import restore
 import steam_files
 import sgdb
@@ -343,7 +344,7 @@ def widget_by_text(widgets, text):
 
 
 def _fetched_art(slots):
-    art = fg.FetchedArt()
+    art = artwork.FetchedArt()
     art.slots.update(slots)
     return art
 
@@ -370,11 +371,11 @@ def fetch_env(ui, tmp_path, monkeypatch):
 
     def fake_download(sgdb_id, app_id, prefs, progress_cb=None, defer_icon=False):
         rec.downloaded.append(app_id)
-        return fg.FetchedArt()
+        return artwork.FetchedArt()
 
     # operations.run_fetch reads find_games live, so these are patched on fg.
     monkeypatch.setattr(sgdb, "search_game", fake_search)
-    monkeypatch.setattr(fg, "download_all_artwork", fake_download)
+    monkeypatch.setattr(artwork, "download_all_artwork", fake_download)
     monkeypatch.setattr(appfiles, "add_to_skip_list", lambda app_id: rec.skipped.append(app_id))
     monkeypatch.setattr(fm, "load_prefs", lambda: {})
     monkeypatch.setattr(fm, "load_api_key", lambda: "KEY")
@@ -516,7 +517,7 @@ def _slot(label, failed, applied=True):
 def test_fetch_log_reports_failed_slots(ui, fetch_env, monkeypatch, slots, expect_start, expect_in):
     def fake_download(sgdb_id, app_id, prefs, progress_cb=None, defer_icon=False):
         return _fetched_art(slots)
-    monkeypatch.setattr(fg, "download_all_artwork", fake_download)
+    monkeypatch.setattr(artwork, "download_all_artwork", fake_download)
     app = make_app(ui, [_game(1, name="G")])
 
     app._run_fetch_body()
@@ -845,7 +846,7 @@ def results_env(ui, fetch_env, monkeypatch):
                      progress_cb=None, status_cb=None):
         rec.installed.append((save_path, url, animated))
         return rec.install_ok
-    monkeypatch.setattr(fg, "install_into_slot", fake_install)
+    monkeypatch.setattr(artwork, "install_into_slot", fake_install)
     monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: rec.steam_running)
     monkeypatch.setattr(steam_files, "set_shortcut_icon",
                         lambda uid, path: rec.written.append((uid, path)) or True)

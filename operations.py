@@ -16,6 +16,7 @@ import time
 
 from appcommon import debug as _debug
 import find_games as fg
+import artwork
 import restore
 import steam_files
 import sgdb
@@ -54,7 +55,7 @@ def apply_option(save_path, url, unsigned_id, is_icon=False, animated=False,
     for the icon slot, write shortcuts.vdf now (Steam closed) or queue the write
     (Steam running). Returns (ok, queued). Never raises — a worker thread calls it."""
     try:
-        return fg.install_option(save_path, url, unsigned_id, is_icon=is_icon,
+        return artwork.install_option(save_path, url, unsigned_id, is_icon=is_icon,
                                  animated=animated, progress_cb=progress_cb,
                                  status_cb=status_cb)
     except Exception:
@@ -161,7 +162,7 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
             pct = _start + (step / total_steps) * (_end - _start)
             on_progress(pct, f"[{_i+1}/{total}] {_short} — {label}")
 
-        results = fg.download_all_artwork(sgdb_id, app_id, prefs,
+        results = artwork.download_all_artwork(sgdb_id, app_id, prefs,
                                           progress_cb=slot_progress, defer_icon=True)
         elapsed = time.monotonic() - start
         # Never say "saved" for a slot whose download failed (B5): name the failed

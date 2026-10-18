@@ -9,6 +9,7 @@ are kept (on the widget and/or a cache) so they aren't garbage-collected to blan
 
 import threading
 import find_games as fg
+import artwork
 from PIL import Image, ImageTk
 
 
@@ -242,7 +243,7 @@ def update_view(state, img_label, counter_label):
             # Worker thread: no widget calls except through after(). The download
             # goes through the HTTP seam with a status check (a non-200 writes no
             # file) and lands atomically (.part + os.replace).
-            ok = fg.download_artwork(url, cache_path, register=False)
+            ok = artwork.download_artwork(url, cache_path, register=False)
 
             def land():
                 # Tk thread: file the preview under ITS index (B9: appending in
