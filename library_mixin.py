@@ -334,6 +334,12 @@ class LibraryMixin:
             return
 
         query = self.search_var.get().strip().lower()
+        # The grid folder, listed ONCE for this render: every row's thumbnail and
+        # the "Recently fetched" sort pick from this listing (B11).
+        try:
+            grid_names = os.listdir(steam_env.GRID_FOLDER)
+        except OSError:
+            grid_names = []
         skipped = [g for g in self.games if g.get("skipped")]
         normal  = [g for g in self.games if not g.get("skipped")]
         if query:
@@ -342,8 +348,8 @@ class LibraryMixin:
 
         # Apply the chosen sort on top of the search filter so both sections stay
         # consistently ordered.
-        normal  = self._sort_games(normal)
-        skipped = self._sort_games(skipped)
+        normal  = self._sort_games(normal, grid_names)
+        skipped = self._sort_games(skipped, grid_names)
 
         # The 2px accent box wraps ONLY the game rows (not the Hidden section or the
         # empty/no-result messages). Rows go inside this box, separated by single 2px
@@ -355,7 +361,7 @@ class LibraryMixin:
             rows_box.pack(fill="x")
             self._row_parent = rows_box
             for game in normal:
-                self.build_game_row(game)
+                self.build_game_row(game, grid_names)
 
         if skipped:
             self.build_hidden_section(skipped)
@@ -368,7 +374,7 @@ class LibraryMixin:
         self._size_list_canvas()
 
 
-    def _sort_games(self, games_list):
+    def _sort_games(self, games_list, grid_names=None):
         """Return a new list sorted by the current sort key/direction.
 
         Each key computes an ASCENDING sort value; the whole list is reversed
@@ -393,7 +399,8 @@ class LibraryMixin:
                 app_id = g.get("app_id")
                 mt = 0.0
                 try:
-                    path = artwork.row_thumbnail_path(steam_env.GRID_FOLDER, app_id)
+                    path = artwork.row_thumbnail_path(steam_env.GRID_FOLDER, app_id,
+                                                      grid_names)
                     if path and os.path.exists(path):
                         mt = os.path.getmtime(path)
                 except Exception:
@@ -455,7 +462,7 @@ class LibraryMixin:
         return chip
 
 
-    def _attach_row_thumb(self, parent, game, row_bg):
+    def _attach_row_thumb(self, parent, game, row_bg, grid_names=None):
         """Pack a cover thumbnail (or a "needs art" placeholder chip) at the left of a
         game row. Reuses cached PhotoImages keyed by (app_id, path, mtime, size) so the
         every-keystroke re-render doesn't re-decode; a changed mtime (e.g. after a
@@ -463,7 +470,7 @@ class LibraryMixin:
         on the bounded thumbnail executor; assignment happens on the UI thread."""
         t = self.theme
         # steam_env.GRID_FOLDER (not the by-value import) so account switches are honored.
-        path = artwork.row_thumbnail_path(steam_env.GRID_FOLDER, game["app_id"])
+        path = artwork.row_thumbnail_path(steam_env.GRID_FOLDER, game["app_id"], grid_names)
         if path:
             try:
                 st = os.stat(path)
@@ -498,7 +505,7 @@ class LibraryMixin:
         return box
 
 
-    def build_game_row(self, game):
+    def build_game_row(self, game, grid_names=None):
         """Build a single game row with click-to-reveal action buttons."""
         t = self.theme
         # Border-collapse: a single 2px accent box wraps the whole list (set on
@@ -513,7 +520,7 @@ class LibraryMixin:
 
         # Cover thumbnail (or "needs art" placeholder chip) replaces the old inline
         # status icon — the cover-vs-placeholder now conveys has_art at a glance.
-        thumb = self._attach_row_thumb(row, game, t["bg"])
+        thumb = self._attach_row_thumb(row, game, t["bg"], grid_names)
 
         label = tk.Label(row, text=f"  {game['name'][:40]}",
                           font=(FONT_UI, 11), anchor="w", cursor="hand2",

@@ -153,7 +153,7 @@ def install_option(save_path, url, unsigned_id, is_icon=False, animated=False,
         queued = steam_files.apply_icon(unsigned_id, save_path)
     return ok, queued
 
-def row_thumbnail_path(grid_folder, app_id):
+def row_thumbnail_path(grid_folder, app_id, names=None):
     """Return the best representative art file for `app_id` to show as a list-row
     thumbnail, or None if the game has no cover art on disk.
 
@@ -165,11 +165,16 @@ def row_thumbnail_path(grid_folder, app_id):
 
     Pure / tkinter-free so it can be unit-tested headless. Returns an absolute path
     using whichever extension is present (png/jpg/webp/…); if several extensions
-    share a slot, the lexicographically-first is returned for determinism."""
-    try:
-        names = os.listdir(grid_folder)
-    except OSError:
-        return None
+    share a slot, the lexicographically-first is returned for determinism.
+
+    names: the folder's listing, when the caller already has one — a list render
+    lists the grid folder ONCE and passes it to every row (B11: one listdir per
+    row was 300+ listings per keystroke on a big library)."""
+    if names is None:
+        try:
+            names = os.listdir(grid_folder)
+        except OSError:
+            return None
 
     portrait_prefix = f"{app_id}p."
     wide_prefix = f"{app_id}."

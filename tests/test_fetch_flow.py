@@ -1159,3 +1159,50 @@ def test_app_module_imports_and_composes_every_mixin(ui):
     src = open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
     main = src[src.index('if __name__ == "__main__":'):]
     assert main.index("steam_env.init()") < main.index("tk.Tk()")
+
+
+# ---------------------------------------------------------------------------
+# T7 / B11 — one grid-folder listing per list render
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("sort_key", ["name", "fetched"])
+def test_a_list_render_lists_the_grid_folder_once(ui, fetch_env, monkeypatch, tmp_path, sort_key):
+    """B11: every row's thumbnail (and the "Recently fetched" sort) listed the
+    grid folder again — 300+ listings per debounced keystroke on a big library.
+    The render lists it once and every row picks from that listing."""
+    import steam_env
+    grid = tmp_path / "grid"
+    grid.mkdir()
+    games = [_game(1000 + i, has_art=(i % 2 == 0)) for i in range(40)]
+    for g in games[::2]:
+        (grid / f"{g['app_id']}p.png").write_bytes(b"x")
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(grid))
+    real_listdir = os.listdir
+    listings = []
+
+    def counting_listdir(path="."):
+        if os.path.abspath(str(path)) == str(grid):
+            listings.append(path)
+        return real_listdir(path)
+    monkeypatch.setattr(os, "listdir", counting_listdir)
+
+    app = make_settings_app(ui, monkeypatch)
+    app.games = [dict(g) for g in games]
+    app.list_frame = StandInWidget()
+    app.list_canvas = StandInWidget()
+    app.search_var = StandInWidget(value="")
+    app._sort_key, app._sort_desc = sort_key, False
+    app.selected_row = app.selected_btn = None
+    app._row_thumb_cache = {}
+    app.ROW_THUMB_W, app.ROW_THUMB_H = 39, 59
+    app._thumb_executor = types.SimpleNamespace(submit=lambda fn: None)
+    app.window.winfo_screenheight = lambda: 800
+    StandInWidget.created = []
+
+    ui.library_mixin.LibraryMixin._render_list(app)
+
+    assert len(listings) == 1, f"the grid folder was listed {len(listings)} times for one render"
+    # 20 games have a cover: each got a thumbnail box (a Frame holding a Label).
+    labels_with_rows = [w for w in StandInWidget.created if type(w).__name__ == "Label"
+                        and str(w.opts.get("text", "")).startswith("  Game")]
+    assert len(labels_with_rows) == 40
