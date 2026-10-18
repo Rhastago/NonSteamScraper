@@ -151,19 +151,26 @@ All state is stored in your home directory:
 | `~/.steamart_apikey` | Your SteamGridDB API key |
 | `~/.steamart_prefs` | Art style preferences |
 | `~/.steamart_theme` | Dark or light mode preference |
-| `~/.steamart_geometry` | Saved window position |
+| `~/.steamart_accent` | Accent colour |
+| `~/.steamart_account` | The Steam account you picked (when there is more than one) |
+| `~/.steamart_firstrun` | Marks that the Quick Start guide has been shown |
 | `~/.steamart_skip` | Hidden games — not found on SGDB, or ignored by you |
 | `~/.steamart_names` | Custom search name overrides per game |
 | `~/.steamart_ids` | The SteamGridDB match you picked with Search, per game |
 | `~/.steamart_managed` | Tracks which files this app created (for safe cleanup) |
+| `~/.steamart_pending_icons_<account id>` | Icons waiting for Steam to close before they are written |
 | `~/.steamart_cache/` | Thumbnail cache |
-| `~/.steamart_backup/` | Backup of previous artwork and shortcuts.vdf |
+| `~/.steamart_restore/` | The Undo restore point: copies of the art your last fetch or Re-fetch replaced |
+| `~/.steamart_backup/` | Backup of each account's shortcuts.vdf, and artwork copies left by versions before 1.5.0 |
+| `~/.steamart_geometry` | Window position saved by older versions (no longer written; Reset removes it) |
+
+Reset App to Factory Defaults removes the settings files and the cache; it keeps your artwork, `~/.steamart_managed`, `~/.steamart_restore/` and `~/.steamart_backup/`.
 
 ---
 
 ## Building from source
 
-Requires Python 3.10+ and pip.
+Requires Python 3.12 or newer and pip (the release builds use 3.12; development uses 3.13).
 
 ```bash
 git clone https://github.com/Rhastago/NonSteamScraper.git
@@ -174,36 +181,25 @@ pip install -r requirements.txt
 python3 app.py
 ```
 
+Tests: `pip install -r requirements-dev.txt`, then `python -m pytest -q`.
+
 ### Building a standalone executable
+
+Install the build tool once (`pip install -r requirements-build.txt`), then run the
+helper script for your platform. The scripts hold the exact PyInstaller flags; the
+two flag lists are kept identical.
 
 **Linux (run from a native terminal — not the VSCode integrated terminal):**
 ```bash
-pyinstaller --onefile --windowed --name NonSteamScraper \
-  --add-data "icon.png:." \
-  --add-data "assets:assets" \
-  --hidden-import PIL._tkinter_finder \
-  --hidden-import PIL.PngImagePlugin --hidden-import PIL.JpegImagePlugin \
-  --hidden-import PIL.WebPImagePlugin --hidden-import PIL.GifImagePlugin \
-  --hidden-import PIL.IcoImagePlugin --collect-all pillow app.py
+./build_linux.sh
 ```
 
-**Windows (run in Git Bash or PowerShell):**
+**Windows (run in Git Bash):**
 ```bash
-pyinstaller --onefile --windowed --name NonSteamScraper --icon icon.ico \
-  --add-data "icon.png;." \
-  --add-data "assets;assets" \
-  --hidden-import PIL._tkinter_finder \
-  --hidden-import PIL.PngImagePlugin --hidden-import PIL.JpegImagePlugin \
-  --hidden-import PIL.WebPImagePlugin --hidden-import PIL.GifImagePlugin \
-  --hidden-import PIL.IcoImagePlugin --hidden-import requests \
-  --hidden-import vdf --hidden-import psutil \
-  --hidden-import _socket --hidden-import socket \
-  --collect-all pillow --collect-all multiprocessing app.py
+./build_windows.sh
 ```
 
 The executable will be in the `dist/` folder.
-
-You can also run the helper scripts directly: `./build_linux.sh` or `./build_windows.sh`.
 
 ### Automated release builds
 

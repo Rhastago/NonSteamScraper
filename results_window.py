@@ -632,7 +632,7 @@ class ResultsWindow:
             # edges align with the ◀ and ▶ arrows above — no fixed width to fight it.
             apply_btn = app._btn(cell, "Apply this one", lambda: None, primary=True)
             apply_btn.grid(row=2, column=0, columnspan=3, sticky="ew")
-            # Initial button label + border via the single source of truth (#5).
+            # Initial button label + border via the single source of truth.
             self._sync_apply_ui(state, apply_btn)
 
             # An icon that arrived already-queued from the fetch (above) must be tracked
@@ -648,7 +648,7 @@ class ResultsWindow:
                 w.config(cursor="hand2")
 
             def make_callbacks(s, il, cl, ab):
-                # prev/nxt share one body (#5): bounds-check, move ±1, refresh the view,
+                # prev/nxt share one body: bounds-check, move ±1, refresh the view,
                 # then re-sync the button label + border through the single helper so the
                 # border can never be forgotten or drift out of step with the label.
                 def step(delta):

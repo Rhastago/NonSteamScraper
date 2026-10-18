@@ -164,7 +164,7 @@ def get_steam_user_personas():
     return personas
 
 # ---------------------------------------------------------------------------
-# is_steam_running TTL cache (Task #10)
+# is_steam_running TTL cache
 # Invariant: _steam_cache holds (timestamp, bool_result).
 #   - If the cached result is younger than _STEAM_RUNNING_TTL seconds, return
 #     it immediately without iterating processes (cheap path for UI events).

@@ -165,7 +165,7 @@ class UIMixin:
             # dir, which the exiting process then deletes — breaking compiled imports
             # like PIL._imaging on restart. Strip them so the new process re-extracts.
             # relaunch_env also undoes the bootloader's library-path injection, so the
-            # child presents the fresh-launch environment (SPEC.md S0/S1).
+            # child presents the fresh-launch environment.
             env = relaunch_env(os.environ)
             os.execve(sys.executable, [sys.executable], env)
         else:

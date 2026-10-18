@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build a self-contained Windows build bundle for manual testing on a Windows box.
 # Run this on the Deck; it produces a .zip in dist/ containing the current source,
-# pre-fetched Windows wheels (offline install), requirements.txt (online fallback),
+# pre-fetched Windows wheels (offline install), requirements*.txt (online fallback),
 # and BUILD.txt with the exact Git Bash commands.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -22,13 +22,13 @@ echo "Staging source (working tree)…"
 # changes are included). Every *.py at the repo root is an app module: a fixed
 # list once missed a new module and broke only the Windows build.
 for item in *.py \
-            requirements.txt icon.png icon.ico \
+            requirements.txt requirements-build.txt icon.png icon.ico \
             build_windows.sh assets README.md CHANGELOG.md LICENSE; do
     [ -e "$item" ] && cp -r "$item" "$APP/"
 done
 
 echo "Fetching Windows wheels (cp312)…"
-"$PY" -m pip download -r requirements.txt --platform win_amd64 \
+"$PY" -m pip download -r requirements-build.txt --platform win_amd64 \
     --python-version 3.12 --only-binary=:all: -d "$APP/wheels" >/dev/null
 
 cat > "$APP/BUILD.txt" <<'TXT'
@@ -42,9 +42,10 @@ NonSteamScraper — Windows test build (run these in Git Bash)
        python -m venv venv
        source venv/Scripts/activate
 
-3. Install dependencies — tries the bundled offline wheels first, falls back online:
-       pip install --no-index --find-links wheels -r requirements.txt \
-         || pip install -r requirements.txt
+3. Install dependencies (the app's and PyInstaller) — tries the bundled offline
+   wheels first, falls back online:
+       pip install --no-index --find-links wheels -r requirements-build.txt \
+         || pip install -r requirements-build.txt
 
    (The offline wheels target Python 3.12. On a different Python version the
     offline step is skipped automatically and pip installs from the internet.)

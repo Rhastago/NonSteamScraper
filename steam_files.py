@@ -82,7 +82,7 @@ def get_non_steam_games():
     shortcuts = data.get("shortcuts", {})
     skip_list = appfiles.load_skip_list(); seen = set(); games = []
 
-    # --- Task #3: single grid-folder scan with boundary-correct matching -------
+    # --- Single grid-folder scan with boundary-correct matching ---------------
     # Build a set of uids that have at least one art file by listing GRID_FOLDER
     # exactly once (O(files)) instead of once per game (O(games × files)).
     #

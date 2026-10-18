@@ -141,7 +141,7 @@ def _display_image_on_label(lbl, path, on_animated=None, cache=None, cache_key=N
     token has been replaced by the time it finishes (user moved to a different
     image), the result is silently discarded.
 
-    cache/cache_key (#6): when both are given, a successfully-built STATIC PhotoImage is
+    cache/cache_key: when both are given, a successfully-built STATIC PhotoImage is
     stored as cache[cache_key] so a later revisit can assign it synchronously and skip
     the off-thread decode. Animated images are never cached.
     """
@@ -174,7 +174,7 @@ def _display_image_on_label(lbl, path, on_animated=None, cache=None, cache_key=N
         photo = ImageTk.PhotoImage(image)
         lbl.config(image=photo, text="", width=photo.width(), height=photo.height())
         lbl.image = photo  # keep a reference so GC doesn't collect it
-        # Static-only cache for the results cycle (#6): store the built
+        # Static-only cache for the results cycle: store the built
         # PhotoImage so a revisit to this index assigns it synchronously.
         if cache is not None and cache_key is not None:
             cache[cache_key] = photo
@@ -252,7 +252,7 @@ def update_view(state, img_label, counter_label):
             _update_badge(_bl, _meta)
 
     if index in state["paths"]:
-        # Per-index decoded-image cache (#6): revisiting an index via ◀/▶ should be
+        # Per-index decoded-image cache: revisiting an index via ◀/▶ should be
         # instant instead of re-opening + re-decoding the file off-thread every time
         # (the row-thumb path already caches; the results cycle didn't). We cache the
         # built PhotoImage keyed by index for STATIC images ONLY — on a cache hit we

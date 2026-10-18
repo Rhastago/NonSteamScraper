@@ -66,7 +66,7 @@ def _files_matching_id(fnames, unsigned_id):
 
 def snapshot_for_restore(unsigned_id, existing_files=None, pending=False):
     """Record a restore point for one game before its art is about to change.
-    The rules are ORDERED and the order is the correctness (SPEC.md S3):
+    The rules are ORDERED and the order is the correctness:
       1. Account guard first: if the manifest's grid_folder is set and differs
          from the live GRID_FOLDER (account switch), wipe the whole store and
          start empty — a restore point describes exactly one account.

@@ -257,3 +257,34 @@ def test_wiring_results_window_does_no_file_work_itself():
         "results_window.py must not clear slots itself — install_into_slot does")
     opens = [c for c in _calls_named(tree, "open") if isinstance(c.func, ast.Name)]
     assert not opens, "results_window.py must not write files itself"
+
+
+def _pyinstaller_flags(script):
+    """The flags of the pyinstaller command in a build script, one per item."""
+    with open(os.path.join(ROOT, script), encoding="utf-8") as f:
+        text = f.read()
+    cmd = text[text.index("\npyinstaller ") + 1:]
+    cmd = cmd[:cmd.index("app.py")].replace("\\\n", " ")
+    return cmd.split()
+
+
+def test_build_scripts_use_the_same_pyinstaller_flags():
+    """H6: the Linux and Windows scripts drifted apart (different hidden imports).
+    They must differ only in the --add-data separator and Windows' --icon."""
+    linux = _pyinstaller_flags("build_linux.sh")
+    windows = [f.replace(";", ":") for f in _pyinstaller_flags("build_windows.sh")]
+    i = windows.index("--icon")
+    del windows[i:i + 2]
+    assert linux == windows
+
+
+def test_find_games_is_gone_and_nothing_imports_it():
+    """H4/T-A5: the god module is split; its leftover CLI (it wrote icons while
+    Steam could be running and bypassed the restore point) is deleted."""
+    assert not os.path.exists(os.path.join(ROOT, "find_games.py"))
+    for name in os.listdir(ROOT):
+        if name.endswith(".py"):
+            tree = _module(name)
+            mods = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+            mods |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+            assert "find_games" not in mods, f"{name} still imports find_games"
