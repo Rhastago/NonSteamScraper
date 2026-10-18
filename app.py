@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import restore
 import sgdb
 import steam_env
+import appfiles
 from appfiles import clean_old_cache, prune_managed_files
 
 from theming import resolve_theme, load_theme, load_accent
@@ -135,6 +136,14 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
 
 
 if __name__ == "__main__":
+    # One copy at a time (W8): a second copy would share the icon queue and
+    # Steam's shortcut list with this one.
+    if not appfiles.acquire_instance_lock():
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("Already Running", "NonSteamScraper is already running.",
+                            parent=root)
+        sys.exit(0)
     # Find Steam and the active account before anything reads them.
     steam_env.init()
     window = tk.Tk()

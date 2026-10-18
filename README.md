@@ -162,6 +162,7 @@ All state is stored in your home directory:
 | `~/.steamart_cache/` | Thumbnail cache |
 | `~/.steamart_restore/` | The Undo restore point: copies of the art your last fetch or Re-fetch replaced |
 | `~/.steamart_backup/` | Backup of each account's shortcuts.vdf, and artwork copies left by versions before 1.5.0 |
+| `~/.steamart_lock` | Held while the app is open, so a second copy cannot start |
 | `~/.steamart_geometry` | Window position saved by older versions (no longer written; Reset removes it) |
 
 Reset App to Factory Defaults removes the settings files and the cache; it keeps your artwork, `~/.steamart_managed`, `~/.steamart_restore/` and `~/.steamart_backup/`.

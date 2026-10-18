@@ -1207,7 +1207,7 @@ def test_app_module_imports_and_composes_every_mixin(ui):
         "UIMixin", "GeometryMixin", "LibraryMixin", "FetchMixin"]
     src = open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
     main = src[src.index('if __name__ == "__main__":'):]
-    assert main.index("steam_env.init()") < main.index("tk.Tk()")
+    assert main.index("steam_env.init()") < main.index("window = tk.Tk()")
 
 
 # ---------------------------------------------------------------------------

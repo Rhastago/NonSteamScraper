@@ -14,6 +14,7 @@ import os
 import secrets
 import shutil
 import threading
+import time
 from datetime import datetime, timedelta
 
 from appcommon import debug as _debug
@@ -50,6 +51,61 @@ RESTORE_FOLDER = os.path.expanduser("~/.steamart_restore")
 # Instead the app polls and flushes these pending icons the moment Steam is closed.
 # One file per Steam account: steam_files adds the "_<account id>" suffix.
 PENDING_ICONS_FILE = os.path.expanduser("~/.steamart_pending_icons")
+# Held (OS file lock) by the one running copy of the app; NOT in full_reset's list
+# — deleting it while held would let a second copy start.
+LOCK_FILE      = os.path.expanduser("~/.steamart_lock")
+
+
+# --- One copy at a time -----------------------------------------------------------
+# Two open copies share the icon queue and Steam's shortcut list, and the
+# shortcuts.vdf lock only makes writes take turns INSIDE one process, so two
+# copies writing at the same instant could lose a change (operator ruling W8).
+_instance_lock = None   # the open lock file, kept for the life of the process
+
+def _try_lock(f):
+    if os.name == "nt":
+        import msvcrt
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+def acquire_instance_lock(wait=3.0):
+    """Take the one-copy lock. Returns True when this process now holds it, False
+    when another copy does. Retries for up to `wait` seconds: a theme/accent
+    relaunch replaces the process, and on Windows the old one can still be exiting
+    when the new one starts. The OS releases the lock when the process ends, even
+    after a crash, so it can never get stuck. Never raises."""
+    global _instance_lock
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            f = open(LOCK_FILE, "a+")
+        except OSError:
+            _debug("acquire_instance_lock open")
+            return True   # no lock file possible (e.g. unwritable HOME): never block the app
+        try:
+            _try_lock(f)
+        except OSError:
+            # Held by another copy (BlockingIOError on Linux, PermissionError on Windows).
+            f.close()
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.2)
+            continue
+        except Exception:
+            _debug("acquire_instance_lock")
+            f.close()
+            return True   # an unexpected failure must never stop the app
+        _instance_lock = f
+        return True
+
+def release_instance_lock():
+    """Let go of the one-copy lock (tests; the OS does it at exit)."""
+    global _instance_lock
+    if _instance_lock is not None:
+        _instance_lock.close()
+        _instance_lock = None
 
 
 def write_text_atomic(path, text):

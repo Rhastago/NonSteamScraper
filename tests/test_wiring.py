@@ -288,3 +288,14 @@ def test_find_games_is_gone_and_nothing_imports_it():
             mods = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
             mods |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
             assert "find_games" not in mods, f"{name} still imports find_games"
+
+
+def test_app_takes_the_one_copy_lock_before_anything_else():
+    """W8: app.py's __main__ asks for the lock first and exits when another copy
+    holds it — before steam_env.init() and before the main window."""
+    with open(os.path.join(ROOT, "app.py"), encoding="utf-8") as f:
+        src = f.read()
+    main = src[src.index('if __name__ == "__main__":'):]
+    lock = main.index("appfiles.acquire_instance_lock()")
+    assert lock < main.index("steam_env.init()") < main.index("window = tk.Tk()")
+    assert "sys.exit(0)" in main[lock:main.index("steam_env.init()")]

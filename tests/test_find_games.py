@@ -3445,3 +3445,76 @@ def test_write_text_atomic_new_file_gets_the_umask_mode_not_owner_only(tmp_path)
     appfiles.write_text_atomic(str(p), "x")
     assert (os.stat(p).st_mode & 0o777) == (0o666 & ~mask)
     assert os.listdir(tmp_path) == ["new"]
+
+
+# ---------------------------------------------------------------------------
+# One copy at a time — appfiles.acquire_instance_lock (ruling W8)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def lock_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(appfiles, "LOCK_FILE", str(tmp_path / "lock"))
+    yield tmp_path / "lock"
+    appfiles.release_instance_lock()
+
+
+_HOLDER = r"""
+import sys, time
+sys.path.insert(0, sys.argv[1])
+import appfiles
+appfiles.LOCK_FILE = sys.argv[2]
+print("held" if appfiles.acquire_instance_lock(wait=0) else "refused", flush=True)
+time.sleep(float(sys.argv[3]))
+"""
+
+
+def _holder(lock, seconds):
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    p = subprocess.Popen([sys.executable, "-c", _HOLDER, root, str(lock), str(seconds)],
+                         stdout=subprocess.PIPE, text=True)
+    return p, p.stdout.readline().strip()
+
+
+def test_a_second_copy_is_refused_while_the_first_holds_the_lock(lock_file):
+    p, first = _holder(lock_file, 30)
+    try:
+        assert first == "held"
+        assert appfiles.acquire_instance_lock(wait=0) is False, "a second copy must be refused"
+    finally:
+        p.kill(); p.wait()
+
+
+def test_the_lock_is_released_when_the_holder_crashes(lock_file):
+    import signal
+    p, first = _holder(lock_file, 30)
+    assert first == "held"
+    p.send_signal(signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM)
+    p.wait()
+    assert appfiles.acquire_instance_lock(wait=0) is True, "a crashed copy must not block forever"
+
+
+def test_a_relaunch_waits_for_the_old_copy_to_exit(lock_file):
+    """Theme/accent relaunch: the new process may start while the old one is still
+    exiting (Windows execve is spawn + exit). It retries instead of giving up."""
+    p, first = _holder(lock_file, 0.8)
+    assert first == "held"
+    try:
+        assert appfiles.acquire_instance_lock(wait=5) is True
+    finally:
+        p.wait()
+
+
+def test_an_unusable_lock_file_never_blocks_the_app(tmp_path, monkeypatch):
+    monkeypatch.setattr(appfiles, "LOCK_FILE", str(tmp_path / "missing-dir" / "lock"))
+    assert appfiles.acquire_instance_lock(wait=0) is True
+
+
+def test_full_reset_leaves_the_lock_file_alone(lock_file, tmp_path, monkeypatch):
+    assert appfiles.acquire_instance_lock(wait=0)
+    for name in ("APIKEY_FILE", "PREFS_FILE", "SKIP_FILE", "NAMES_FILE", "IDS_FILE",
+                 "ACCOUNT_FILE", "FIRSTRUN_FILE", "THEME_FILE", "ACCENT_FILE", "GEOMETRY_FILE",
+                 "PENDING_ICONS_FILE", "CACHE_FOLDER"):
+        monkeypatch.setattr(appfiles, name, str(tmp_path / name))
+    appfiles.full_reset()
+    assert lock_file.exists(), "deleting the held lock file would let a second copy start"
