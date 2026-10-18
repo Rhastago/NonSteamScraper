@@ -21,6 +21,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import steam_files
 import sgdb
 import steam_env
 import appfiles
@@ -60,9 +61,9 @@ def run_env(monkeypatch, tmp_path):
     monkeypatch.setattr(fg, "download_all_artwork", download)
     monkeypatch.setattr(appfiles, "add_to_skip_list", lambda uid: rec.calls.append(("skip", uid)))
     monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: rec.steam_running)
-    monkeypatch.setattr(fg, "set_shortcut_icons",
+    monkeypatch.setattr(steam_files, "set_shortcut_icons",
                         lambda m: rec.calls.append(("write_icons", dict(m))) or len(m))
-    monkeypatch.setattr(fg, "save_pending_icons",
+    monkeypatch.setattr(steam_files, "save_pending_icons",
                         lambda m: rec.calls.append(("queue_icons", dict(m))))
     rec.ids_file = tmp_path / "ids"
     monkeypatch.setattr(appfiles, "IDS_FILE", str(rec.ids_file))

@@ -13,6 +13,7 @@ from tkinter import messagebox
 from appcommon import DEBUG
 from theming import PAD_XS, PAD_L
 import find_games as fg
+import steam_files
 import steam_env
 import operations
 from steam_env import is_steam_running, restart_steam
@@ -96,8 +97,8 @@ class FetchMixin:
         view = self._results_view
         if view is not None and view.is_applying():
             return
-        if fg.has_pending_icons() and not steam_env.is_steam_running():
-            n = fg.apply_pending_icons()
+        if steam_files.has_pending_icons() and not steam_env.is_steam_running():
+            n = steam_files.apply_pending_icons()
             if n > 0:
                 self.log(f"Applied {n} queued icon(s) — restart Steam to see them.",
                          icon="applied")

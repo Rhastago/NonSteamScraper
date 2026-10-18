@@ -13,7 +13,7 @@ import find_games as fg
 import steam_env
 import operations
 import appfiles
-from find_games import get_non_steam_games
+from steam_files import get_non_steam_games
 from appfiles import load_api_key, add_to_skip_list
 
 class LibraryMixin:

@@ -17,6 +17,7 @@ from tkinter import ttk
 from appcommon import open_url
 from theming import FONT_UI
 import find_games as fg
+import steam_files
 import steam_env
 import operations
 from imaging import _update_badge, _display_image_on_label, update_view
@@ -138,7 +139,7 @@ class ResultsWindow:
         # One-time snapshot of the pending-icon queue so each game's build can tell
         # whether its auto-applied icon was actually written or merely QUEUED (Steam
         # was open during the fetch). Read once here, not per-game, to avoid N file reads.
-        self.build_pending_icons = fg.load_pending_icons()
+        self.build_pending_icons = steam_files.load_pending_icons()
 
         for game_result in fetch_results:
             self.build_game_result_section(scrollable_frame, game_result)
@@ -196,7 +197,7 @@ class ResultsWindow:
         # file when something is actually pending (this runs every ~3s poll tick). The
         # count must stay correct when pending — it feeds the state key and the "N icon(s)…"
         # label — so we keep the full parse on the has-pending path.
-        pending_count = len(fg.load_pending_icons()) if fg.has_pending_icons() else 0
+        pending_count = len(steam_files.load_pending_icons()) if steam_files.has_pending_icons() else 0
         pending_active = pending_count > 0
         steam_running_now = steam_env.is_steam_running()
 
@@ -279,7 +280,7 @@ class ResultsWindow:
         sleep can't actually confirm Steam closed — so we POLL is_steam_running(force=True)
         instead (force= bypasses the 2.5s cache that would otherwise report a stale True)."""
         app = self.app
-        pending_count = len(fg.load_pending_icons())
+        pending_count = len(steam_files.load_pending_icons())
         warn_lbl = tk.Label(action_frame,
                   text=f" {pending_count} icon(s) need Steam closed to apply.",
                   font=(FONT_UI, 9, "bold"), fg=t["warn"], bg=t["bg"])
@@ -383,7 +384,7 @@ class ResultsWindow:
                      icon="applied")
             # Sync the cached render-state to what we just drew so the poll treats this
             # terminal message as current and won't rebuild over it until state changes.
-            self.steam_state = (steam_env.is_steam_running(), len(fg.load_pending_icons()))
+            self.steam_state = (steam_env.is_steam_running(), len(steam_files.load_pending_icons()))
 
         def on_fail(msg):
             # Flow ended (failed) — clear the guard so the poll resumes refreshing.
@@ -398,7 +399,7 @@ class ResultsWindow:
                     pass
             # Pin the cached state to the live values so the poll preserves this error
             # message until something actually changes (e.g. the user closes Steam).
-            self.steam_state = (steam_env.is_steam_running(), len(fg.load_pending_icons()))
+            self.steam_state = (steam_env.is_steam_running(), len(steam_files.load_pending_icons()))
 
         def worker():
             # Runs OFF the UI thread. All widget writes go back via results_window.after.
@@ -416,10 +417,10 @@ class ResultsWindow:
                     on_fail("Couldn't close Steam — close it manually and try again."))
                 return
             results_window.after(0, lambda: set_loader("Applying icons"))
-            n = fg.apply_pending_icons()
+            n = steam_files.apply_pending_icons()
             # The silent 4s poll may have won the race and applied them already, so
             # treat an empty queue as success even if our own call wrote 0.
-            if n > 0 or not fg.has_pending_icons():
+            if n > 0 or not steam_files.has_pending_icons():
                 results_window.after(0, lambda: on_success(n))
             else:
                 results_window.after(0, lambda:

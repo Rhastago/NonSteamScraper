@@ -25,6 +25,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import steam_files
 import sgdb
 import appfiles  # noqa: E402
 import steam_env  # noqa: E402
@@ -106,7 +107,7 @@ def test_an_icon_write_after_the_switch_lands_in_the_new_account(two_accounts):
     _, vdf_b = _paths(two_accounts, "222")
     steam_env.set_active_user("222")
 
-    assert fg.set_shortcut_icon(APP_ID, "/icons/b.png") is True
+    assert steam_files.set_shortcut_icon(APP_ID, "/icons/b.png") is True
 
     assert _icon_in(vdf_b) == "/icons/b.png"
     assert _icon_in(vdf_a) == "", "the old account's shortcuts.vdf must be untouched"
