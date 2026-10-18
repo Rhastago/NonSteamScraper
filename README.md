@@ -212,7 +212,7 @@ binaries in a clean environment and attaches them to the matching GitHub Release
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.5.2** — a safety release: Search → Select no longer deletes another game's art, a rejected API key no longer hides your library, a failed download keeps your old art, nothing that changes your files can run during a fetch, and each Steam account gets its own `shortcuts.vdf` backup.
+See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.5.2** — a safety release: Search → Select no longer deletes another game's art and fetches the exact game you picked, a rejected API key no longer hides your library, a failed download keeps your old art, nothing that changes your files can run during a fetch, and each Steam account gets its own `shortcuts.vdf` backup.
 
 ---
 
