@@ -6,19 +6,15 @@ Each is a function taking the SteamArtApp instance as `app`; it reaches the shar
 themed-widget helpers, modal stack, and logging through `app`. SteamArtApp keeps a
 thin wrapper method per function so existing `self.open_*()` call sites are unchanged."""
 
-import os
-import glob
 import threading
 import tkinter as tk
 from tkinter import messagebox
 
 from appcommon import VERSION, open_url
 from theming import FONT_UI
-import find_games as fg
-from find_games import (
-    save_name_override, search_sgdb_autocomplete,
-    load_prefs, save_prefs, DEFAULT_PREFS,
-)
+import operations
+from sgdb import search_sgdb_autocomplete
+from appfiles import load_prefs, save_prefs, DEFAULT_PREFS
 
 
 # --- Flash-free popup reveal ------------------------------------------------
@@ -175,6 +171,10 @@ def open_sgdb_search(app, game):
                            bg=t["bg"], fg=t["muted"])
     status_lbl.pack(padx=12, anchor="w")
 
+    # Select / Cancel pinned to the bottom edge FIRST, so a long result list can
+    # never push them out of the window (10 results did); the list scrolls above.
+    btn_bar = tk.Frame(dlg, bg=t["bg"])
+    btn_bar.pack(side="bottom", fill="x", padx=12, pady=(4, 10))
     list_frame = tk.Frame(dlg, bg=t["bg"])
     list_frame.pack(fill="both", expand=True, padx=12, pady=4)
     scrollbar = tk.Scrollbar(list_frame)
@@ -189,8 +189,6 @@ def open_sgdb_search(app, game):
     listbox.pack(side="left", fill="both", expand=True)
     scrollbar.config(command=listbox.yview)
 
-    btn_bar = tk.Frame(dlg, bg=t["bg"])
-    btn_bar.pack(fill="x", padx=12, pady=(4, 10))
 
     results = []
     _after_id = [None]
@@ -200,19 +198,20 @@ def open_sgdb_search(app, game):
         if not sel:
             return
         chosen = results[sel[0]]
-        save_name_override(game["app_id"], chosen["name"])
-        app._remove_from_skip(game["app_id"])
-        # fg.GRID_FOLDER (not the by-value import) so account switches are honored.
-        for f in glob.glob(os.path.join(fg.GRID_FOLDER, f"{game['app_id']}*")):
-            try:
-                os.remove(f)
-            except Exception:
-                pass
+        # A running fetch owns the grid folder (B2); say so here, in front.
+        if app._refuse_if_busy():
+            status_lbl.config(text=app.BUSY_MESSAGE)
+            return
+        # Saves the chosen SGDB id and name, then the same unskip + snapshot +
+        # exact-id delete as Re-fetch: Undo can restore the art, and a
+        # neighbouring game (12345 vs 123456) is never touched.
+        operations.rematch(game["app_id"], chosen["name"], chosen["id"])
         app.log(f"Matched '{game['name']}' → '{chosen['name']}' (SGDB #{chosen['id']})",
                  icon="search")
         _close_dlg()
         app.load_games()
-        app.start_fetch()
+        # Fetch only the game the user matched, not every game missing art (Q1).
+        app.start_fetch(games=[game])
 
     def _do_search(query):
         status_lbl.config(text="Searching…")
@@ -276,8 +275,8 @@ def open_sgdb_search(app, game):
     dlg.bind("<Escape>", _close_dlg)
     dlg.protocol("WM_DELETE_WINDOW", _close_dlg)
 
-    app._btn(btn_bar, "Select", _apply, primary=True).pack(side="right")
-    app._btn(btn_bar, "Cancel", _close_dlg).pack(side="right", padx=(0, 6))
+    app._btn(btn_bar, "Select", _apply, primary=True).pack(side="left")
+    app._btn(btn_bar, "Cancel", _close_dlg).pack(side="left", padx=(6, 0))
 
     # Centre over parent (size + position in one call), then reveal flash-free.
     app.window.update_idletasks()

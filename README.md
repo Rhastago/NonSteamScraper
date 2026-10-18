@@ -138,7 +138,7 @@ Steam reads non-Steam game icons from `shortcuts.vdf`, not from the grid folder.
 
 **Close Steam before fetching or applying icons.** If Steam is running when the icon is applied, Steam may overwrite `shortcuts.vdf` on exit and lose the change.
 
-A backup of your original `shortcuts.vdf` is saved to `~/.steamart_backup/shortcuts.vdf.bak` before the first write.
+A backup of each Steam account's `shortcuts.vdf` is saved to `~/.steamart_backup/shortcuts.vdf.<account id>.bak` before the app first writes to it. (Versions before 1.5.2 kept a single `shortcuts.vdf.bak` for the first account only; it is left in place.)
 
 ---
 
@@ -151,18 +151,27 @@ All state is stored in your home directory:
 | `~/.steamart_apikey` | Your SteamGridDB API key |
 | `~/.steamart_prefs` | Art style preferences |
 | `~/.steamart_theme` | Dark or light mode preference |
-| `~/.steamart_geometry` | Saved window position |
+| `~/.steamart_accent` | Accent colour |
+| `~/.steamart_account` | The Steam account you picked (when there is more than one) |
+| `~/.steamart_firstrun` | Marks that the Quick Start guide has been shown |
 | `~/.steamart_skip` | Hidden games — not found on SGDB, or ignored by you |
 | `~/.steamart_names` | Custom search name overrides per game |
+| `~/.steamart_ids` | The SteamGridDB match you picked with Search, per game |
 | `~/.steamart_managed` | Tracks which files this app created (for safe cleanup) |
+| `~/.steamart_pending_icons_<account id>` | Icons waiting for Steam to close before they are written |
 | `~/.steamart_cache/` | Thumbnail cache |
-| `~/.steamart_backup/` | Backup of previous artwork and shortcuts.vdf |
+| `~/.steamart_restore/` | The Undo restore point: copies of the art your last fetch or Re-fetch replaced |
+| `~/.steamart_backup/` | Backup of each account's shortcuts.vdf, and artwork copies left by versions before 1.5.0 |
+| `~/.steamart_lock` | Held while the app is open, so a second copy cannot start |
+| `~/.steamart_geometry` | Window position saved by older versions (no longer written; Reset removes it) |
+
+Reset App to Factory Defaults removes the settings files and the cache; it keeps your artwork, `~/.steamart_managed`, `~/.steamart_restore/` and `~/.steamart_backup/`.
 
 ---
 
 ## Building from source
 
-Requires Python 3.10+ and pip.
+Requires Python 3.12 or newer and pip (the release builds use 3.12; development uses 3.13).
 
 ```bash
 git clone https://github.com/Rhastago/NonSteamScraper.git
@@ -173,36 +182,25 @@ pip install -r requirements.txt
 python3 app.py
 ```
 
+Tests: `pip install -r requirements-dev.txt`, then `python -m pytest -q`.
+
 ### Building a standalone executable
+
+Install the build tool once (`pip install -r requirements-build.txt`), then run the
+helper script for your platform. The scripts hold the exact PyInstaller flags; the
+two flag lists are kept identical.
 
 **Linux (run from a native terminal — not the VSCode integrated terminal):**
 ```bash
-pyinstaller --onefile --windowed --name NonSteamScraper \
-  --add-data "icon.png:." \
-  --add-data "assets:assets" \
-  --hidden-import PIL._tkinter_finder \
-  --hidden-import PIL.PngImagePlugin --hidden-import PIL.JpegImagePlugin \
-  --hidden-import PIL.WebPImagePlugin --hidden-import PIL.GifImagePlugin \
-  --hidden-import PIL.IcoImagePlugin --collect-all pillow app.py
+./build_linux.sh
 ```
 
-**Windows (run in Git Bash or PowerShell):**
+**Windows (run in Git Bash):**
 ```bash
-pyinstaller --onefile --windowed --name NonSteamScraper --icon icon.ico \
-  --add-data "icon.png;." \
-  --add-data "assets;assets" \
-  --hidden-import PIL._tkinter_finder \
-  --hidden-import PIL.PngImagePlugin --hidden-import PIL.JpegImagePlugin \
-  --hidden-import PIL.WebPImagePlugin --hidden-import PIL.GifImagePlugin \
-  --hidden-import PIL.IcoImagePlugin --hidden-import requests \
-  --hidden-import vdf --hidden-import psutil \
-  --hidden-import _socket --hidden-import socket \
-  --collect-all pillow --collect-all multiprocessing app.py
+./build_windows.sh
 ```
 
 The executable will be in the `dist/` folder.
-
-You can also run the helper scripts directly: `./build_linux.sh` or `./build_windows.sh`.
 
 ### Automated release builds
 
@@ -215,7 +213,7 @@ binaries in a clean environment and attaches them to the matching GitHub Release
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.5.1** — official Steam store artwork is now the first, applied option whenever SteamGridDB links the game to Steam (tagged STEAM); a new **Ignore** button hides a game from fetching, and **Restore** (formerly Reset Skip) brings any hidden game back.
+See [CHANGELOG.md](CHANGELOG.md) for release history. Latest: **v1.5.2** — a safety release: Search → Select no longer deletes another game's art and fetches the exact game you picked, a rejected API key no longer hides your library, a failed download keeps your old art, nothing that changes your files can run during a fetch, and each Steam account gets its own `shortcuts.vdf` backup.
 
 ---
 

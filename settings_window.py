@@ -10,11 +10,14 @@ from tkinter import messagebox
 
 from appcommon import VERSION, open_url
 from theming import ACCENTS, PAD_XS, PAD_S, FONT_UI, FONT_MONO
-import find_games as fg
-from find_games import (
-    load_api_key, save_api_key, verify_api_key, get_cache_size, clear_cache,
-    clear_managed_artwork, full_reset, is_steam_running, get_all_steam_users,
-)
+import updates
+import restore
+import steam_files
+import steam_env
+from artwork import clear_managed_artwork
+from sgdb import verify_api_key
+from steam_env import is_steam_running, get_all_steam_users
+from appfiles import load_api_key, save_api_key, get_cache_size, clear_cache, full_reset
 
 
 def open_settings(app):
@@ -34,8 +37,31 @@ def open_settings(app):
 
     tk.Label(settings, text="Settings", font=(FONT_UI, 16, "bold"),
               bg=t["bg"], fg=t["fg"]).pack(pady=10)
+    # While a fetch runs, every control that writes to disk is built disabled
+    # (Q3, and Clear Cache by S1); the API key, update check, cache size and Steam
+    # status still work. Settings is modal, so a fetch can end while it is open but
+    # cannot start: the fetch end releases them through release_write_controls
+    # below (S2). Each command also refuses on its own (_refuse_if_busy).
+    busy = app._fetch_busy
+    busy_note = None
+    if busy:
+        busy_note = tk.Label(settings, text="Fetch in progress — options that change "
+                                            "your files are unavailable until it finishes.",
+                             font=(FONT_UI, 9), fg=t["warn"], bg=t["bg"],
+                             wraplength=420)
+        busy_note.pack(padx=12, pady=(0, 6))
+    busy_state = "disabled" if busy else "normal"
+    write_controls = []
+
+    def lock(widget):
+        """A control that writes to disk: disabled while a fetch runs, and listed
+        so the fetch end can release it."""
+        widget.config(state=busy_state)
+        write_controls.append(widget)
+        return widget
 
     def close_settings():
+        app._settings_on_fetch_end = None
         app._close_modal(settings)
         settings.destroy()
 
@@ -89,11 +115,13 @@ def open_settings(app):
     app._iconify(eye_btn, "eye", app.ICON_BTN)
     eye_btn.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
 
-    # Status line shows whether a verified key is on file
+    # Status line shows whether a key is on file. It does NOT claim the key is
+    # valid: a key can be revoked on the SGDB site after it was saved, and every
+    # fetch checks it first (B17).
     key_status = tk.Label(api_frame, text="", font=(FONT_UI, 9), bg=t["bg"], anchor="w")
     key_status.pack(fill="x", pady=2)
     if load_api_key():
-        key_status.config(text="✓ A valid API Key is saved", fg=t["ok"])
+        key_status.config(text="✓ A key is saved", fg=t["ok"])
 
     def do_save_key():
         candidate = api_var.get().strip()
@@ -134,8 +162,7 @@ def open_settings(app):
     tk.Label(mode_row, text=f"Current: {app.theme_name.capitalize()} mode",
               font=(FONT_UI, 10), bg=t["bg"], fg=t["fg"]).pack(side="left")
     toggle_text = "Switch to Dark Mode" if app.theme_name == "light" else "Switch to Light Mode"
-    app._btn(mode_row, toggle_text, app.toggle_theme,
-              font=(FONT_UI, 9)).pack(side="right")
+    lock(app._btn(mode_row, toggle_text, app.toggle_theme, font=(FONT_UI, 9))).pack(side="right")
 
     accent_row = tk.Frame(appearance_frame, bg=t["bg"])
     accent_row.pack(fill="x", pady=(PAD_S, 0))
@@ -155,7 +182,7 @@ def open_settings(app):
             highlightthickness=2 if selected else 0,
             cursor="hand2",
             command=lambda n=name: app.set_accent(n))
-        sw.pack(side="left", padx=PAD_XS)
+        lock(sw).pack(side="left", padx=PAD_XS)
         app._add_tooltip(sw, acc["label"] + (" (current)" if selected else ""))
 
     # Cache
@@ -167,26 +194,34 @@ def open_settings(app):
     cache_label.pack(side="left")
 
     def do_clear_cache():
-        clear_cache()
-        cache_label.config(text="Cache size: 0.0 MB")
-        app.log("Cache cleared.", icon="trash")
+        # S1: the previews a running fetch just downloaded live in the cache.
+        if app._refuse_if_busy():
+            return
+        failed = clear_cache()
+        cache_label.config(text=f"Cache size: {get_cache_size()} MB")
+        if failed:
+            app.log(f"Cache cleared — {failed} file(s) could not be removed.", icon="warning")
+        else:
+            app.log("Cache cleared.", icon="trash")
 
-    app._btn(cache_frame, "Clear Cache", do_clear_cache, font=(FONT_UI, 9)).pack(side="right")
+    lock(app._btn(cache_frame, "Clear Cache", do_clear_cache, font=(FONT_UI, 9))).pack(side="right")
 
     # Storage — the Undo restore point plus the legacy ~/.steamart_backup pile
-    # from past fetches (which had no caller until this button). shortcuts.vdf.bak
-    # is never deleted — clear_backup already skips it.
+    # from past fetches (which had no caller until this button). The shortcuts.vdf
+    # backups (legacy and per-account) are never deleted — clear_backup skips them.
     storage_frame = tk.LabelFrame(body, text="Storage", padx=10, pady=8,
                                   bg=t["bg"], fg=t["link"])
     storage_frame.pack(fill="x", padx=15, pady=5)
     storage_label = tk.Label(
         storage_frame,
-        text=(f"Undo restore point: {fg.restore_point_size()} MB   ·   "
-              f"Older backups: {fg.legacy_backup_size()} MB"),
+        text=(f"Undo restore point: {restore.restore_point_size()} MB   ·   "
+              f"Older backups: {steam_files.legacy_backup_size()} MB"),
         font=(FONT_UI, 10), bg=t["bg"], fg=t["fg"])
     storage_label.pack(side="left")
 
     def do_clear_restore():
+        if app._refuse_if_busy():
+            return
         if messagebox.askyesno(
             "Clear Saved Undo Data",
             "This only removes the app's own saved copies — the Undo restore "
@@ -196,15 +231,20 @@ def open_settings(app):
             "Are you sure?",
             parent=settings
         ):
-            fg.clear_restore_point()
-            fg.clear_backup()
+            restore.clear_restore_point()
+            failed = steam_files.clear_backup()
             storage_label.config(
-                text="Undo restore point: 0.0 MB   ·   Older backups: 0.0 MB")
-            app.log("Saved Undo data cleared.", icon="trash")
+                text=(f"Undo restore point: {restore.restore_point_size()} MB   ·   "
+                      f"Older backups: {steam_files.legacy_backup_size()} MB"))
+            if failed:
+                app.log(f"Saved Undo data cleared — {failed} older backup file(s) could "
+                        "not be removed.", icon="warning")
+            else:
+                app.log("Saved Undo data cleared.", icon="trash")
             app.load_games()  # greys out the Undo button in the main window
 
-    app._btn(storage_frame, "Clear saved undo data", do_clear_restore,
-             font=(FONT_UI, 9)).pack(side="right")
+    lock(app._btn(storage_frame, "Clear saved undo data", do_clear_restore,
+                  font=(FONT_UI, 9))).pack(side="right")
 
     # Artwork
     artwork_frame = tk.LabelFrame(body, text="Artwork", padx=10, pady=8,
@@ -212,6 +252,8 @@ def open_settings(app):
     artwork_frame.pack(fill="x", padx=15, pady=5)
 
     def do_clear_artwork():
+        if app._refuse_if_busy():
+            return
         if messagebox.askyesno(
             "Clear All Artwork",
             "This will remove all artwork fetched by NonSteamScraper.\n\n"
@@ -220,15 +262,20 @@ def open_settings(app):
             "Are you sure?",
             parent=settings
         ):
-            deleted = clear_managed_artwork()
-            app.log(f"Cleared {deleted} artwork file(s) added by NonSteamScraper.",
-                     icon="trash")
+            deleted, failed = clear_managed_artwork()
+            if failed:
+                app.log(f"Cleared {deleted} artwork file(s) added by NonSteamScraper — "
+                        f"{failed} could not be removed (in use?) and are kept for the "
+                        "next Clear.", icon="warning")
+            else:
+                app.log(f"Cleared {deleted} artwork file(s) added by NonSteamScraper.",
+                        icon="trash")
             app.load_games()
             close_settings()
 
-    tk.Button(artwork_frame, text="Clear All Artwork", font=(FONT_UI, 9),
-               fg=t["danger"], bg=t["button_bg"], activebackground=t["select_bg"],
-               command=do_clear_artwork).pack(side="left")
+    lock(tk.Button(artwork_frame, text="Clear All Artwork", font=(FONT_UI, 9),
+                   fg=t["danger"], bg=t["button_bg"], activebackground=t["select_bg"],
+                   command=do_clear_artwork)).pack(side="left")
     tk.Label(artwork_frame, text="Only removes artwork added by this app",
               font=(FONT_UI, 8), fg=t["muted2"], bg=t["bg"]).pack(side="left", padx=8)
 
@@ -238,6 +285,8 @@ def open_settings(app):
     reset_frame.pack(fill="x", padx=15, pady=5)
 
     def do_full_reset():
+        if app._refuse_if_busy():
+            return
         if messagebox.askyesno(
             "Reset App",
             "This resets the app to a fresh first-launch state.\n\n"
@@ -255,9 +304,9 @@ def open_settings(app):
             full_reset()
             app.relaunch_app()
 
-    tk.Button(reset_frame, text="Reset App to Factory Defaults", font=(FONT_UI, 9),
-               fg=t["danger"], bg=t["button_bg"], activebackground=t["select_bg"],
-               command=do_full_reset).pack(side="left")
+    lock(tk.Button(reset_frame, text="Reset App to Factory Defaults", font=(FONT_UI, 9),
+                   fg=t["danger"], bg=t["button_bg"], activebackground=t["select_bg"],
+                   command=do_full_reset)).pack(side="left")
     tk.Label(reset_frame, text="Cannot be undone",
               font=(FONT_UI, 8), fg=t["muted2"], bg=t["bg"]).pack(side="left", padx=8)
 
@@ -282,7 +331,7 @@ def open_settings(app):
             w.destroy()
 
         def worker():
-            result = fg.check_for_update(VERSION)
+            result = updates.check_for_update(VERSION)
 
             def finish():
                 try:
@@ -322,7 +371,7 @@ def open_settings(app):
                              font=(FONT_UI, 9, "underline"),
                              fg=t["link"], bg=t["bg"], cursor="hand2")
     releases_link.pack(anchor="w", pady=(4, 0))
-    releases_link.bind("<Button-1>", lambda e: open_url(fg.RELEASES_URL))
+    releases_link.bind("<Button-1>", lambda e: open_url(updates.RELEASES_URL))
 
     # Steam — status + restart. Kept directly above Steam Account so the two
     # Steam-related sections sit together at the bottom (Status above Account).
@@ -352,26 +401,30 @@ def open_settings(app):
               bg=t["bg"], fg=t["fg"]).pack(side="left")
     if len(users) > 1:
         # Build display labels "PersonaName (id)" when known, else the bare id.
-        personas = fg.get_steam_user_personas()
+        personas = steam_env.get_steam_user_personas()
         label_to_id = {}
         id_to_label = {}
         for u in users:
             label = f"{personas[u]} ({u})" if u in personas else u
             label_to_id[label] = u
             id_to_label[u] = label
-        active = fg.get_active_user()
+        active = steam_env.get_active_user()
         account_var = tk.StringVar(value=id_to_label.get(active, users[0]))
 
         def on_account_change(label):
+            # A switch rebinds steam_env.GRID_FOLDER, which a running fetch reads live (B2).
+            if app._refuse_if_busy():
+                account_var.set(id_to_label.get(steam_env.get_active_user(), users[0]))
+                return
             uid = label_to_id.get(label)
-            if uid and fg.set_active_user(uid):
+            if uid and steam_env.set_active_user(uid):
                 app.log(f"Switched to Steam account {label}.", icon="refresh")
                 app.load_games()  # reload shortcuts for the newly active account
 
         om = tk.OptionMenu(account_frame, account_var, *id_to_label.values(),
                            command=on_account_change)
         om.config(bg=t["button_bg"], fg=t["button_fg"], highlightthickness=0)
-        om.pack(side="left", padx=8)
+        lock(om).pack(side="left", padx=8)
     else:
         # 0 or 1 accounts — show a disabled placeholder so the section is
         # always visible but clearly non-interactive.
@@ -385,6 +438,21 @@ def open_settings(app):
         om.pack(side="left", padx=8)
 
     app._bind_wheel_to_canvas(canvas, canvas)
+
+    def release_write_controls():
+        """Tk thread, called by _end_fetch: the fetch this window was opened during
+        has ended, so its write controls come back live and the note goes (S2)."""
+        try:
+            if not settings.winfo_exists():
+                return
+            for widget in write_controls:
+                widget.config(state="normal")
+            busy_note.destroy()
+        except tk.TclError:
+            pass  # the window went away meanwhile
+
+    if busy:
+        app._settings_on_fetch_end = release_write_controls
 
     # Auto-size to fit all content, fully within the screen work area (so it
     # can't open under a taskbar/panel) — same shared placement helper the

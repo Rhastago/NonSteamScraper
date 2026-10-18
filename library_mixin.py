@@ -8,18 +8,21 @@ import tkinter as tk
 from tkinter import ttk
 
 from theming import PAD_XS, PAD_S, PAD_M, PAD_L, FONT_UI, FONT_MONO
-from appcommon import FIRST_RUN_FILE
 from imaging import _decode_row_thumb
-import find_games as fg
-from find_games import get_non_steam_games, load_api_key, add_to_skip_list, SKIP_FILE
+import artwork
+import restore
+import steam_env
+import operations
+import appfiles
+from steam_files import get_non_steam_games
+from appfiles import load_api_key, add_to_skip_list
 
 class LibraryMixin:
 
     def check_first_run(self):
         """Show the quick-start guide automatically on the first launch."""
-        if not os.path.exists(FIRST_RUN_FILE):
-            with open(FIRST_RUN_FILE, "w") as f:
-                f.write("done")
+        if not os.path.exists(appfiles.FIRSTRUN_FILE):
+            appfiles.write_text_atomic(appfiles.FIRSTRUN_FILE, "done")
             self.window.after(300, self.show_info)
 
 
@@ -255,18 +258,6 @@ class LibraryMixin:
         self._refit_window_height()
 
 
-    def _remove_from_skip(self, app_id):
-        """Remove a single app ID from the skip file."""
-        if not os.path.exists(SKIP_FILE):
-            return
-        with open(SKIP_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        with open(SKIP_FILE, "w", encoding="utf-8") as f:
-            for line in lines:
-                if line.strip() != str(app_id):
-                    f.write(line)
-
-
     def refresh_library(self):
         """Reload the library and recheck Steam status."""
         self.log("Reloading library...", icon="refresh")
@@ -296,6 +287,10 @@ class LibraryMixin:
                 state="disabled" if not needs_art else "normal",
                 text="Nothing to fetch" if not needs_art else "Fetch Missing Artwork"
             )
+        if self._fetch_busy:
+            # A running fetch owns this button (B2): Refresh, Ignore, Restore and
+            # Re-fetch all call load_games, and must not re-enable it mid-run.
+            self.fetch_button.config(state="disabled", text="Fetching...")
 
         self._render_list()
         self._refresh_undo_button()
@@ -304,11 +299,12 @@ class LibraryMixin:
     def _refresh_undo_button(self):
         """The ONE place Undo's enabled state is derived: from the on-disk restore
         point. has_restore_point() returns false when the manifest's grid_folder
-        no longer matches the live fg.GRID_FOLDER, so an account switch greys the
+        no longer matches the live steam_env.GRID_FOLDER, so an account switch greys the
         button out. Called from load_games(), which runs at startup, after a
-        fetch, after a Re-fetch, after an Undo and on account switch."""
+        fetch, after a Re-fetch, after an Undo and on account switch. Always
+        disabled while a fetch runs."""
         self.undo_button.config(
-            state="normal" if fg.has_restore_point() else "disabled")
+            state="normal" if restore.has_restore_point() and not self._fetch_busy else "disabled")
 
 
     def _render_list(self):
@@ -338,6 +334,12 @@ class LibraryMixin:
             return
 
         query = self.search_var.get().strip().lower()
+        # The grid folder, listed ONCE for this render: every row's thumbnail and
+        # the "Recently fetched" sort pick from this listing (B11).
+        try:
+            grid_names = os.listdir(steam_env.GRID_FOLDER)
+        except OSError:
+            grid_names = []
         skipped = [g for g in self.games if g.get("skipped")]
         normal  = [g for g in self.games if not g.get("skipped")]
         if query:
@@ -346,8 +348,8 @@ class LibraryMixin:
 
         # Apply the chosen sort on top of the search filter so both sections stay
         # consistently ordered.
-        normal  = self._sort_games(normal)
-        skipped = self._sort_games(skipped)
+        normal  = self._sort_games(normal, grid_names)
+        skipped = self._sort_games(skipped, grid_names)
 
         # The 2px accent box wraps ONLY the game rows (not the Hidden section or the
         # empty/no-result messages). Rows go inside this box, separated by single 2px
@@ -359,7 +361,7 @@ class LibraryMixin:
             rows_box.pack(fill="x")
             self._row_parent = rows_box
             for game in normal:
-                self.build_game_row(game)
+                self.build_game_row(game, grid_names)
 
         if skipped:
             self.build_hidden_section(skipped)
@@ -372,7 +374,7 @@ class LibraryMixin:
         self._size_list_canvas()
 
 
-    def _sort_games(self, games_list):
+    def _sort_games(self, games_list, grid_names=None):
         """Return a new list sorted by the current sort key/direction.
 
         Each key computes an ASCENDING sort value; the whole list is reversed
@@ -397,7 +399,8 @@ class LibraryMixin:
                 app_id = g.get("app_id")
                 mt = 0.0
                 try:
-                    path = fg.row_thumbnail_path(fg.GRID_FOLDER, app_id)
+                    path = artwork.row_thumbnail_path(steam_env.GRID_FOLDER, app_id,
+                                                      grid_names)
                     if path and os.path.exists(path):
                         mt = os.path.getmtime(path)
                 except Exception:
@@ -459,15 +462,15 @@ class LibraryMixin:
         return chip
 
 
-    def _attach_row_thumb(self, parent, game, row_bg):
+    def _attach_row_thumb(self, parent, game, row_bg, grid_names=None):
         """Pack a cover thumbnail (or a "needs art" placeholder chip) at the left of a
         game row. Reuses cached PhotoImages keyed by (app_id, path, mtime, size) so the
         every-keystroke re-render doesn't re-decode; a changed mtime (e.g. after a
         re-fetch swaps art) naturally produces a new key and re-decodes. Decoding runs
         on the bounded thumbnail executor; assignment happens on the UI thread."""
         t = self.theme
-        # fg.GRID_FOLDER (not the by-value import) so account switches are honored.
-        path = fg.row_thumbnail_path(fg.GRID_FOLDER, game["app_id"])
+        # steam_env.GRID_FOLDER (not the by-value import) so account switches are honored.
+        path = artwork.row_thumbnail_path(steam_env.GRID_FOLDER, game["app_id"], grid_names)
         if path:
             try:
                 st = os.stat(path)
@@ -502,7 +505,7 @@ class LibraryMixin:
         return box
 
 
-    def build_game_row(self, game):
+    def build_game_row(self, game, grid_names=None):
         """Build a single game row with click-to-reveal action buttons."""
         t = self.theme
         # Border-collapse: a single 2px accent box wraps the whole list (set on
@@ -517,7 +520,7 @@ class LibraryMixin:
 
         # Cover thumbnail (or "needs art" placeholder chip) replaces the old inline
         # status icon — the cover-vs-placeholder now conveys has_art at a glance.
-        thumb = self._attach_row_thumb(row, game, t["bg"])
+        thumb = self._attach_row_thumb(row, game, t["bg"], grid_names)
 
         label = tk.Label(row, text=f"  {game['name'][:40]}",
                           font=(FONT_UI, 11), anchor="w", cursor="hand2",
@@ -627,6 +630,8 @@ class LibraryMixin:
         it by. Uses the same skip list as "not found on SteamGridDB", so Restore
         brings back either kind. Touches only our skip file — any art the game
         already has stays in place."""
+        if self._refuse_if_busy():
+            return
         add_to_skip_list(game["app_id"])
         self.log(f"Ignored: {game['name']} — moved to Hidden", icon="offline")
         self.load_games()
@@ -635,30 +640,20 @@ class LibraryMixin:
     def restore_game(self, game):
         """Move a hidden game (skipped or ignored) back to the main list. The next
         fetch picks it up only if it has no art; one that has art needs Re-fetch."""
-        self._remove_from_skip(game["app_id"])
+        if self._refuse_if_busy():
+            return
+        operations.restore_from_skip(game["app_id"])
         self.log(f"Restored: {game['name']}", icon="undo")
         self.load_games()
 
 
     def refetch_game(self, game):
         """Clear existing artwork and skip data so a game is fully reprocessed."""
-        self._remove_from_skip(game["app_id"])
-        # Snapshot the current art FIRST — this delete loop is exactly the
-        # destructive action Undo exists to restore. pending=True: a Re-fetch,
-        # outside any fetch run.
-        fg.snapshot_for_restore(game["app_id"], pending=True)
-        # fg.GRID_FOLDER (not the by-value import) so account switches are honored.
-        # Leading-digit-run matching, NEVER glob(f"{app_id}*"): uid 12345 must not
-        # delete a neighbouring game's 123456p.png (see find_games._files_matching_id).
-        try:
-            fnames = os.listdir(fg.GRID_FOLDER)
-        except OSError:
-            fnames = []
-        for fname in fg._files_matching_id(fnames, game["app_id"]):
-            try:
-                os.remove(os.path.join(fg.GRID_FOLDER, fname))
-            except OSError:
-                pass
+        if self._refuse_if_busy():
+            return
+        # Unskip + snapshot + exact-id delete live in operations.refetch, shared
+        # with Search → Select, so a fix to the deletion rule reaches both.
+        operations.refetch(game["app_id"])
         self.log(f"Artwork saved for: {game['name']} — will re-fetch on next run; "
                  "use Undo to restore the previous art", icon="refresh")
         self.load_games()

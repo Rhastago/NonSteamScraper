@@ -4,6 +4,95 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.5.2] — 2026-10-18
+
+A safety release: every fix below stops the app from losing or hiding your artwork.
+
+### Fixed
+- **Search → Select no longer deletes other games' artwork.** Matching a game whose ID
+  is the start of another game's ID (for example 12345 and 123456) also deleted the other
+  game's art, and Undo could not bring it back. Now only the matched game's art is cleared,
+  Undo can restore it, and the fetch that follows covers only that game.
+- **A rejected API key no longer hides your library.** If SteamGridDB stopped accepting your
+  key (for example after you replaced it on their site), every game the fetch touched was
+  moved to Hidden as "not found". Fetch now checks the key first: if SteamGridDB rejects it,
+  nothing is fetched, a message tells you so and Settings opens; if SteamGridDB cannot be
+  reached, the status line says so and nothing is fetched. If the key stops working in the
+  middle of a fetch, the fetch stops and no game is hidden. Settings now says "A key is
+  saved" instead of claiming the key is valid.
+- **A failed download keeps your old artwork.** When a download timed out, the old image was
+  already deleted, and the results screen still said "Applied!". Now the new image is
+  downloaded first and the old one is replaced only when the download succeeded. The log
+  names any artwork that failed, and a failed icon no longer points Steam at a missing file.
+- **Each Steam account gets its own `shortcuts.vdf` backup.** Only the first account the app
+  ever wrote to was backed up. Each account now gets `shortcuts.vdf.<account id>.bak` before
+  its first change; the older single backup is kept.
+- **Nothing that changes your files can run during a fetch.** While a fetch runs, Re-fetch,
+  Ignore, Restore, Search → Select, Undo, theme and accent say "Fetch in progress", and in
+  Settings the account switch, Clear All Artwork, Clear saved undo data and Reset are greyed
+  out. Before, a second fetch, an account switch or a restart could run in the middle of a
+  fetch and write art into the wrong place.
+- **Closing the window during a fetch asks first.** If you confirm, the fetch stops after the
+  game it is on and its unfinished downloads are removed before the window closes.
+- **Icon changes can no longer overwrite each other.** Two parts of the app writing Steam's
+  shortcut list at the same moment could lose one of the changes; writes now take turns, and
+  each one is flushed to disk before it replaces the file.
+- **"Apply this one" no longer freezes the results window**, and an interrupted download no
+  longer leaves a broken image in Steam's artwork folder.
+- **Animated artwork is placed only once its conversion has finished**, so closing the app
+  mid-conversion can no longer leave a half-written image for Steam to show.
+- **Closing the window right as a fetch ends no longer waits 30 seconds.** If the fetch
+  finished while the "stop and close?" question was open, answering Yes now closes the
+  window at once.
+- **Clear Cache is greyed out during a fetch.** Clearing the cache mid-fetch deleted the
+  previews the fetch had just downloaded, so the results screen could show blank images.
+- **Settings left open while a fetch ends comes back to life.** Its greyed-out options and
+  the "Fetch in progress" note used to stay until you closed and reopened Settings.
+- **Search → Select fetches the exact game you picked.** When two SteamGridDB games share a
+  name (DOOM 1993 and DOOM 2016), the fetch searched by name again and could take the other
+  one. The app now remembers the SteamGridDB game you picked (in `~/.steamart_ids`) and
+  fetches that one.
+- **The results preview always matches what Apply installs.** Clicking ▶ quickly through
+  options that were still loading could show one option's image while Apply installed
+  another, and an error page could be saved as a preview.
+- **Clear All Artwork, Clear Cache and Clear saved undo data finish the job.** One file that
+  could not be removed (for example an image open in a viewer on Windows) used to stop the
+  clean-up half-way. They now remove everything else and say how many files were left.
+
+- **The Search window's Select and Cancel buttons are always visible.** With many results
+  the list pushed them out of the window; they now sit at its bottom-left.
+- **Only one copy of the app runs at a time.** Opening it again while it is open says it is
+  already running, so two copies can no longer overwrite each other's icon changes.
+
+### Improved
+- **Large libraries scroll and search faster.** The game list looked through the artwork
+  folder once per row on every redraw; it now looks once per redraw.
+- **The results screen uses less CPU and fewer threads.** Previews are decoded by a small
+  fixed pool instead of one thread per image, and animated previews are prepared once
+  instead of being resized again on every frame.
+
+### Internal
+- The code that changes files now lives apart from the windows: the fetch, Re-fetch,
+  Search → Select, Restore and "Apply this one" are written once, in a part of the app that
+  has no window code and is tested on its own.
+- The large `find_games.py` is split into smaller parts, each with one job: the app's own
+  files, finding Steam and your account, talking to SteamGridDB, Steam's shortcut list, the
+  Undo restore point, the artwork itself, window placement and the update check. Finding
+  Steam now happens once at startup instead of as a side effect of loading the code.
+- The app's own settings files, the icon queue and the saved account are now written so a
+  crash can never leave them half-written.
+- The record of which artwork files the app created no longer grows without end.
+- The results window and the fetch results are tidier inside, with no change in behaviour.
+- An animated pick in the icon slot is now written to Steam's shortcut list like a static one
+  (it used to be placed in the artwork folder only). You are unlikely to meet it: Steam's own
+  artwork is never animated, and none of 23 popular games checked on SteamGridDB has an animated
+  icon.
+- The test suite cleans up after itself and checks that no test touches files outside its
+  own temporary folder; the release workflow now runs the tests on Linux and Windows before
+  it builds anything.
+- The build instructions, the README's list of files the app keeps, and the two build
+  scripts are brought back in line with each other.
+
 ## [1.5.1] — 2026-10-15
 
 ### Added

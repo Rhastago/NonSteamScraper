@@ -17,6 +17,8 @@ fi
 
 rm -rf build dist
 
+# The flag list below is the SAME as build_linux.sh's (only the --add-data
+# separator differs, ";" here and ":" there, and Windows adds --icon). Change both.
 pyinstaller --onefile --windowed --name NonSteamScraper \
     --icon icon.ico \
     --add-data "icon.png;." \

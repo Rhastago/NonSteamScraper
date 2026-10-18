@@ -165,7 +165,7 @@ class UIMixin:
             # dir, which the exiting process then deletes — breaking compiled imports
             # like PIL._imaging on restart. Strip them so the new process re-extracts.
             # relaunch_env also undoes the bootloader's library-path injection, so the
-            # child presents the fresh-launch environment (SPEC.md S0/S1).
+            # child presents the fresh-launch environment.
             env = relaunch_env(os.environ)
             os.execve(sys.executable, [sys.executable], env)
         else:
@@ -173,7 +173,10 @@ class UIMixin:
 
 
     def toggle_theme(self):
-        """Switch between light and dark mode and relaunch."""
+        """Switch between light and dark mode and relaunch. Refused while a fetch
+        runs: the relaunch would replace the process mid-run (B2)."""
+        if self._refuse_if_busy():
+            return
         save_theme("dark" if self.theme_name == "light" else "light")
         self.relaunch_app()
 
@@ -182,6 +185,8 @@ class UIMixin:
         """Persist a new accent color and relaunch so it takes effect everywhere
         (same mechanism as the light/dark toggle). No-op if unchanged."""
         if name == self.accent_name or name not in ACCENTS:
+            return
+        if self._refuse_if_busy():
             return
         save_accent(name)
         self.relaunch_app()

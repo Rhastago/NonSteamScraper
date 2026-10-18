@@ -17,6 +17,8 @@ fi
 
 rm -rf build dist
 
+# The flag list below is the SAME as build_windows.sh's (only the --add-data
+# separator differs, ":" here and ";" there, and Windows adds --icon). Change both.
 pyinstaller --onefile --windowed --name NonSteamScraper \
     --add-data "icon.png:." \
     --add-data "assets:assets" \
@@ -26,7 +28,13 @@ pyinstaller --onefile --windowed --name NonSteamScraper \
     --hidden-import PIL.WebPImagePlugin \
     --hidden-import PIL.GifImagePlugin \
     --hidden-import PIL.IcoImagePlugin \
-    --collect-all pillow app.py
+    --hidden-import requests \
+    --hidden-import vdf \
+    --hidden-import psutil \
+    --hidden-import _socket \
+    --hidden-import socket \
+    --collect-all pillow \
+    --collect-all multiprocessing app.py
 
 echo
 echo "Done. Binary is at: dist/NonSteamScraper"

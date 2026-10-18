@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build a self-contained Windows build bundle for manual testing on a Windows box.
 # Run this on the Deck; it produces a .zip in dist/ containing the current source,
-# pre-fetched Windows wheels (offline install), requirements.txt (online fallback),
+# pre-fetched Windows wheels (offline install), requirements*.txt (online fallback),
 # and BUILD.txt with the exact Git Bash commands.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -18,18 +18,19 @@ APP="$STAGE/NonSteamScraper"
 mkdir -p "$APP" "$OUTDIR"
 
 echo "Staging source (working tree)…"
-# Explicit list of everything a Windows build needs, taken from the working tree
-# (so uncommitted changes are included).
-for item in app.py appcommon.py find_games.py theming.py imaging.py \
-            ui_mixin.py geometry_mixin.py library_mixin.py fetch_mixin.py \
-            dialogs.py settings_window.py results_window.py \
-            requirements.txt icon.png icon.ico \
+# Everything a Windows build needs, taken from the working tree (so uncommitted
+# changes are included). Every *.py at the repo root is an app module: a fixed
+# list once missed a new module and broke only the Windows build.
+for item in *.py \
+            requirements.txt requirements-build.txt requirements-dev.txt tests \
+            icon.png icon.ico \
             build_windows.sh assets README.md CHANGELOG.md LICENSE; do
     [ -e "$item" ] && cp -r "$item" "$APP/"
 done
+find "$APP" -name __pycache__ -type d -prune -exec rm -rf {} +
 
 echo "Fetching Windows wheels (cp312)…"
-"$PY" -m pip download -r requirements.txt --platform win_amd64 \
+"$PY" -m pip download -r requirements-build.txt -r requirements-dev.txt --platform win_amd64 \
     --python-version 3.12 --only-binary=:all: -d "$APP/wheels" >/dev/null
 
 cat > "$APP/BUILD.txt" <<'TXT'
@@ -43,17 +44,23 @@ NonSteamScraper — Windows test build (run these in Git Bash)
        python -m venv venv
        source venv/Scripts/activate
 
-3. Install dependencies — tries the bundled offline wheels first, falls back online:
-       pip install --no-index --find-links wheels -r requirements.txt \
-         || pip install -r requirements.txt
+3. Install dependencies (the app's and PyInstaller) — tries the bundled offline
+   wheels first, falls back online:
+       pip install --no-index --find-links wheels -r requirements-build.txt \
+         || pip install -r requirements-build.txt
 
    (The offline wheels target Python 3.12. On a different Python version the
     offline step is skipped automatically and pip installs from the internet.)
 
-4. Build the executable:
+4. Run the test suite (the same one CI runs before a release):
+       pip install --no-index --find-links wheels -r requirements-dev.txt \
+         || pip install -r requirements-dev.txt
+       python -m pytest -q
+
+5. Build the executable:
        ./build_windows.sh
 
-5. Result:  dist/NonSteamScraper.exe   (run it to manually test)
+6. Result:  dist/NonSteamScraper.exe   (run it to manually test)
 TXT
 
 echo "Zipping…"

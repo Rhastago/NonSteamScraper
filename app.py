@@ -2,8 +2,11 @@ import tkinter as tk
 from tkinter import messagebox
 import sys
 from concurrent.futures import ThreadPoolExecutor
-import find_games as fg  # live access to rebound globals (e.g. fg.GRID_FOLDER after account switch)
-from find_games import clean_old_cache
+import restore
+import sgdb
+import steam_env
+import appfiles
+from appfiles import clean_old_cache, prune_managed_files
 
 from theming import resolve_theme, load_theme, load_accent
 from appcommon import VERSION
@@ -31,7 +34,7 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
     ROW_THUMB_W  = 39
 
     def __init__(self, window):
-        if fg.STEAM_NOT_FOUND:
+        if steam_env.STEAM_NOT_FOUND:
             messagebox.showerror(
                 "Steam Not Found",
                 "Could not find Steam user data.\n\n"
@@ -65,9 +68,22 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self.selected_rename_btn = None
         self.selected_ignore_btn = None
         self.selected_name_lbl = None
-        self._restore_point_inherited = fg.has_restore_point()
+        self._restore_point_inherited = restore.has_restore_point()
         self._fetched_this_session = False
-        fg.RATE_LIMIT_HOOK = lambda msg: self.log(msg, icon="warning")
+        # Fetch busy state (B2): set by start_fetch, cleared by _end_fetch on every
+        # worker exit path. _fetch_cancel is the run's stop flag, _fetch_run what a
+        # stopped run may leave behind, _closing set once the user chose to close,
+        # _fetch_followup a Tk step the run asked _end_fetch to take after it.
+        self._fetch_busy = False
+        self._fetch_followup = None
+        self._fetch_cancel = None
+        self._fetch_run = None
+        self._closing = False
+        # Set by a Settings window opened during a fetch; _end_fetch calls it (S2).
+        self._settings_on_fetch_end = None
+        # The open results window (results_window.ResultsWindow), or None.
+        self._results_view = None
+        sgdb.RATE_LIMIT_HOOK = lambda msg: self.log(msg, icon="warning")
         self._icon_cache = {}
         # Row-thumbnail cache: (app_id, path, mtime, size) -> ImageTk.PhotoImage.
         # Keyed including mtime+size so a re-fetch that swaps art invalidates the old
@@ -84,6 +100,7 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self._modal_stack = []
         self.build_ui()
         clean_old_cache()
+        prune_managed_files()
         self.load_games()
         self.check_steam_running()
         # Defer & auto-apply: flush any icons queued from a previous session if Steam
@@ -111,13 +128,24 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         return settings_window.open_settings(self)
 
     def show_results(self, fetch_results):
-        return results_window.show_results(self, fetch_results)
+        self._results_view = results_window.ResultsWindow(self)
+        self._results_view.show(fetch_results)
 
 
 
 
 
 if __name__ == "__main__":
+    # One copy at a time (W8): a second copy would share the icon queue and
+    # Steam's shortcut list with this one.
+    if not appfiles.acquire_instance_lock():
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("Already Running", "NonSteamScraper is already running.",
+                            parent=root)
+        sys.exit(0)
+    # Find Steam and the active account before anything reads them.
+    steam_env.init()
     window = tk.Tk()
     app = SteamArtApp(window)
     window.mainloop()

@@ -3,7 +3,7 @@
 These tests parse the module sources with `ast` and assert STRUCTURE, never
 token presence — a substring check is satisfied by a comment or by inverted
 logic. The modules are NOT imported: they pull in tkinter and would need a
-display, and find_games has import-time side effects (it creates directories
+display, and the backend binds HOME-derived paths at import (it once created directories
 under the real HOME).
 
 The product wiring does not exist yet, so each gate fails by ASSERTION with a
@@ -32,7 +32,7 @@ def _func(module, name):
 def _calls_named(node, name):
     """All Call nodes inside `node` whose callee's final name is `name`.
     Handles both the Name form (`snapshot_for_restore(...)`) and the Attribute
-    form (`fg.snapshot_for_restore(...)`), matching on the final attribute name."""
+    form (`restore.snapshot_for_restore(...)`), matching on the final attribute name."""
     out = []
     for sub in ast.walk(node):
         if isinstance(sub, ast.Call):
@@ -70,51 +70,23 @@ def _references_name(node, name):
     return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
 
 
-def test_wiring_refetch_game_snapshots_before_it_deletes():
-    """snapshot_for_restore must run BEFORE os.remove in refetch_game —
-    reversed, it snapshots an already-empty folder and Undo restores nothing."""
-    tree = _module("library_mixin.py")
-    fn = _func(tree, "refetch_game")
-    assert fn is not None, "library_mixin.refetch_game does not exist"
-    snaps = _calls_named(fn, "snapshot_for_restore")
-    assert snaps, "library_mixin.refetch_game must call snapshot_for_restore before deleting"
-    removes = _unlink_calls(fn)
-    assert removes, "library_mixin.refetch_game must delete files (os.remove/os.unlink)"
-    assert snaps[0].lineno < min(r.lineno for r in removes), (
-        "snapshot_for_restore must run BEFORE the delete loop (a reversed order "
-        "snapshots an empty folder)")
+def _glob_calls(node):
+    return [n for n in ast.walk(node)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "glob" and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "glob"]
 
 
-def test_wiring_begin_restore_run_before_fetch_loop():
-    """begin_restore_run must run before the first For in _run_fetch_body."""
-    tree = _module("fetch_mixin.py")
-    fn = _func(tree, "_run_fetch_body")
-    assert fn is not None, "fetch_mixin._run_fetch_body does not exist"
-    begins = _calls_named(fn, "begin_restore_run")
-    assert begins, "fetch_mixin._run_fetch_body must call begin_restore_run"
-    loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)]
-    assert loops, "fetch_mixin._run_fetch_body must contain a For loop"
-    first_for = min(loops, key=lambda n: n.lineno)
-    assert begins[0].lineno < first_for.lineno, (
-        "begin_restore_run must run BEFORE the fetch loop")
-
-
-def test_wiring_seal_restore_point_after_fetch_loop():
-    """seal_restore_point must run after the same For loop the fetch iterates."""
-    tree = _module("fetch_mixin.py")
-    fn = _func(tree, "_run_fetch_body")
-    assert fn is not None, "fetch_mixin._run_fetch_body does not exist"
-    seals = _calls_named(fn, "seal_restore_point")
-    assert seals, "fetch_mixin._run_fetch_body must call seal_restore_point after the loop"
-    loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)]
-    assert loops, "fetch_mixin._run_fetch_body must contain a For loop"
-    first_for = min(loops, key=lambda n: n.lineno)
-    # Containment again: seal_restore_point as the FIRST statement of the loop
-    # body satisfies `lineno >` while leaving the last game's entry unsealed.
-    assert not any(_contains(first_for, sl) for sl in seals), (
-        "seal_restore_point must not sit INSIDE the fetch loop")
-    assert seals[0].lineno > first_for.end_lineno, (
-        "seal_restore_point must run AFTER the whole fetch loop")
+def test_wiring_library_and_search_delete_nothing_themselves():
+    """B1: the Search dialog once deleted with glob(f"{app_id}*") and took a
+    neighbouring game's art. Re-fetch and Search → Select now clear through
+    operations.refetch / operations.rematch (tested by behaviour in
+    test_operations.py and test_fetch_flow.py); these two UI files must not glob
+    the grid folder or delete a file anywhere."""
+    for name in ("library_mixin.py", "dialogs.py"):
+        tree = _module(name)
+        assert not _glob_calls(tree), f"{name} must not glob the grid folder"
+        assert not _unlink_calls(tree), f"{name} must not delete files itself"
 
 
 def test_wiring_undo_fetch_delegates_to_undo_restore_point():
@@ -127,7 +99,7 @@ def test_wiring_undo_fetch_delegates_to_undo_restore_point():
 
 
 def test_wiring_undo_fetch_has_no_os_remove_copy():
-    """Deletion moved into find_games.undo_restore_point — a leftover os.remove
+    """Deletion moved into restore.undo_restore_point — a leftover os.remove
     here would double-delete."""
     tree = _module("fetch_mixin.py")
     fn = _func(tree, "undo_fetch")
@@ -135,7 +107,7 @@ def test_wiring_undo_fetch_has_no_os_remove_copy():
     hits = _unlink_calls(fn)
     assert not hits, (
         "fetch_mixin.undo_fetch must not delete files (os.remove/os.unlink) — "
-        "deletion moved into find_games.undo_restore_point")
+        "deletion moved into restore.undo_restore_point")
 
 
 def test_wiring_last_fetch_files_attribute_gone_from_fetch_mixin():
@@ -191,60 +163,6 @@ def test_wiring_relaunch_app_uses_relaunch_env():
     assert calls, "ui_mixin.relaunch_app must call relaunch_env instead of re-execing with dict(os.environ)"
 
 
-def test_wiring_begin_restore_run_after_needs_art_early_return():
-    """begin_restore_run must sit AFTER the 'if not needs_art:' early return —
-    a no-op fetch must not be able to destroy the previous restore point."""
-    tree = _module("fetch_mixin.py")
-    fn = _func(tree, "_run_fetch_body")
-    assert fn is not None, "fetch_mixin._run_fetch_body does not exist"
-    begins = _calls_named(fn, "begin_restore_run")
-    assert begins, "fetch_mixin._run_fetch_body must call begin_restore_run"
-    early = None
-    for n in ast.walk(fn):
-        if isinstance(n, ast.If) and _references_name(n.test, "needs_art"):
-            if early is None or n.lineno < early.lineno:
-                early = n
-    assert early is not None, "fetch_mixin._run_fetch_body must contain the 'if not needs_art:' early return"
-    # Containment, not line order: a begin_restore_run() placed INSIDE the
-    # `if not needs_art:` block also satisfies `lineno >`, and that is exactly
-    # the failure this gate exists to catch — the no-op fetch still drops every
-    # sealed entry and erases the operator's Undo.
-    assert not any(_contains(early, b) for b in begins), (
-        "begin_restore_run must not sit INSIDE the needs_art early-return block")
-    assert begins[0].lineno > early.end_lineno, (
-        "begin_restore_run must run AFTER the whole needs_art early return, or a "
-        "no-op fetch destroys the previous restore point")
-
-
-def test_wiring_fetch_log_reports_per_game_elapsed():
-    """Per-game timing: the 'Artwork saved for …' log line must interpolate an
-    elapsed value, so 'incredibly slow' becomes a number the operator can quote."""
-    tree = _module("fetch_mixin.py")
-    fn = _func(tree, "_run_fetch_body")
-    assert fn is not None, "fetch_mixin._run_fetch_body does not exist"
-    target = None
-    for n in ast.walk(fn):
-        if isinstance(n, ast.JoinedStr):
-            literal = "".join(
-                v.value for v in n.values
-                if isinstance(v, ast.Constant) and isinstance(v.value, str))
-            if "Artwork saved for" in literal:
-                target = n
-                break
-    assert target is not None, (
-        "fetch_mixin._run_fetch_body must log 'Artwork saved for ...' as an f-string")
-    refs = []
-    for v in target.values:
-        if isinstance(v, ast.FormattedValue):
-            for sub in ast.walk(v):
-                if isinstance(sub, ast.Name) and "elapsed" in sub.id:
-                    refs.append(sub.id)
-    assert refs, (
-        "the 'Artwork saved for' log line must interpolate a per-game elapsed "
-        "value (e.g. {elapsed:.1f}s), got formatted values: %s"
-        % [v.lineno for v in target.values])
-
-
 def test_wiring_refetch_game_has_no_glob_prefix_delete():
     """refetch_game's delete loop must move to leading-digit-run matching — a
     surviving glob(f'{app_id}*') is the cross-game deletion bug still present."""
@@ -290,7 +208,7 @@ def test_wiring_app_captures_restore_point_inherited_at_startup():
                 if isinstance(n, ast.Attribute) and n.attr == "_restore_point_inherited"]
     assert assigned, "app.py must capture self._restore_point_inherited at startup"
     has = _calls_named(tree, "has_restore_point")
-    assert has, "app.py must initialise it from fg.has_restore_point()"
+    assert has, "app.py must initialise it from restore.has_restore_point()"
 
 
 def test_wiring_fetch_marks_the_session_as_having_fetched():
@@ -303,3 +221,81 @@ def test_wiring_fetch_marks_the_session_as_having_fetched():
     attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
     assert "_fetched_this_session" in attrs, (
         "_run_fetch_body must set self._fetched_this_session")
+
+
+def _first_stmt_refuses_if_busy(fn):
+    """True when fn's first statement is `if <x>._refuse_if_busy(): return`."""
+    if not fn.body or not isinstance(fn.body[0], ast.If):
+        return False
+    first = fn.body[0]
+    return (bool(_calls_named(first.test, "_refuse_if_busy"))
+            and any(isinstance(n, ast.Return) for n in first.body))
+
+
+def test_wiring_settings_write_commands_refuse_while_a_fetch_runs():
+    """Q3: in Settings, Clear saved undo data, Clear All Artwork, Factory reset
+    and the account switch must refuse first thing while a fetch runs. (Settings
+    cannot be built headless, so this is a structure check; the live behaviour
+    is on the manual-test list.)"""
+    tree = _module("settings_window.py")
+    for name in ("do_clear_restore", "do_clear_artwork", "do_full_reset", "on_account_change"):
+        fn = _func(tree, name)
+        assert fn is not None, f"settings_window.{name} does not exist"
+        assert _first_stmt_refuses_if_busy(fn), (
+            f"settings_window.{name} must start with `if app._refuse_if_busy(): return`")
+
+
+def test_wiring_results_window_does_no_file_work_itself():
+    """B6: results "Apply this one" used to download on the Tk thread and write the
+    grid file with no .part. The worker/thread/outcome order is now tested by
+    behaviour (test_fetch_flow: test_results_static_apply_installs_on_a_worker_...,
+    test_results_animated_icon_apply_...), which replaced the AST checks of the
+    worker's call names. What stays here: the file does no file work of its own."""
+    tree = _module("results_window.py")
+    assert not _calls_named(tree, "http_get"), "results_window.py must not download itself"
+    assert not _calls_named(tree, "clear_slot_files"), (
+        "results_window.py must not clear slots itself — install_into_slot does")
+    opens = [c for c in _calls_named(tree, "open") if isinstance(c.func, ast.Name)]
+    assert not opens, "results_window.py must not write files itself"
+
+
+def _pyinstaller_flags(script):
+    """The flags of the pyinstaller command in a build script, one per item."""
+    with open(os.path.join(ROOT, script), encoding="utf-8") as f:
+        text = f.read()
+    cmd = text[text.index("\npyinstaller ") + 1:]
+    cmd = cmd[:cmd.index("app.py")].replace("\\\n", " ")
+    return cmd.split()
+
+
+def test_build_scripts_use_the_same_pyinstaller_flags():
+    """H6: the Linux and Windows scripts drifted apart (different hidden imports).
+    They must differ only in the --add-data separator and Windows' --icon."""
+    linux = _pyinstaller_flags("build_linux.sh")
+    windows = [f.replace(";", ":") for f in _pyinstaller_flags("build_windows.sh")]
+    i = windows.index("--icon")
+    del windows[i:i + 2]
+    assert linux == windows
+
+
+def test_find_games_is_gone_and_nothing_imports_it():
+    """H4/T-A5: the god module is split; its leftover CLI (it wrote icons while
+    Steam could be running and bypassed the restore point) is deleted."""
+    assert not os.path.exists(os.path.join(ROOT, "find_games.py"))
+    for name in os.listdir(ROOT):
+        if name.endswith(".py"):
+            tree = _module(name)
+            mods = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+            mods |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+            assert "find_games" not in mods, f"{name} still imports find_games"
+
+
+def test_app_takes_the_one_copy_lock_before_anything_else():
+    """W8: app.py's __main__ asks for the lock first and exits when another copy
+    holds it — before steam_env.init() and before the main window."""
+    with open(os.path.join(ROOT, "app.py"), encoding="utf-8") as f:
+        src = f.read()
+    main = src[src.index('if __name__ == "__main__":'):]
+    lock = main.index("appfiles.acquire_instance_lock()")
+    assert lock < main.index("steam_env.init()") < main.index("window = tk.Tk()")
+    assert "sys.exit(0)" in main[lock:main.index("steam_env.init()")]

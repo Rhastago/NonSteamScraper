@@ -1,11 +1,9 @@
 """Theming for NonSteamScraper: the light/dark base palettes, the accent colors
 layered on top, the spacing/typography tokens, and load/save of the user's theme
-and accent choices. Pure (no tkinter), so it imports cleanly anywhere."""
+and accent choices. Pure (no tkinter), so it imports cleanly anywhere. The two
+files live in the appfiles registry (appfiles.THEME_FILE / ACCENT_FILE)."""
 
-import os
-
-THEME_FILE  = os.path.expanduser("~/.steamart_theme")
-ACCENT_FILE = os.path.expanduser("~/.steamart_accent")
+import appfiles
 
 # Color palettes for light and dark appearance modes.
 THEMES = {
@@ -71,7 +69,7 @@ def resolve_theme(mode, accent):
 def load_theme():
     """Return the saved theme name, defaulting to dark."""
     try:
-        with open(THEME_FILE, "r") as f:
+        with open(appfiles.THEME_FILE, "r", encoding="utf-8") as f:
             name = f.read().strip()
             return name if name in THEMES else "dark"
     except Exception:
@@ -80,14 +78,13 @@ def load_theme():
 
 def save_theme(name):
     """Persist the chosen theme name."""
-    with open(THEME_FILE, "w") as f:
-        f.write(name)
+    appfiles.write_text_atomic(appfiles.THEME_FILE, name)
 
 
 def load_accent():
     """Return the saved accent name, defaulting to DEFAULT_ACCENT."""
     try:
-        with open(ACCENT_FILE, "r") as f:
+        with open(appfiles.ACCENT_FILE, "r", encoding="utf-8") as f:
             name = f.read().strip()
             return name if name in ACCENTS else DEFAULT_ACCENT
     except Exception:
@@ -96,5 +93,4 @@ def load_accent():
 
 def save_accent(name):
     """Persist the chosen accent name."""
-    with open(ACCENT_FILE, "w") as f:
-        f.write(name)
+    appfiles.write_text_atomic(appfiles.ACCENT_FILE, name)
