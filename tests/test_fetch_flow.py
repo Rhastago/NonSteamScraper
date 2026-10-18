@@ -26,6 +26,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import sgdb
 import steam_env
 import appfiles  # noqa: E402
 
@@ -363,19 +364,19 @@ def fetch_env(ui, tmp_path, monkeypatch):
         rec.searched.append(app_id)
         if rec.on_search:
             rec.on_search(app_id)
-        return rec.outcomes.get(app_id, (fg.SEARCH_FOUND, 4242))
+        return rec.outcomes.get(app_id, (sgdb.SEARCH_FOUND, 4242))
 
     def fake_download(sgdb_id, app_id, prefs, progress_cb=None, defer_icon=False):
         rec.downloaded.append(app_id)
         return fg.FetchedArt()
 
     # operations.run_fetch reads find_games live, so these are patched on fg.
-    monkeypatch.setattr(fg, "search_game", fake_search)
+    monkeypatch.setattr(sgdb, "search_game", fake_search)
     monkeypatch.setattr(fg, "download_all_artwork", fake_download)
     monkeypatch.setattr(appfiles, "add_to_skip_list", lambda app_id: rec.skipped.append(app_id))
     monkeypatch.setattr(fm, "load_prefs", lambda: {})
     monkeypatch.setattr(fm, "load_api_key", lambda: "KEY")
-    monkeypatch.setattr(fg, "check_api_key", lambda key=None: fg.KEY_ACCEPTED)
+    monkeypatch.setattr(sgdb, "check_api_key", lambda key=None: sgdb.KEY_ACCEPTED)
     monkeypatch.setattr(fg, "begin_restore_run", lambda: rec.calls.append("begin"))
     monkeypatch.setattr(fg, "seal_restore_point", lambda: rec.calls.append("seal"))
     monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: False)
@@ -419,7 +420,7 @@ def test_fetch_body_without_games_fetches_every_game_missing_art(ui, fetch_env):
 # ---------------------------------------------------------------------------
 
 def test_rejected_key_runs_nothing_and_opens_settings(ui, fetch_env, monkeypatch):
-    monkeypatch.setattr(fg, "check_api_key", lambda key=None: fg.KEY_REJECTED)
+    monkeypatch.setattr(sgdb, "check_api_key", lambda key=None: sgdb.KEY_REJECTED)
     fetch_env.library = [_game(1), _game(2)]
     app = make_app(ui, fetch_env.library)
     app._fetch_busy = True
@@ -442,7 +443,7 @@ def test_rejected_key_runs_nothing_and_opens_settings(ui, fetch_env, monkeypatch
 
 
 def test_unreachable_key_check_runs_nothing_and_blames_no_key(ui, fetch_env, monkeypatch):
-    monkeypatch.setattr(fg, "check_api_key", lambda key=None: fg.KEY_UNREACHABLE)
+    monkeypatch.setattr(sgdb, "check_api_key", lambda key=None: sgdb.KEY_UNREACHABLE)
     app = make_app(ui, [_game(1)])
 
     app._run_fetch_body()
@@ -456,8 +457,8 @@ def test_unreachable_key_check_runs_nothing_and_blames_no_key(ui, fetch_env, mon
 
 
 def test_key_check_runs_before_begin_restore_run(ui, fetch_env, monkeypatch):
-    monkeypatch.setattr(fg, "check_api_key",
-                        lambda key=None: fetch_env.calls.append("check") or fg.KEY_ACCEPTED)
+    monkeypatch.setattr(sgdb, "check_api_key",
+                        lambda key=None: fetch_env.calls.append("check") or sgdb.KEY_ACCEPTED)
     app = make_app(ui, [_game(1)])
 
     app._run_fetch_body()
@@ -468,7 +469,7 @@ def test_key_check_runs_before_begin_restore_run(ui, fetch_env, monkeypatch):
 def test_refused_search_is_not_skip_listed_and_stops_the_run(ui, fetch_env):
     """Safety net (Q2): a refusal mid-run stops the loop at that game, hides
     nothing, and still seals the games already done."""
-    fetch_env.outcomes = {2: (fg.SEARCH_REFUSED, None)}
+    fetch_env.outcomes = {2: (sgdb.SEARCH_REFUSED, None)}
     app = make_app(ui, [_game(1), _game(2), _game(3)])
 
     app._run_fetch_body()
@@ -483,7 +484,7 @@ def test_refused_search_is_not_skip_listed_and_stops_the_run(ui, fetch_env):
 
 
 def test_not_found_is_skip_listed_but_a_network_error_is_not(ui, fetch_env):
-    fetch_env.outcomes = {1: (fg.SEARCH_NOT_FOUND, None), 2: (fg.SEARCH_ERROR, None)}
+    fetch_env.outcomes = {1: (sgdb.SEARCH_NOT_FOUND, None), 2: (sgdb.SEARCH_ERROR, None)}
     app = make_app(ui, [_game(1), _game(2), _game(3)])
 
     app._run_fetch_body()
@@ -1028,7 +1029,7 @@ def preview_env(ui, tmp_path, monkeypatch):
                         lambda lbl, path, on_anim=None, cache=None, cache_key=None:
                         shown.append(path))
     bodies = {}
-    monkeypatch.setattr(fg, "_http_get", lambda url, **kw: bodies[url])
+    monkeypatch.setattr(sgdb, "http_get", lambda url, **kw: bodies[url])
     cache = tmp_path / "cache"
     cache.mkdir()
     for i in range(3):

@@ -252,7 +252,7 @@ def test_wiring_results_window_does_no_file_work_itself():
     test_results_animated_icon_apply_...), which replaced the AST checks of the
     worker's call names. What stays here: the file does no file work of its own."""
     tree = _module("results_window.py")
-    assert not _calls_named(tree, "_http_get"), "results_window.py must not download itself"
+    assert not _calls_named(tree, "http_get"), "results_window.py must not download itself"
     assert not _calls_named(tree, "clear_slot_files"), (
         "results_window.py must not clear slots itself — install_into_slot does")
     opens = [c for c in _calls_named(tree, "open") if isinstance(c.func, ast.Name)]

@@ -36,6 +36,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import find_games as fg  # noqa: E402
+import sgdb
 import steam_env
 import appfiles
 
@@ -61,21 +62,21 @@ def _owner(name):
 
 def test_release_year_valid_timestamp():
     # 2021-01-01 00:00:00 UTC
-    assert fg._release_year(1609459200) == "2021"
+    assert sgdb._release_year(1609459200) == "2021"
 
 
 def test_release_year_valid_string_timestamp():
     # The function int()s its input, so a numeric string works too.
-    assert fg._release_year("1609459200") == "2021"
+    assert sgdb._release_year("1609459200") == "2021"
 
 
 @pytest.mark.parametrize("falsy", [0, None, ""])
 def test_release_year_falsy_returns_empty(falsy):
-    assert fg._release_year(falsy) == ""
+    assert sgdb._release_year(falsy) == ""
 
 
 def test_release_year_non_numeric_returns_empty():
-    assert fg._release_year("not-a-number") == ""
+    assert sgdb._release_year("not-a-number") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -83,21 +84,21 @@ def test_release_year_non_numeric_returns_empty():
 # ---------------------------------------------------------------------------
 
 def test_pref_params_animated_never_static():
-    assert fg._pref_params({"animated": "never"})["types"] == "static"
+    assert sgdb._pref_params({"animated": "never"})["types"] == "static"
 
 
 def test_pref_params_animated_must_have_animated():
-    assert fg._pref_params({"animated": "must_have"})["types"] == "animated"
+    assert sgdb._pref_params({"animated": "must_have"})["types"] == "animated"
 
 
 def test_pref_params_animated_ok_no_types_key():
-    assert "types" not in fg._pref_params({"animated": "ok"})
+    assert "types" not in sgdb._pref_params({"animated": "ok"})
 
 
 def test_pref_params_animated_absent_no_types_key():
     # Default for animated is "never" -> the code DOES add types=static when absent.
     # Verify the documented mapping: absent -> default "never" -> types=static.
-    assert fg._pref_params({})["types"] == "static"
+    assert sgdb._pref_params({})["types"] == "static"
 
 
 @pytest.mark.parametrize(
@@ -105,7 +106,7 @@ def test_pref_params_animated_absent_no_types_key():
     [("never", "false"), ("must_have", "true"), ("ok", "any"), ("anything_else", "any")],
 )
 def test_pref_params_nsfw_mapping(value, expected):
-    assert fg._pref_params({"nsfw": value})["nsfw"] == expected
+    assert sgdb._pref_params({"nsfw": value})["nsfw"] == expected
 
 
 @pytest.mark.parametrize(
@@ -113,12 +114,12 @@ def test_pref_params_nsfw_mapping(value, expected):
     [("never", "false"), ("must_have", "true"), ("ok", "any"), ("whatever", "any")],
 )
 def test_pref_params_humor_mapping(value, expected):
-    assert fg._pref_params({"humor": value})["humor"] == expected
+    assert sgdb._pref_params({"humor": value})["humor"] == expected
 
 
 def test_pref_params_nsfw_humor_absent_default_any():
     # Default for nsfw/humor in this helper is "ok" -> "any".
-    p = fg._pref_params({})
+    p = sgdb._pref_params({})
     assert p["nsfw"] == "any"
     assert p["humor"] == "any"
 
@@ -148,23 +149,23 @@ def test_get_styles_grids_selects_matching_value():
         "grid_alternate": "must_have",
         "grid_material": "ok",
     }
-    got = fg._get_styles("grids", prefs, "must_have")
+    got = sgdb._get_styles("grids", prefs, "must_have")
     # _STYLE_MAP maps grid_no_logo->no_logo, grid_alternate->alternate
     assert set(got) == {"no_logo", "alternate"}
 
 
 def test_get_styles_value_never():
     prefs = {"grid_blurred": "never", "grid_material": "never", "grid_no_logo": "ok"}
-    assert set(fg._get_styles("grids", prefs, "never")) == {"blurred", "material"}
+    assert set(sgdb._get_styles("grids", prefs, "never")) == {"blurred", "material"}
 
 
 def test_get_styles_unknown_art_type_returns_empty():
-    assert fg._get_styles("nonexistent", {"anything": "must_have"}, "must_have") == []
+    assert sgdb._get_styles("nonexistent", {"anything": "must_have"}, "must_have") == []
 
 
 def test_get_styles_heroes_mapping():
     prefs = {"hero_alternate": "must_have", "hero_blurred": "ok"}
-    assert fg._get_styles("heroes", prefs, "must_have") == ["alternateArt"]
+    assert sgdb._get_styles("heroes", prefs, "must_have") == ["alternateArt"]
 
 
 def test_strip_never_filters_never_styles():
@@ -174,14 +175,14 @@ def test_strip_never_filters_never_styles():
         {"style": "alternate", "url": "b"},
         {"style": "material", "url": "c"},
     ]
-    filtered = fg._strip_never(results, "grids", prefs)
+    filtered = sgdb._strip_never(results, "grids", prefs)
     assert [r["url"] for r in filtered] == ["b", "c"]
 
 
 def test_strip_never_no_never_returns_input_unchanged():
     prefs = {"grid_blurred": "ok", "grid_material": "ok"}
     results = [{"style": "blurred", "url": "a"}, {"style": "material", "url": "b"}]
-    out = fg._strip_never(results, "grids", prefs)
+    out = sgdb._strip_never(results, "grids", prefs)
     # When there are no "never" styles the function returns the original list object.
     assert out is results
 
@@ -189,7 +190,7 @@ def test_strip_never_no_never_returns_input_unchanged():
 def test_strip_never_keeps_records_with_unknown_style():
     prefs = {"grid_blurred": "never"}
     results = [{"style": "weird_unmapped", "url": "x"}, {"style": "blurred", "url": "y"}]
-    filtered = fg._strip_never(results, "grids", prefs)
+    filtered = sgdb._strip_never(results, "grids", prefs)
     assert [r["url"] for r in filtered] == ["x"]
 
 
@@ -509,10 +510,10 @@ def test_sgdb_get_returns_immediately_on_200(monkeypatch):
         return _FakeResp(200)
 
     slept = []
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
-    r = fg._sgdb_get("http://x", headers={})
+    r = sgdb._sgdb_get("http://x", headers={})
     assert r.status_code == 200
     assert calls["get"] == 1      # no retry
     assert slept == []            # never slept
@@ -528,10 +529,10 @@ def test_sgdb_get_retries_once_on_429_then_200(monkeypatch):
         return r
 
     slept = []
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
-    r = fg._sgdb_get("http://x", headers={})
+    r = sgdb._sgdb_get("http://x", headers={})
     assert r.status_code == 200
     assert calls["get"] == 2          # initial + one retry
     assert slept == [2]               # first backoff value (no Retry-After header)
@@ -546,10 +547,10 @@ def test_sgdb_get_exhausts_retries_returns_last_429(monkeypatch):
         return _FakeResp(429)
 
     slept = []
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
-    r = fg._sgdb_get("http://x", headers={}, retries=2)
+    r = sgdb._sgdb_get("http://x", headers={}, retries=2)
     assert r.status_code == 429
     assert calls["get"] == 3          # 1 initial + 2 retries
     assert slept == [2, 4]            # the two backoff defaults
@@ -566,10 +567,10 @@ def test_sgdb_get_respects_retry_after_header_capped_at_5(monkeypatch):
         return r
 
     slept = []
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
-    r = fg._sgdb_get("http://x", headers={})
+    r = sgdb._sgdb_get("http://x", headers={})
     assert r.status_code == 200
     assert slept == [5]               # capped
 
@@ -584,10 +585,10 @@ def test_sgdb_get_retry_after_under_cap_used_directly(monkeypatch):
         return r
 
     slept = []
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
-    fg._sgdb_get("http://x", headers={})
+    sgdb._sgdb_get("http://x", headers={})
     assert slept == [3]               # used directly, below the 5s cap
 
 
@@ -602,10 +603,10 @@ def test_sgdb_get_malformed_retry_after_falls_back_to_backoff(monkeypatch):
         return r
 
     slept = []
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
-    fg._sgdb_get("http://x", headers={})
+    sgdb._sgdb_get("http://x", headers={})
     assert slept == [2]               # fell back to first backoff
 
 
@@ -642,24 +643,24 @@ def _serve(monkeypatch, *responses):
         if isinstance(r, Exception):
             raise r
         return r
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: None)
     return urls
 
 
 def test_check_api_key_401_is_rejected(monkeypatch):
     _serve(monkeypatch, _JsonResp(401, _SGDB_401))
-    assert fg.check_api_key("bad-key") == fg.KEY_REJECTED
+    assert sgdb.check_api_key("bad-key") == sgdb.KEY_REJECTED
 
 
 def test_check_api_key_403_is_rejected(monkeypatch):
     _serve(monkeypatch, _JsonResp(403, {"success": False}))
-    assert fg.check_api_key("bad-key") == fg.KEY_REJECTED
+    assert sgdb.check_api_key("bad-key") == sgdb.KEY_REJECTED
 
 
 def test_check_api_key_connection_error_is_unreachable(monkeypatch):
     _serve(monkeypatch, fg.requests.exceptions.ConnectionError("no route"))
-    assert fg.check_api_key("good-key") == fg.KEY_UNREACHABLE
+    assert sgdb.check_api_key("good-key") == sgdb.KEY_UNREACHABLE
 
 
 @pytest.mark.parametrize("resp", [
@@ -671,12 +672,12 @@ def test_check_api_key_server_trouble_is_unreachable_not_rejected(monkeypatch, r
     """A 5xx, a 429 that outlasts the retries or a garbled body says nothing
     about the key, so it must never be reported as a rejection."""
     _serve(monkeypatch, resp)
-    assert fg.check_api_key("good-key") == fg.KEY_UNREACHABLE
+    assert sgdb.check_api_key("good-key") == sgdb.KEY_UNREACHABLE
 
 
 def test_check_api_key_200_is_accepted(monkeypatch):
     _serve(monkeypatch, _JsonResp(200, {"success": True, "data": []}))
-    assert fg.check_api_key("good-key") == fg.KEY_ACCEPTED
+    assert sgdb.check_api_key("good-key") == sgdb.KEY_ACCEPTED
 
 
 def test_check_api_key_defaults_to_the_saved_key(monkeypatch):
@@ -685,20 +686,20 @@ def test_check_api_key_defaults_to_the_saved_key(monkeypatch):
     def fake_get(url, headers=None, params=None, timeout=None, stream=False):
         seen.append(headers["Authorization"])
         return _JsonResp(200, {"success": True})
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(appfiles, "load_api_key", lambda: "SAVED")
-    assert fg.check_api_key() == fg.KEY_ACCEPTED
+    assert sgdb.check_api_key() == sgdb.KEY_ACCEPTED
     assert seen == ["Bearer SAVED"]
 
 
 def test_verify_api_key_keeps_its_bool_contract(monkeypatch):
     _serve(monkeypatch, _JsonResp(200, {"success": True}))
-    assert fg.verify_api_key("k") is True
+    assert sgdb.verify_api_key("k") is True
     _serve(monkeypatch, _JsonResp(401, _SGDB_401))
-    assert fg.verify_api_key("k") is False
+    assert sgdb.verify_api_key("k") is False
     _serve(monkeypatch, fg.requests.exceptions.ConnectionError("x"))
-    assert fg.verify_api_key("k") is False
-    assert fg.verify_api_key("   ") is False
+    assert sgdb.verify_api_key("k") is False
+    assert sgdb.verify_api_key("   ") is False
 
 
 def _search_setup(tmp_path, monkeypatch):
@@ -711,26 +712,26 @@ def test_search_game_401_is_refused(tmp_path, monkeypatch):
     fetch hid the game for good."""
     _search_setup(tmp_path, monkeypatch)
     _serve(monkeypatch, _JsonResp(401, _SGDB_401))
-    assert fg.search_game("Doom Eternal", 1) == (fg.SEARCH_REFUSED, None)
+    assert sgdb.search_game("Doom Eternal", 1) == (sgdb.SEARCH_REFUSED, None)
 
 
 def test_search_game_403_is_refused(tmp_path, monkeypatch):
     _search_setup(tmp_path, monkeypatch)
     _serve(monkeypatch, _JsonResp(403, {"success": False}))
-    assert fg.search_game("Doom", 1) == (fg.SEARCH_REFUSED, None)
+    assert sgdb.search_game("Doom", 1) == (sgdb.SEARCH_REFUSED, None)
 
 
 def test_search_game_empty_data_is_not_found_after_every_query(tmp_path, monkeypatch):
     _search_setup(tmp_path, monkeypatch)
     urls = _serve(monkeypatch, _JsonResp(200, {"success": True, "data": []}))
-    assert fg.search_game("Some Long Game Title", 1) == (fg.SEARCH_NOT_FOUND, None)
+    assert sgdb.search_game("Some Long Game Title", 1) == (sgdb.SEARCH_NOT_FOUND, None)
     assert len(urls) == 2, "both the full and the 3-word query must come back empty"
 
 
 def test_search_game_network_error_is_error(tmp_path, monkeypatch):
     _search_setup(tmp_path, monkeypatch)
     _serve(monkeypatch, fg.requests.exceptions.ConnectionError("down"))
-    assert fg.search_game("Doom", 1) == (fg.SEARCH_ERROR, None)
+    assert sgdb.search_game("Doom", 1) == (sgdb.SEARCH_ERROR, None)
 
 
 @pytest.mark.parametrize("resp", [
@@ -744,14 +745,14 @@ def test_search_game_anything_but_genuine_empty_is_error(tmp_path, monkeypatch, 
     """Only {"success": true, "data": []} may count as not-found."""
     _search_setup(tmp_path, monkeypatch)
     _serve(monkeypatch, resp)
-    assert fg.search_game("Doom", 1) == (fg.SEARCH_ERROR, None)
+    assert sgdb.search_game("Doom", 1) == (sgdb.SEARCH_ERROR, None)
 
 
 def test_search_game_found_returns_first_hit(tmp_path, monkeypatch):
     _search_setup(tmp_path, monkeypatch)
     _serve(monkeypatch, _JsonResp(200, {"success": True, "data": [
         {"id": 77, "name": "Doom"}, {"id": 78, "name": "Doom II"}]}))
-    assert fg.search_game("Doom", 1) == (fg.SEARCH_FOUND, 77)
+    assert sgdb.search_game("Doom", 1) == (sgdb.SEARCH_FOUND, 77)
 
 
 # ---------------------------------------------------------------------------
@@ -1256,7 +1257,7 @@ def _fake_release(tag, assets=None, html_url="https://github.com/example/release
 
 
 def test_check_for_update_available(monkeypatch):
-    monkeypatch.setattr(fg, "_http_get",
+    monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0")))
     result = fg.check_for_update("1.2.5")
     assert result is not None
@@ -1266,7 +1267,7 @@ def test_check_for_update_available(monkeypatch):
 
 
 def test_check_for_update_up_to_date(monkeypatch):
-    monkeypatch.setattr(fg, "_http_get",
+    monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.2.5")))
     result = fg.check_for_update("1.2.5")
     assert result is not None
@@ -1274,7 +1275,7 @@ def test_check_for_update_up_to_date(monkeypatch):
 
 
 def test_check_for_update_older_release_not_available(monkeypatch):
-    monkeypatch.setattr(fg, "_http_get",
+    monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.0.0")))
     result = fg.check_for_update("1.2.5")
     assert result["available"] is False
@@ -1284,7 +1285,7 @@ def test_check_for_update_network_error_returns_error_dict(monkeypatch):
     slept = []
     def boom(*a, **kw):
         raise fg.requests.exceptions.RequestException("no network")
-    monkeypatch.setattr(fg, "_http_get", boom)
+    monkeypatch.setattr(sgdb, "http_get", boom)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
     result = fg.check_for_update("1.2.5")
     assert result is not None
@@ -1299,7 +1300,7 @@ def test_check_for_update_picks_linux_asset(monkeypatch):
         {"name": "NonSteamScraper-linux", "browser_download_url": "https://dl/linux"},
         {"name": "NonSteamScraper-win.zip", "browser_download_url": "https://dl/win.zip"},
     ]
-    monkeypatch.setattr(fg, "_http_get",
+    monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
     result = fg.check_for_update("1.2.5")
@@ -1311,7 +1312,7 @@ def test_check_for_update_picks_windows_asset(monkeypatch):
         {"name": "NonSteamScraper-linux", "browser_download_url": "https://dl/linux"},
         {"name": "NonSteamScraper-win.zip", "browser_download_url": "https://dl/win.zip"},
     ]
-    monkeypatch.setattr(fg, "_http_get",
+    monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Windows")
     result = fg.check_for_update("1.2.5")
@@ -1321,7 +1322,7 @@ def test_check_for_update_picks_windows_asset(monkeypatch):
 def test_check_for_update_falls_back_to_html_url_when_no_matching_asset(monkeypatch):
     assets = [{"name": "checksums.txt", "browser_download_url": "https://dl/chk"}]
     release_page = "https://github.com/example/releases/tag/v1.3.0"
-    monkeypatch.setattr(fg, "_http_get",
+    monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(
             _fake_release("v1.3.0", assets=assets, html_url=release_page)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
@@ -1337,7 +1338,7 @@ def test_check_for_update_linux_bare_binary_fallback(monkeypatch):
         {"name": "NonSteamScraper", "browser_download_url": "https://dl/bin"},
         {"name": "checksums.txt", "browser_download_url": "https://dl/chk"},
     ]
-    monkeypatch.setattr(fg, "_http_get",
+    monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse(_fake_release("v1.3.0", assets=assets)))
     monkeypatch.setattr(fg.platform, "system", lambda: "Linux")
     result = fg.check_for_update("1.2.5")
@@ -1345,7 +1346,7 @@ def test_check_for_update_linux_bare_binary_fallback(monkeypatch):
 
 
 def test_check_for_update_empty_tag_returns_error_dict(monkeypatch):
-    monkeypatch.setattr(fg, "_http_get",
+    monkeypatch.setattr(sgdb, "http_get",
         lambda *a, **kw: _FakeResponse({"tag_name": "", "html_url": "x", "assets": []}))
     result = fg.check_for_update("1.2.5")
     assert result is not None
@@ -1364,7 +1365,7 @@ def test_check_for_update_retry_on_request_exception_then_success(monkeypatch):
             raise fg.requests.exceptions.RequestException("blip")
         return _FakeResponse(_fake_release("v1.3.0"))
 
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     result = fg.check_for_update("1.2.5")
@@ -1382,7 +1383,7 @@ def test_check_for_update_exhausts_retries_returns_error_dict(monkeypatch):
     def fake_get(*a, **kw):
         raise fg.requests.exceptions.RequestException("always down")
 
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     result = fg.check_for_update("1.2.5")
@@ -1405,7 +1406,7 @@ def test_check_for_update_non200_returns_error_immediately(monkeypatch):
         calls["n"] += 1
         return _Non200()
 
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     result = fg.check_for_update("1.2.5")
@@ -1428,7 +1429,7 @@ def test_check_for_update_403_returns_rate_limit_error_no_retry(monkeypatch):
         calls["n"] += 1
         return _Forbidden()
 
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     result = fg.check_for_update("1.2.5")
@@ -1455,7 +1456,7 @@ def test_check_for_update_403_reports_minutes_until_reset(monkeypatch):
         calls["n"] += 1
         return _Forbidden()
 
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     monkeypatch.setattr(fg.time, "sleep", lambda s: slept.append(s))
 
     result = fg.check_for_update("1.2.5")
@@ -1474,7 +1475,7 @@ def test_check_for_update_403_without_reset_header_is_generic(monkeypatch):
         status_code = 403
         headers = {}
 
-    monkeypatch.setattr(fg, "_http_get", lambda *a, **kw: _Forbidden())
+    monkeypatch.setattr(sgdb, "http_get", lambda *a, **kw: _Forbidden())
     result = fg.check_for_update("1.2.5")
     assert "rate limit" in result["error"].lower()
     assert "try again later" in result["error"].lower()
@@ -1488,7 +1489,7 @@ def test_check_for_update_sends_user_agent_header(monkeypatch):
         seen_headers.append(headers or {})
         return _FakeResponse(_fake_release("v1.3.0"))
 
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     fg.check_for_update("1.2.5")
     assert seen_headers, "requests.get was never called"
     assert "User-Agent" in seen_headers[0]
@@ -1503,7 +1504,7 @@ def test_check_for_update_uses_10s_timeout(monkeypatch):
         seen_timeouts.append(timeout)
         return _FakeResponse(_fake_release("v1.3.0"))
 
-    monkeypatch.setattr(fg, "_http_get", fake_get)
+    monkeypatch.setattr(sgdb, "http_get", fake_get)
     fg.check_for_update("1.2.5")
     assert seen_timeouts == [10]
 
@@ -1593,7 +1594,7 @@ def test_download_all_artwork_defer_icon_shape_consumable(tmp_path, monkeypatch)
         written.append(save_path)
         return True
 
-    monkeypatch.setattr(fg, "get_artwork", fake_get_artwork)
+    monkeypatch.setattr(sgdb, "get_artwork", fake_get_artwork)
     monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
     # set_shortcut_icon must NOT be called in defer mode; fail loudly if it is.
     monkeypatch.setattr(fg, "set_shortcut_icon",
@@ -1852,7 +1853,7 @@ def _install_fetch_mocks(monkeypatch, tmp_path, slot_assets,
         return True
 
     icon_calls = []
-    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get)
+    monkeypatch.setattr(sgdb, "_sgdb_get", fake_sgdb_get)
     monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
     monkeypatch.setattr(appfiles, "register_managed_file", lambda *a, **k: None)
     monkeypatch.setattr(fg, "snapshot_for_restore", lambda *a, **k: None)
@@ -2083,7 +2084,7 @@ def test_install_into_slot_failed_static_download_keeps_old_file_no_partial(tmp_
         def iter_content(self, n):
             yield b"half"
             raise fg.requests.exceptions.ConnectionError("reset")
-    monkeypatch.setattr(fg, "_http_get", lambda *a, **k: _Dying())
+    monkeypatch.setattr(sgdb, "http_get", lambda *a, **k: _Dying())
 
     assert fg.install_into_slot(str(grid / "12345p.png"), "https://x/new.png") is False
     assert sorted(os.listdir(grid)) == ["12345p.jpg"]
@@ -2213,7 +2214,7 @@ def test_download_all_artwork_missing_slot_is_none_and_consumable(tmp_path, monk
 
 
 # ---------------------------------------------------------------------------
-# S2 — the _http_get seam (T2): one GET path, one shared pooled session
+# S2 — the http_get seam (T2): one GET path, one shared pooled session
 # ---------------------------------------------------------------------------
 
 class _FakeStreamResp:
@@ -2233,31 +2234,31 @@ def _forbidden_get(*args, **kwargs):
 
 
 def test_http_seam_get_exists_and_is_callable():
-    assert hasattr(fg, "_http_get"), "the _http_get seam does not exist yet"
-    assert callable(fg._http_get)
+    assert hasattr(sgdb, "http_get"), "the http_get seam does not exist yet"
+    assert callable(sgdb.http_get)
 
 
 def test_http_seam_session_accessor_returns_single_shared_session():
-    assert hasattr(fg, "_get_session"), "the _get_session accessor does not exist yet"
-    s1 = fg._get_session()
-    s2 = fg._get_session()
+    assert hasattr(sgdb, "_get_session"), "the _get_session accessor does not exist yet"
+    s1 = sgdb._get_session()
+    s2 = sgdb._get_session()
     assert s1 is s2
 
 
 def test_http_seam_sgdb_get_does_not_bypass_the_seam(monkeypatch):
-    """_sgdb_get must route through _http_get; a bare requests.get call is the
+    """_sgdb_get must route through http_get; a bare requests.get call is the
     failure being guarded against."""
-    assert hasattr(fg, "_http_get"), "the _http_get seam does not exist yet"
+    assert hasattr(sgdb, "http_get"), "the http_get seam does not exist yet"
     used = []
 
     def fake_http_get(url, **kwargs):
         used.append((url, kwargs))
         return _FakeResp(200)
 
-    monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
+    monkeypatch.setattr(sgdb, "http_get", fake_http_get, raising=False)
     monkeypatch.setattr(fg.requests, "get", _forbidden_get)
 
-    r = fg._sgdb_get("http://x", headers={})
+    r = sgdb._sgdb_get("http://x", headers={})
 
     assert r.status_code == 200
     assert len(used) == 1
@@ -2267,7 +2268,7 @@ def test_http_seam_sgdb_get_does_not_bypass_the_seam(monkeypatch):
 def test_http_seam_download_artwork_uses_seam_with_stream_and_timeout(monkeypatch, tmp_path):
     """download_artwork must use the seam with stream=True and timeout=10,
     matching today's call (find_games.py:820)."""
-    assert hasattr(fg, "_http_get"), "the _http_get seam does not exist yet"
+    assert hasattr(sgdb, "http_get"), "the http_get seam does not exist yet"
     seen = {}
 
     def fake_http_get(url, **kwargs):
@@ -2275,7 +2276,7 @@ def test_http_seam_download_artwork_uses_seam_with_stream_and_timeout(monkeypatc
         seen.update(kwargs)
         return _FakeStreamResp(200, [b"abc"], {"Content-Length": "3"})
 
-    monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
+    monkeypatch.setattr(sgdb, "http_get", fake_http_get, raising=False)
     monkeypatch.setattr(fg.requests, "get", _forbidden_get)
     monkeypatch.setattr(appfiles, "MANAGED_FILE", str(tmp_path / "managed"))
 
@@ -2295,7 +2296,7 @@ def test_http_seam_download_artwork_uses_seam_with_stream_and_timeout(monkeypatc
 def test_rate_limit_hook_reports_retry_after_wait(monkeypatch):
     """A 429 with Retry-After: 3 must call RATE_LIMIT_HOOK once with a message
     mentioning the 3-second wait, so the wait shows up in the activity log."""
-    assert hasattr(fg, "RATE_LIMIT_HOOK"), "the RATE_LIMIT_HOOK module hook does not exist yet"
+    assert hasattr(sgdb, "RATE_LIMIT_HOOK"), "the RATE_LIMIT_HOOK module hook does not exist yet"
     responses = [_FakeResp(429, headers={"Retry-After": "3"}), _FakeResp(200)]
     calls = {"get": 0}
 
@@ -2304,12 +2305,12 @@ def test_rate_limit_hook_reports_retry_after_wait(monkeypatch):
         calls["get"] += 1
         return r
 
-    monkeypatch.setattr(fg, "_http_get", fake_get, raising=False)
+    monkeypatch.setattr(sgdb, "http_get", fake_get, raising=False)
     monkeypatch.setattr(fg.time, "sleep", lambda s: None)
     messages = []
-    monkeypatch.setattr(fg, "RATE_LIMIT_HOOK", messages.append, raising=False)
+    monkeypatch.setattr(sgdb, "RATE_LIMIT_HOOK", messages.append, raising=False)
 
-    r = fg._sgdb_get("http://x", headers={})
+    r = sgdb._sgdb_get("http://x", headers={})
 
     assert r.status_code == 200
     assert len(messages) == 1
@@ -2319,7 +2320,7 @@ def test_rate_limit_hook_reports_retry_after_wait(monkeypatch):
 def test_rate_limit_hook_raising_never_breaks_sgdb_get(monkeypatch):
     """A hook that raises must be swallowed — find_games stays UI-free and a
     broken hook must never take a fetch down."""
-    assert hasattr(fg, "RATE_LIMIT_HOOK"), "the RATE_LIMIT_HOOK module hook does not exist yet"
+    assert hasattr(sgdb, "RATE_LIMIT_HOOK"), "the RATE_LIMIT_HOOK module hook does not exist yet"
     responses = [_FakeResp(429, headers={"Retry-After": "1"}), _FakeResp(200)]
     calls = {"get": 0}
 
@@ -2328,15 +2329,15 @@ def test_rate_limit_hook_raising_never_breaks_sgdb_get(monkeypatch):
         calls["get"] += 1
         return r
 
-    monkeypatch.setattr(fg, "_http_get", fake_get, raising=False)
+    monkeypatch.setattr(sgdb, "http_get", fake_get, raising=False)
     monkeypatch.setattr(fg.time, "sleep", lambda s: None)
 
     def bad_hook(msg):
         raise RuntimeError("hook exploded")
 
-    monkeypatch.setattr(fg, "RATE_LIMIT_HOOK", bad_hook, raising=False)
+    monkeypatch.setattr(sgdb, "RATE_LIMIT_HOOK", bad_hook, raising=False)
 
-    r = fg._sgdb_get("http://x", headers={})
+    r = sgdb._sgdb_get("http://x", headers={})
 
     assert r.status_code == 200
 
@@ -2873,9 +2874,9 @@ _STEAM_META_PORTAL2 = {
 
 
 def test_steam_official_images_old_layout_urls():
-    out = fg.steam_official_images("620", _STEAM_META_PORTAL2)
-    store = fg.STEAM_STORE_CDN
-    community = fg.STEAM_COMMUNITY_CDN
+    out = sgdb.steam_official_images("620", _STEAM_META_PORTAL2)
+    store = sgdb.STEAM_STORE_CDN
+    community = sgdb.STEAM_COMMUNITY_CDN
     t = "?t=1745362999"
 
     assert out["grids"]["url"] == store + "/620/library_600x900_2x.jpg" + t
@@ -2900,9 +2901,9 @@ def test_steam_official_images_fallbacks():
         "library_hero_full": {"image2x": {"english": "library_hero_2x.jpg"}},
         "library_logo_full": {"image": {"english": "logo.png"}},
     }
-    out = fg.steam_official_images("7", meta)
-    store = fg.STEAM_STORE_CDN
-    community = fg.STEAM_COMMUNITY_CDN
+    out = sgdb.steam_official_images("7", meta)
+    store = sgdb.STEAM_STORE_CDN
+    community = sgdb.STEAM_COMMUNITY_CDN
 
     assert out["grids"]["url"] == store + "/7/library_600x900.jpg"
     assert out["grids_wide"]["url"] == store + "/7/header.jpg"
@@ -2914,7 +2915,7 @@ def test_steam_official_images_fallbacks():
     for record in out.values():
         assert "?t=" not in record["url"]
 
-    assert fg.steam_official_images("7", {}) == {}
+    assert sgdb.steam_official_images("7", {}) == {}
 
 
 def test_steam_official_images_hashed_layout_and_language():
@@ -2924,8 +2925,8 @@ def test_steam_official_images_hashed_layout_and_language():
         "library_hero_full": {"image": {"german": "hero_de.jpg"}},
         "library_logo_full": {"image2x": {"english": "logo_en.png", "german": "logo_de.png"}},
     }
-    out = fg.steam_official_images("9", meta)
-    store = fg.STEAM_STORE_CDN
+    out = sgdb.steam_official_images("9", meta)
+    store = sgdb.STEAM_STORE_CDN
 
     assert out["grids"]["url"] == store + "/9/" + hashed
     assert out["heroes"]["url"] == store + "/9/hero_de.jpg"
@@ -2944,10 +2945,10 @@ def test_get_steam_platform_data_parses_link(monkeypatch):
         }}
         return types.SimpleNamespace(json=lambda p=payload: p)
 
-    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get)
+    monkeypatch.setattr(sgdb, "_sgdb_get", fake_sgdb_get)
     monkeypatch.setattr(appfiles, "load_api_key", lambda *a, **k: "K")
 
-    assert fg.get_steam_platform_data(17830) == ("620", _STEAM_META_PORTAL2)
+    assert sgdb.get_steam_platform_data(17830) == ("620", _STEAM_META_PORTAL2)
     assert recorded["url"].endswith("/games/id/17830")
     assert recorded["params"] == {"platformdata": "steam"}
 
@@ -2959,29 +2960,29 @@ def test_get_steam_platform_data_none_on_missing_or_error(monkeypatch):
         payload = {"success": True, "data": {"id": 17830}}
         return types.SimpleNamespace(json=lambda p=payload: p)
 
-    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get_no_platform)
-    assert fg.get_steam_platform_data(17830) is None
+    monkeypatch.setattr(sgdb, "_sgdb_get", fake_sgdb_get_no_platform)
+    assert sgdb.get_steam_platform_data(17830) is None
 
     def fake_sgdb_get_empty_steam(url, headers=None, params=None, timeout=None, retries=3):
         payload = {"success": True, "data": {"external_platform_data": {"steam": []}}}
         return types.SimpleNamespace(json=lambda p=payload: p)
 
-    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get_empty_steam)
-    assert fg.get_steam_platform_data(17830) is None
+    monkeypatch.setattr(sgdb, "_sgdb_get", fake_sgdb_get_empty_steam)
+    assert sgdb.get_steam_platform_data(17830) is None
 
     def fake_sgdb_get_raises(url, headers=None, params=None, timeout=None, retries=3):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get_raises)
-    assert fg.get_steam_platform_data(17830) is None
+    monkeypatch.setattr(sgdb, "_sgdb_get", fake_sgdb_get_raises)
+    assert sgdb.get_steam_platform_data(17830) is None
 
     def fake_sgdb_get_bad_json(url, headers=None, params=None, timeout=None, retries=3):
         def bad_json():
             raise ValueError("no json")
         return types.SimpleNamespace(json=bad_json)
 
-    monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get_bad_json)
-    assert fg.get_steam_platform_data(17830) is None
+    monkeypatch.setattr(sgdb, "_sgdb_get", fake_sgdb_get_bad_json)
+    assert sgdb.get_steam_platform_data(17830) is None
 
 
 def _five_static(prefix):
@@ -2989,7 +2990,7 @@ def _five_static(prefix):
 
 
 def _steam_link_patch(monkeypatch):
-    monkeypatch.setattr(fg, "get_steam_platform_data",
+    monkeypatch.setattr(sgdb, "get_steam_platform_data",
                         lambda sgdb_id, m=_STEAM_META_PORTAL2: ("620", m))
 
 
@@ -3002,7 +3003,7 @@ def test_download_all_artwork_steam_first_and_applied(tmp_path, monkeypatch):
     }
     _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
     _steam_link_patch(monkeypatch)
-    steam_images = fg.steam_official_images("620", _STEAM_META_PORTAL2)
+    steam_images = sgdb.steam_official_images("620", _STEAM_META_PORTAL2)
 
     results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
@@ -3023,7 +3024,7 @@ def test_download_all_artwork_steam_first_and_applied(tmp_path, monkeypatch):
 def test_download_all_artwork_steam_fills_empty_slot(tmp_path, monkeypatch):
     _install_fetch_mocks(monkeypatch, tmp_path, {})
     _steam_link_patch(monkeypatch)
-    steam_images = fg.steam_official_images("620", _STEAM_META_PORTAL2)
+    steam_images = sgdb.steam_official_images("620", _STEAM_META_PORTAL2)
 
     results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
@@ -3043,7 +3044,7 @@ def test_download_all_artwork_steam_excluded_by_official_never(tmp_path, monkeyp
     }
     _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
     _steam_link_patch(monkeypatch)
-    steam_images = fg.steam_official_images("620", _STEAM_META_PORTAL2)
+    steam_images = sgdb.steam_official_images("620", _STEAM_META_PORTAL2)
 
     prefs = {"logo_official": "never", "icon_official": "never", "grid_no_logo": "never"}
     results = fg.download_all_artwork(42, 12345, prefs=prefs, defer_icon=True)
@@ -3066,7 +3067,7 @@ def test_download_all_artwork_no_steam_link_unchanged(tmp_path, monkeypatch):
         "icons":  _five_static("i"),
     }
     _install_fetch_mocks(monkeypatch, tmp_path, slot_assets)
-    monkeypatch.setattr(fg, "get_steam_platform_data", lambda sgdb_id: None)
+    monkeypatch.setattr(sgdb, "get_steam_platform_data", lambda sgdb_id: None)
 
     results = fg.download_all_artwork(42, 12345, prefs={}, defer_icon=True)
 
@@ -3131,7 +3132,7 @@ def test_download_artwork_gzip_length_mismatch_still_saves(tmp_path, monkeypatch
         return _FakeStreamResp(200, [b"abcd", b"efgh"],
                                {"Content-Length": "3", "Content-Encoding": "gzip"})
 
-    monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
+    monkeypatch.setattr(sgdb, "http_get", fake_http_get, raising=False)
 
     save_path = tmp_path / "a.ico"
     assert fg.download_artwork("https://x/icon.ico", str(save_path), register=False) is True
@@ -3147,7 +3148,7 @@ def test_download_artwork_unencoded_length_mismatch_fails(tmp_path, monkeypatch)
     def fake_http_get(url, **kwargs):
         return _FakeStreamResp(200, [b"abc"], {"Content-Length": "10"})
 
-    monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
+    monkeypatch.setattr(sgdb, "http_get", fake_http_get, raising=False)
 
     save_path = tmp_path / "b.png"
     assert fg.download_artwork("https://x/b.png", str(save_path), register=False) is False
@@ -3162,7 +3163,7 @@ def test_download_artwork_identity_encoding_length_mismatch_fails(tmp_path, monk
         return _FakeStreamResp(200, [b"abc"],
                                {"Content-Length": "10", "Content-Encoding": "identity"})
 
-    monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
+    monkeypatch.setattr(sgdb, "http_get", fake_http_get, raising=False)
 
     save_path = tmp_path / "c.png"
     assert fg.download_artwork("https://x/c.png", str(save_path), register=False) is False

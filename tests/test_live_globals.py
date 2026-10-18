@@ -25,6 +25,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import sgdb
 import appfiles  # noqa: E402
 import steam_env  # noqa: E402
 
@@ -83,10 +84,10 @@ def test_a_fetch_download_after_the_switch_lands_in_the_new_account(two_accounts
     grid_a, _ = _paths(two_accounts, "111")
     grid_b, _ = _paths(two_accounts, "222")
     steam_env.set_active_user("222")
-    monkeypatch.setattr(fg, "get_artwork", lambda sgdb_id, art_type, prefs=None, dimensions=None:
+    monkeypatch.setattr(sgdb, "get_artwork", lambda sgdb_id, art_type, prefs=None, dimensions=None:
                         [{"url": f"https://x/{art_type}.png", "mime": "image/png"}]
                         if art_type == "grids" else [])
-    monkeypatch.setattr(fg, "get_steam_platform_data", lambda sgdb_id: None)
+    monkeypatch.setattr(sgdb, "get_steam_platform_data", lambda sgdb_id: None)
 
     def fake_download(url, save_path, register=True):
         with open(save_path, "wb") as f:

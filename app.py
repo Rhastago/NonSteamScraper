@@ -3,6 +3,7 @@ from tkinter import messagebox
 import sys
 from concurrent.futures import ThreadPoolExecutor
 import find_games as fg  # live access to rebound globals (e.g. fg.GRID_FOLDER after account switch)
+import sgdb
 import steam_env
 from appfiles import clean_old_cache
 
@@ -81,7 +82,7 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self._settings_on_fetch_end = None
         # The open results window (results_window.ResultsWindow), or None.
         self._results_view = None
-        fg.RATE_LIMIT_HOOK = lambda msg: self.log(msg, icon="warning")
+        sgdb.RATE_LIMIT_HOOK = lambda msg: self.log(msg, icon="warning")
         self._icon_cache = {}
         # Row-thumbnail cache: (app_id, path, mtime, size) -> ImageTk.PhotoImage.
         # Keyed including mtime+size so a re-fetch that swaps art invalidates the old

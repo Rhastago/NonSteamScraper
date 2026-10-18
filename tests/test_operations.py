@@ -21,6 +21,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import sgdb
 import steam_env
 import appfiles
 import operations  # noqa: E402
@@ -34,11 +35,11 @@ import operations  # noqa: E402
 def run_env(monkeypatch, tmp_path):
     """Record, in ONE ordered list, every step run_fetch takes outside itself."""
     rec = types.SimpleNamespace(calls=[], logs=[], progress=[], outcomes={},
-                                icon_for=set(), steam_running=False, key=fg.KEY_ACCEPTED)
+                                icon_for=set(), steam_running=False, key=sgdb.KEY_ACCEPTED)
 
     def search(name, app_id=None):
         rec.calls.append(("search", app_id))
-        return rec.outcomes.get(app_id, (fg.SEARCH_FOUND, 1000 + app_id))
+        return rec.outcomes.get(app_id, (sgdb.SEARCH_FOUND, 1000 + app_id))
 
     def download(sgdb_id, app_id, prefs, progress_cb=None, defer_icon=False):
         rec.calls.append(("download", app_id))
@@ -51,11 +52,11 @@ def run_env(monkeypatch, tmp_path):
             art.icon_write = (app_id, f"/g/{app_id}_icon.png")
         return art
 
-    monkeypatch.setattr(fg, "check_api_key",
+    monkeypatch.setattr(sgdb, "check_api_key",
                         lambda key=None: rec.calls.append("check") or rec.key)
     monkeypatch.setattr(fg, "begin_restore_run", lambda: rec.calls.append("begin"))
     monkeypatch.setattr(fg, "seal_restore_point", lambda: rec.calls.append("seal"))
-    monkeypatch.setattr(fg, "search_game", search)
+    monkeypatch.setattr(sgdb, "search_game", search)
     monkeypatch.setattr(fg, "download_all_artwork", download)
     monkeypatch.setattr(appfiles, "add_to_skip_list", lambda uid: rec.calls.append(("skip", uid)))
     monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: rec.steam_running)
@@ -118,8 +119,8 @@ def test_run_fetch_queues_icons_while_steam_runs(run_env):
     assert not any(c[0] == "write_icons" for c in run_env.calls if isinstance(c, tuple))
 
 
-@pytest.mark.parametrize("key,outcome", [(fg.KEY_REJECTED, operations.FETCH_REJECTED),
-                                         (fg.KEY_UNREACHABLE, operations.FETCH_UNREACHABLE)])
+@pytest.mark.parametrize("key,outcome", [(sgdb.KEY_REJECTED, operations.FETCH_REJECTED),
+                                         (sgdb.KEY_UNREACHABLE, operations.FETCH_UNREACHABLE)])
 def test_run_fetch_stops_before_any_change_when_the_key_fails(run_env, key, outcome):
     run_env.key = key
     report = _run(run_env, _games(1, 2))

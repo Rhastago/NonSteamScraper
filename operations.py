@@ -16,6 +16,7 @@ import time
 
 from appcommon import debug as _debug
 import find_games as fg
+import sgdb
 import steam_env
 import appfiles
 
@@ -98,12 +99,12 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
         on_log("All games already have artwork!", "applied")
         return report
 
-    key_state = fg.check_api_key()
-    if key_state == fg.KEY_REJECTED:
+    key_state = sgdb.check_api_key()
+    if key_state == sgdb.KEY_REJECTED:
         on_log("SteamGridDB rejected your API key — nothing was fetched.", "error")
         report["outcome"] = FETCH_REJECTED
         return report
-    if key_state != fg.KEY_ACCEPTED:
+    if key_state != sgdb.KEY_ACCEPTED:
         on_log(UNREACHABLE_MESSAGE, "error")
         report["outcome"] = FETCH_UNREACHABLE
         return report
@@ -134,20 +135,20 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
                     f"Searching: {name}")
 
         if str(app_id) in picked_ids:
-            outcome, sgdb_id = fg.SEARCH_FOUND, picked_ids[str(app_id)]
+            outcome, sgdb_id = sgdb.SEARCH_FOUND, picked_ids[str(app_id)]
             on_log(f"  Using the SteamGridDB match you picked (#{sgdb_id})", None)
         else:
-            outcome, sgdb_id = fg.search_game(name, app_id)
-        if outcome == fg.SEARCH_REFUSED:
+            outcome, sgdb_id = sgdb.search_game(name, app_id)
+        if outcome == sgdb.SEARCH_REFUSED:
             # Safety net for a key revoked after the check: stop, hide nothing.
             on_log("SteamGridDB rejected the API key — fetch stopped. "
                    "No games were hidden.", "error")
             report["stopped"] = "Fetch stopped — SteamGridDB rejected the API key."
             break
-        if outcome == fg.SEARCH_ERROR:
+        if outcome == sgdb.SEARCH_ERROR:
             on_log("Network error — will retry on next fetch", "error")
             continue
-        if outcome != fg.SEARCH_FOUND:
+        if outcome != sgdb.SEARCH_FOUND:
             # Only a genuine "no results" (SEARCH_NOT_FOUND) reaches here.
             on_log("Not found on SteamGridDB — skipping permanently", "warning")
             appfiles.add_to_skip_list(app_id)

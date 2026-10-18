@@ -12,7 +12,8 @@ from appcommon import VERSION, open_url
 from theming import ACCENTS, PAD_XS, PAD_S, FONT_UI, FONT_MONO
 import find_games as fg
 import steam_env
-from find_games import verify_api_key, clear_managed_artwork
+from find_games import clear_managed_artwork
+from sgdb import verify_api_key
 from steam_env import is_steam_running, get_all_steam_users
 from appfiles import load_api_key, save_api_key, get_cache_size, clear_cache, full_reset
 
