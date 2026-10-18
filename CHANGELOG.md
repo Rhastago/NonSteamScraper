@@ -59,6 +59,11 @@ A safety release: every fix below stops the app from losing or hiding your artwo
   could not be removed (for example an image open in a viewer on Windows) used to stop the
   clean-up half-way. They now remove everything else and say how many files were left.
 
+- **The Search window's Select and Cancel buttons are always visible.** With many results
+  the list pushed them out of the window; they now sit at its bottom-left.
+- **Only one copy of the app runs at a time.** Opening it again while it is open says it is
+  already running, so two copies can no longer overwrite each other's icon changes.
+
 ### Improved
 - **Large libraries scroll and search faster.** The game list looked through the artwork
   folder once per row on every redraw; it now looks once per redraw.
