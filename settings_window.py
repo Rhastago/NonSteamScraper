@@ -11,6 +11,7 @@ from tkinter import messagebox
 from appcommon import VERSION, open_url
 from theming import ACCENTS, PAD_XS, PAD_S, FONT_UI, FONT_MONO
 import find_games as fg
+import restore
 import steam_files
 import steam_env
 from find_games import clear_managed_artwork
@@ -210,7 +211,7 @@ def open_settings(app):
     storage_frame.pack(fill="x", padx=15, pady=5)
     storage_label = tk.Label(
         storage_frame,
-        text=(f"Undo restore point: {fg.restore_point_size()} MB   ·   "
+        text=(f"Undo restore point: {restore.restore_point_size()} MB   ·   "
               f"Older backups: {steam_files.legacy_backup_size()} MB"),
         font=(FONT_UI, 10), bg=t["bg"], fg=t["fg"])
     storage_label.pack(side="left")
@@ -227,7 +228,7 @@ def open_settings(app):
             "Are you sure?",
             parent=settings
         ):
-            fg.clear_restore_point()
+            restore.clear_restore_point()
             steam_files.clear_backup()
             storage_label.config(
                 text="Undo restore point: 0.0 MB   ·   Older backups: 0.0 MB")

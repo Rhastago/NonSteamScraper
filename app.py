@@ -3,6 +3,7 @@ from tkinter import messagebox
 import sys
 from concurrent.futures import ThreadPoolExecutor
 import find_games as fg  # live access to rebound globals (e.g. fg.GRID_FOLDER after account switch)
+import restore
 import sgdb
 import steam_env
 from appfiles import clean_old_cache
@@ -67,7 +68,7 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self.selected_rename_btn = None
         self.selected_ignore_btn = None
         self.selected_name_lbl = None
-        self._restore_point_inherited = fg.has_restore_point()
+        self._restore_point_inherited = restore.has_restore_point()
         self._fetched_this_session = False
         # Fetch busy state (B2): set by start_fetch, cleared by _end_fetch on every
         # worker exit path. _fetch_cancel is the run's stop flag, _fetch_run what a

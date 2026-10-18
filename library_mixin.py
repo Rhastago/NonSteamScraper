@@ -10,6 +10,7 @@ from tkinter import ttk
 from theming import PAD_XS, PAD_S, PAD_M, PAD_L, FONT_UI, FONT_MONO
 from imaging import _decode_row_thumb
 import find_games as fg
+import restore
 import steam_env
 import operations
 import appfiles
@@ -303,7 +304,7 @@ class LibraryMixin:
         fetch, after a Re-fetch, after an Undo and on account switch. Always
         disabled while a fetch runs."""
         self.undo_button.config(
-            state="normal" if fg.has_restore_point() and not self._fetch_busy else "disabled")
+            state="normal" if restore.has_restore_point() and not self._fetch_busy else "disabled")
 
 
     def _render_list(self):

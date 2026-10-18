@@ -25,6 +25,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import restore
 import steam_files
 import sgdb
 import appfiles  # noqa: E402
@@ -118,13 +119,13 @@ def test_the_restore_point_refuses_the_old_accounts_manifest(two_accounts):
     grid_a, _ = _paths(two_accounts, "111")
     with open(os.path.join(grid_a, f"{APP_ID}p.png"), "wb") as f:
         f.write(b"a's art")
-    fg.snapshot_for_restore(APP_ID)
-    assert fg.has_restore_point() is True
+    restore.snapshot_for_restore(APP_ID)
+    assert restore.has_restore_point() is True
 
     steam_env.set_active_user("222")
 
-    assert fg.has_restore_point() is False
-    assert fg.undo_restore_point()["games"] == 0
+    assert restore.has_restore_point() is False
+    assert restore.undo_restore_point()["games"] == 0
     with open(os.path.join(appfiles.RESTORE_FOLDER, "manifest.json"), encoding="utf-8") as f:
         assert json.load(f)["grid_folder"] == grid_a, "A's restore point stays A's"
 

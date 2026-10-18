@@ -16,6 +16,7 @@ import time
 
 from appcommon import debug as _debug
 import find_games as fg
+import restore
 import steam_files
 import sgdb
 import steam_env
@@ -34,7 +35,7 @@ def refetch(app_id):
     fetch downloads it again. clear_game_art snapshots first (Undo can put the art
     back) and deletes only this id's files. Returns the number of files removed."""
     appfiles.remove_from_skip_list(app_id)
-    return fg.clear_game_art(app_id)
+    return restore.clear_game_art(app_id)
 
 
 def rematch(app_id, name, sgdb_id):
@@ -111,7 +112,7 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
         return report
 
     report["outcome"] = FETCH_RAN
-    fg.begin_restore_run()
+    restore.begin_restore_run()
     total = len(games)
     fetch_results = report["results"]
     # Icon writes are collected during the loop and written once after it.
@@ -180,7 +181,7 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
         fetch_results.append({"name": name, "app_id": app_id, "results": results})
 
     # End of the run: seal every entry — the user has accepted this run's art.
-    fg.seal_restore_point()
+    restore.seal_restore_point()
 
     if icons_to_set:
         if steam_env.is_steam_running():

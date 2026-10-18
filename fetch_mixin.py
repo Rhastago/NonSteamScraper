@@ -13,6 +13,7 @@ from tkinter import messagebox
 from appcommon import DEBUG
 from theming import PAD_XS, PAD_L
 import find_games as fg
+import restore
 import steam_files
 import steam_env
 import operations
@@ -54,12 +55,12 @@ class FetchMixin:
         inherited from a previous session and no fetch has run since, confirm first."""
         if self._refuse_if_busy():
             return
-        if not fg.has_restore_point():
+        if not restore.has_restore_point():
             self.log("Nothing to undo.", icon="warning")
             return
         if self._restore_point_inherited and not self._fetched_this_session:
             # Count comes from the live manifest (fg. reads rebound globals).
-            count = fg.restore_point_game_count()
+            count = restore.restore_point_game_count()
             if not messagebox.askyesno(
                 "Undo Last Fetch",
                 f"Undo will restore the artwork for {count} game(s) from a "
@@ -69,7 +70,7 @@ class FetchMixin:
                 parent=self.window
             ):
                 return
-        summary = fg.undo_restore_point()
+        summary = restore.undo_restore_point()
         if summary["games"] == 0:
             self.log("Nothing to undo.", icon="warning")
             return

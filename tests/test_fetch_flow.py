@@ -26,6 +26,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import restore
 import steam_files
 import sgdb
 import steam_env
@@ -315,7 +316,7 @@ def make_settings_app(ui, monkeypatch, busy=False, users=("111",)):
     monkeypatch.setattr(sw, "load_api_key", lambda: "KEY")
     monkeypatch.setattr(steam_env, "get_steam_user_personas", lambda: {})
     monkeypatch.setattr(steam_env, "get_active_user", lambda: users[0])
-    monkeypatch.setattr(fg, "restore_point_size", lambda: 0.0)
+    monkeypatch.setattr(restore, "restore_point_size", lambda: 0.0)
     monkeypatch.setattr(steam_files, "legacy_backup_size", lambda: 0.0)
     app = make_app(ui)
     app.theme = resolve_theme("dark", "blue")
@@ -378,12 +379,12 @@ def fetch_env(ui, tmp_path, monkeypatch):
     monkeypatch.setattr(fm, "load_prefs", lambda: {})
     monkeypatch.setattr(fm, "load_api_key", lambda: "KEY")
     monkeypatch.setattr(sgdb, "check_api_key", lambda key=None: sgdb.KEY_ACCEPTED)
-    monkeypatch.setattr(fg, "begin_restore_run", lambda: rec.calls.append("begin"))
-    monkeypatch.setattr(fg, "seal_restore_point", lambda: rec.calls.append("seal"))
+    monkeypatch.setattr(restore, "begin_restore_run", lambda: rec.calls.append("begin"))
+    monkeypatch.setattr(restore, "seal_restore_point", lambda: rec.calls.append("seal"))
     monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: False)
     monkeypatch.setattr(steam_files, "set_shortcut_icons", lambda m: len(m))
     monkeypatch.setattr(steam_files, "save_pending_icons", lambda m: None)
-    monkeypatch.setattr(fg, "has_restore_point", lambda: True)
+    monkeypatch.setattr(restore, "has_restore_point", lambda: True)
     monkeypatch.setattr(ui.library_mixin, "get_non_steam_games",
                         lambda: [dict(g) for g in rec.library])
     ui.mb.calls.clear()
@@ -611,9 +612,9 @@ def test_write_commands_refuse_while_busy(ui, fetch_env, monkeypatch):
     """Q3: Re-fetch, Ignore, Restore, Undo, theme and accent refuse with a
     status line while a fetch runs — and do their job when it does not."""
     done = []
-    monkeypatch.setattr(fg, "clear_game_art", lambda uid: done.append(("clear", uid)))
+    monkeypatch.setattr(restore, "clear_game_art", lambda uid: done.append(("clear", uid)))
     monkeypatch.setattr(ui.library_mixin, "add_to_skip_list", lambda uid: done.append(("skip", uid)))
-    monkeypatch.setattr(fg, "undo_restore_point", lambda: done.append("undo") or
+    monkeypatch.setattr(restore, "undo_restore_point", lambda: done.append("undo") or
                         {"games": 0, "files": 0, "removed": 0, "queued": False})
     monkeypatch.setattr(ui.ui_mixin, "save_theme", lambda n: done.append(("theme", n)))
     monkeypatch.setattr(ui.ui_mixin, "save_accent", lambda n: done.append(("accent", n)))
@@ -962,7 +963,7 @@ def search_env(ui, fetch_env, monkeypatch):
     monkeypatch.setattr(appfiles, "save_name_override",
                         lambda uid, name: rec.calls.append(("name", uid, name)))
     monkeypatch.setattr(appfiles, "remove_from_skip_list", lambda uid: rec.calls.append(("unskip", uid)))
-    monkeypatch.setattr(fg, "clear_game_art", lambda uid: rec.calls.append(("clear", uid)) or 0)
+    monkeypatch.setattr(restore, "clear_game_art", lambda uid: rec.calls.append(("clear", uid)) or 0)
     app = make_settings_app(ui, monkeypatch)
     app.start_fetch = lambda games=None: rec.fetches.append(games)
     rec.app = app

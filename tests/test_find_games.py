@@ -36,6 +36,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import find_games as fg  # noqa: E402
+import restore
 import steam_files
 import sgdb
 import steam_env
@@ -47,7 +48,7 @@ from PIL import Image  # noqa: E402
 # that OWNS a name, or the code that reads it never sees the patch (and a path
 # patch then falls back to the sandbox HOME, which G-HOME fails). Helpers that
 # patch a name held in a variable go through _owner().
-_OWNER_MODULES = (appfiles, steam_env, sgdb, steam_files, fg)
+_OWNER_MODULES = (appfiles, steam_env, sgdb, steam_files, restore, fg)
 
 
 def _owner(name):
@@ -947,12 +948,12 @@ def test_snapshot_for_restore_uses_provided_snapshot(tmp_path, monkeypatch):
     """When existing_files is provided, snapshot_for_restore uses it verbatim
     instead of re-listdir'ing GRID_FOLDER — an on-disk file NOT in the snapshot
     must not be copied into the store."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "123p.png"))
     _touch(os.path.join(p["GRID_FOLDER"], "123p.jpg"))  # on disk but NOT in the snapshot
 
-    fg.snapshot_for_restore(123, existing_files=["123p.png"])
+    restore.snapshot_for_restore(123, existing_files=["123p.png"])
 
     entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["123"]
     assert entry["files"] == ["123p.png"]
@@ -1857,7 +1858,7 @@ def _install_fetch_mocks(monkeypatch, tmp_path, slot_assets,
     monkeypatch.setattr(sgdb, "_sgdb_get", fake_sgdb_get)
     monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
     monkeypatch.setattr(appfiles, "register_managed_file", lambda *a, **k: None)
-    monkeypatch.setattr(fg, "snapshot_for_restore", lambda *a, **k: None)
+    monkeypatch.setattr(restore, "snapshot_for_restore", lambda *a, **k: None)
     monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: False)
     monkeypatch.setattr(appfiles, "load_api_key", lambda *a, **k: "FAKEKEY")
     if record_icon:
@@ -2376,13 +2377,13 @@ def _read_manifest(restore_folder):
 
 
 def test_restore_snapshot_copies_files_and_writes_manifest(tmp_path, monkeypatch):
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
     _touch(os.path.join(p["GRID_FOLDER"], "12345_hero.jpg"))
     _touch(os.path.join(p["GRID_FOLDER"], "99999p.png"))  # a different game
 
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
 
     manifest = _read_manifest(p["RESTORE_FOLDER"])
     entry = manifest["entries"]["12345"]
@@ -2395,7 +2396,7 @@ def test_restore_snapshot_copies_files_and_writes_manifest(tmp_path, monkeypatch
 def test_restore_snapshot_records_unmanaged_files(tmp_path, monkeypatch):
     """clear_slot_files deletes art this app never registered, so a managed-only
     snapshot cannot restore what those paths destroy."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     managed_art = os.path.join(p["GRID_FOLDER"], "12345p.png")
     unmanaged_art = os.path.join(p["GRID_FOLDER"], "12345_hero.jpg")
@@ -2403,7 +2404,7 @@ def test_restore_snapshot_records_unmanaged_files(tmp_path, monkeypatch):
     _touch(unmanaged_art)
     appfiles.register_managed_file(managed_art)
 
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
 
     entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
     assert "12345_hero.jpg" in entry["files"]
@@ -2411,7 +2412,7 @@ def test_restore_snapshot_records_unmanaged_files(tmp_path, monkeypatch):
 
 
 def test_restore_snapshot_records_managed_subset(tmp_path, monkeypatch):
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     managed_art = os.path.join(p["GRID_FOLDER"], "12345p.png")
     unmanaged_art = os.path.join(p["GRID_FOLDER"], "12345_hero.jpg")
@@ -2419,7 +2420,7 @@ def test_restore_snapshot_records_managed_subset(tmp_path, monkeypatch):
     _touch(unmanaged_art)
     appfiles.register_managed_file(managed_art)
 
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
 
     entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
     assert set(entry["managed"]) == {"12345p.png"}
@@ -2428,13 +2429,13 @@ def test_restore_snapshot_records_managed_subset(tmp_path, monkeypatch):
 def test_restore_snapshot_first_wins_while_unsealed(tmp_path, monkeypatch):
     """A second snapshot for the same id while the first is UNSEALED leaves the
     first snapshot's files unchanged — this is the double Re-fetch case."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
     os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))  # folder emptied by Re-fetch
 
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
 
     entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
     assert entry["files"] == ["12345p.png"]
@@ -2443,16 +2444,16 @@ def test_restore_snapshot_first_wins_while_unsealed(tmp_path, monkeypatch):
 def test_restore_sealed_snapshot_is_superseded(tmp_path, monkeypatch):
     """A SEALED entry is superseded, not kept: Re-fetch → fetch → keep →
     Re-fetch → fetch → Undo must restore the art the operator chose to keep."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
-    fg.snapshot_for_restore(12345)
-    fg.seal_restore_point()
+    restore.snapshot_for_restore(12345)
+    restore.seal_restore_point()
     os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.webp"))
 
-    fg.snapshot_for_restore(12345, pending=True)
+    restore.snapshot_for_restore(12345, pending=True)
 
     entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
     assert entry["files"] == ["12345p.webp"]
@@ -2463,23 +2464,23 @@ def test_restore_sealed_snapshot_is_superseded(tmp_path, monkeypatch):
 
 def test_restore_snapshot_never_matches_a_neighbouring_game(tmp_path, monkeypatch):
     """Leading-digit-run matching: uid 12345 must not capture 123456p.png."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
     _touch(os.path.join(p["GRID_FOLDER"], "123456p.png"))
 
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
 
     entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
     assert entry["files"] == ["12345p.png"]
 
 
 def test_restore_snapshot_records_icon_from_shortcuts_vdf(tmp_path, monkeypatch):
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/a/b.png"}})
 
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
 
     entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
     assert entry["icon"] == "/a/b.png"
@@ -2488,15 +2489,15 @@ def test_restore_snapshot_records_icon_from_shortcuts_vdf(tmp_path, monkeypatch)
 def test_restore_snapshot_records_entry_for_game_without_art(tmp_path, monkeypatch):
     """The common first-fetch case: no art, no icon — an entry must still be
     recorded, or Undo silently stops working for new games."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "has_restore_point"), "fg.has_restore_point does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "has_restore_point"), "fg.has_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
 
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
 
     entry = _read_manifest(p["RESTORE_FOLDER"])["entries"]["12345"]
     assert entry["files"] == []
-    assert fg.has_restore_point() is True
+    assert restore.has_restore_point() is True
 
 
 def test_clear_game_art_never_touches_a_prefix_neighbour(tmp_path, monkeypatch):
@@ -2510,7 +2511,7 @@ def test_clear_game_art_never_touches_a_prefix_neighbour(tmp_path, monkeypatch):
         with open(os.path.join(p["GRID_FOLDER"], f), "wb") as fh:
             fh.write(f.encode())
 
-    removed = fg.clear_game_art(12345)
+    removed = restore.clear_game_art(12345)
 
     left = sorted(os.listdir(p["GRID_FOLDER"]))
     assert left == sorted(neighbour), "every 123456 file must survive, every 12345 file must go"
@@ -2527,16 +2528,16 @@ def test_clear_game_art_never_touches_a_prefix_neighbour(tmp_path, monkeypatch):
 def test_restore_snapshot_wipes_store_on_grid_folder_change(tmp_path, monkeypatch):
     """A manifest whose grid_folder differs from the live GRID_FOLDER (account
     switch) wipes the store FIRST, before the first-wins check."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
-    fg.snapshot_for_restore(12345)  # unsealed entry under the first account
+    restore.snapshot_for_restore(12345)  # unsealed entry under the first account
     other_grid = tmp_path / "grid2"
     other_grid.mkdir()
     monkeypatch.setattr(steam_env, "GRID_FOLDER", str(other_grid))
     _touch(os.path.join(str(other_grid), "12345p.webp"))
 
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
 
     manifest = _read_manifest(p["RESTORE_FOLDER"])
     assert manifest["grid_folder"] == str(other_grid)
@@ -2547,7 +2548,7 @@ def test_restore_snapshot_wipes_store_on_grid_folder_change(tmp_path, monkeypatc
 def test_restore_manifest_written_atomically(tmp_path, monkeypatch):
     """The manifest write must be temp-file + os.replace, proved behaviourally
     (not by grepping for os.replace in the source)."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
     replaced = []
@@ -2559,7 +2560,7 @@ def test_restore_manifest_written_atomically(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fg.os, "replace", recorder)
 
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
 
     manifest_path = os.path.join(p["RESTORE_FOLDER"], "manifest.json")
     assert replaced, "snapshot_for_restore must write the manifest via os.replace"
@@ -2569,19 +2570,19 @@ def test_restore_manifest_written_atomically(tmp_path, monkeypatch):
 
 
 def test_restore_begin_run_drops_sealed_keeps_unsealed_clears_pending(tmp_path, monkeypatch):
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
-    assert hasattr(fg, "begin_restore_run"), "fg.begin_restore_run does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
+    assert hasattr(restore, "begin_restore_run"), "fg.begin_restore_run does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "11111p.png"))
-    fg.snapshot_for_restore(11111)
+    restore.snapshot_for_restore(11111)
     _touch(os.path.join(p["GRID_FOLDER"], "22222p.png"))
-    fg.snapshot_for_restore(22222)
-    fg.seal_restore_point()          # both sealed
+    restore.snapshot_for_restore(22222)
+    restore.seal_restore_point()          # both sealed
     _touch(os.path.join(p["GRID_FOLDER"], "11111p.webp"))
-    fg.snapshot_for_restore(11111, pending=True)  # Re-fetch: supersedes, becomes unsealed
+    restore.snapshot_for_restore(11111, pending=True)  # Re-fetch: supersedes, becomes unsealed
 
-    fg.begin_restore_run()
+    restore.begin_restore_run()
 
     manifest = _read_manifest(p["RESTORE_FOLDER"])
     assert "22222" not in manifest["entries"]          # sealed → dropped
@@ -2592,31 +2593,31 @@ def test_restore_begin_run_drops_sealed_keeps_unsealed_clears_pending(tmp_path, 
 def test_restore_begin_run_deletes_dropped_copies_from_disk(tmp_path, monkeypatch):
     """begin_restore_run deletes the dropped entries' copies from the store, not
     just their manifest rows — otherwise the store leaks like ~/.steamart_backup."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
-    assert hasattr(fg, "begin_restore_run"), "fg.begin_restore_run does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
+    assert hasattr(restore, "begin_restore_run"), "fg.begin_restore_run does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "11111p.png"))
-    fg.snapshot_for_restore(11111)
+    restore.snapshot_for_restore(11111)
     _touch(os.path.join(p["GRID_FOLDER"], "22222p.png"))
-    fg.snapshot_for_restore(22222)
-    fg.seal_restore_point()
-    fg.snapshot_for_restore(11111, pending=True)
+    restore.snapshot_for_restore(22222)
+    restore.seal_restore_point()
+    restore.snapshot_for_restore(11111, pending=True)
     assert os.path.exists(os.path.join(p["RESTORE_FOLDER"], "22222"))  # copies exist pre-run
 
-    fg.begin_restore_run()
+    restore.begin_restore_run()
 
     assert not os.path.exists(os.path.join(p["RESTORE_FOLDER"], "22222"))
 
 
 def test_restore_seal_marks_every_entry_sealed(tmp_path, monkeypatch):
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "seal_restore_point"), "fg.seal_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
-    fg.snapshot_for_restore(11111)
-    fg.snapshot_for_restore(22222)
+    restore.snapshot_for_restore(11111)
+    restore.snapshot_for_restore(22222)
 
-    fg.seal_restore_point()
+    restore.seal_restore_point()
 
     manifest = _read_manifest(p["RESTORE_FOLDER"])
     assert len(manifest["entries"]) == 2
@@ -2626,30 +2627,30 @@ def test_restore_seal_marks_every_entry_sealed(tmp_path, monkeypatch):
 def test_restore_has_restore_point_states(tmp_path, monkeypatch):
     """False with no manifest, true with one entry, false when the manifest's
     grid_folder differs from the live GRID_FOLDER (account switch)."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "has_restore_point"), "fg.has_restore_point does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "has_restore_point"), "fg.has_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
-    assert fg.has_restore_point() is False          # no manifest
-    fg.snapshot_for_restore(12345)
-    assert fg.has_restore_point() is True           # one entry
+    assert restore.has_restore_point() is False          # no manifest
+    restore.snapshot_for_restore(12345)
+    assert restore.has_restore_point() is True           # one entry
     monkeypatch.setattr(steam_env, "GRID_FOLDER", str(tmp_path / "other_grid"))  # account switch
-    assert fg.has_restore_point() is False          # grid-folder mismatch
+    assert restore.has_restore_point() is False          # grid-folder mismatch
 
 
 def test_restore_undo_refuses_account_switch(tmp_path, monkeypatch):
     """A grid-folder mismatch must make undo_restore_point return a zero summary
     and write nothing into the live grid folder."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
     os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))
     other_grid = tmp_path / "other_grid"
     other_grid.mkdir()
     monkeypatch.setattr(steam_env, "GRID_FOLDER", str(other_grid))
 
-    summary = fg.undo_restore_point()
+    summary = restore.undo_restore_point()
 
     assert isinstance(summary, dict)
     assert summary.get("games", 0) == 0
@@ -2660,26 +2661,26 @@ def test_restore_undo_refuses_account_switch(tmp_path, monkeypatch):
 
 def test_restore_undo_restores_byte_identical_files(tmp_path, monkeypatch):
     """A game whose art was replaced ends up byte-identical to the snapshot."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     original = os.path.join(p["GRID_FOLDER"], "12345p.png")
     with open(original, "wb") as f:
         f.write(b"ORIGINAL-ART-BYTES")
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
     os.remove(original)
     with open(original, "wb") as f:  # the fetch wrote something new
         f.write(b"NEW-FETCHED-ART")
     appfiles.register_managed_file(original)
 
-    fg.undo_restore_point()
+    restore.undo_restore_point()
 
     with open(original, "rb") as f:
         assert f.read() == b"ORIGINAL-ART-BYTES"
     # A successful undo wipes the store, which is what makes a second press a
     # no-op and greys the button (has_restore_point drives it). Untested, an
     # implementation that skips the wipe re-restores on every press.
-    assert fg.has_restore_point() is False
+    assert restore.has_restore_point() is False
     # ...and the restored file is registered again, so Clear All Artwork still
     # covers it.
     assert original in appfiles.load_managed_files()
@@ -2688,17 +2689,17 @@ def test_restore_undo_restores_byte_identical_files(tmp_path, monkeypatch):
 def test_restore_undo_removes_fetched_file_with_different_extension(tmp_path, monkeypatch):
     """The results-window 'apply an alternative' case: 1234p.webp written over a
     snapshot of 1234p.png — after undo only the .png exists."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "1234p.png"))
-    fg.snapshot_for_restore(1234)
+    restore.snapshot_for_restore(1234)
     os.remove(os.path.join(p["GRID_FOLDER"], "1234p.png"))
     webp = os.path.join(p["GRID_FOLDER"], "1234p.webp")
     _touch(webp)
     appfiles.register_managed_file(webp)  # the fetch's file is managed
 
-    fg.undo_restore_point()
+    restore.undo_restore_point()
 
     assert os.path.exists(os.path.join(p["GRID_FOLDER"], "1234p.png"))
     assert not os.path.exists(webp)
@@ -2706,16 +2707,16 @@ def test_restore_undo_removes_fetched_file_with_different_extension(tmp_path, mo
 
 def test_restore_undo_never_deletes_an_unmanaged_current_file(tmp_path, monkeypatch):
     """Undo must never delete a current file this app did not write."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
     os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))
     unmanaged = os.path.join(p["GRID_FOLDER"], "12345p.webp")
     _touch(unmanaged)  # written by something other than this app — NOT registered
 
-    fg.undo_restore_point()
+    restore.undo_restore_point()
 
     assert os.path.exists(unmanaged)  # untouched
     assert os.path.exists(os.path.join(p["GRID_FOLDER"], "12345p.png"))  # restored
@@ -2724,34 +2725,34 @@ def test_restore_undo_never_deletes_an_unmanaged_current_file(tmp_path, monkeypa
 def test_restore_undo_never_deletes_a_neighbouring_games_file(tmp_path, monkeypatch):
     """123456p.png (a different game, even though managed) must survive undoing
     12345."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
     os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))
     neighbour = os.path.join(p["GRID_FOLDER"], "123456p.png")
     _touch(neighbour)
     appfiles.register_managed_file(neighbour)
 
-    fg.undo_restore_point()
+    restore.undo_restore_point()
 
     assert os.path.exists(neighbour)
 
 
 def test_restore_undo_writes_icon_back_when_steam_closed(tmp_path, monkeypatch):
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/old/icon.png"}})
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
     # The fetch then set a DIFFERENT icon. Without this the assertion below is
     # vacuous: the value would still be "/old/icon.png" simply because nothing
     # ever disturbed it, so an undo that skips icons entirely would pass.
     _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/new/icon.png"}})
     monkeypatch.setattr(steam_env, "is_steam_running", lambda: False)
 
-    fg.undo_restore_point()
+    restore.undo_restore_point()
 
     out = _read_shortcuts(p["SHORTCUTS_PATH"])
     assert out["0"]["icon"] == "/old/icon.png"
@@ -2760,15 +2761,15 @@ def test_restore_undo_writes_icon_back_when_steam_closed(tmp_path, monkeypatch):
 def test_restore_undo_queues_icon_when_steam_running(tmp_path, monkeypatch):
     """Steam running → the icon restore goes through save_pending_icons, not a
     direct vdf write."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/old/icon.png"}})
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
     monkeypatch.setattr(steam_env, "is_steam_running", lambda: True)
 
-    fg.undo_restore_point()
+    restore.undo_restore_point()
 
     assert steam_files.load_pending_icons() == {12345: "/old/icon.png"}
 
@@ -2792,10 +2793,10 @@ def test_restore_queued_empty_icon_survives_apply(tmp_path, monkeypatch):
 
 
 def test_restore_undo_with_no_restore_point_is_a_noop(tmp_path, monkeypatch):
-    assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
+    assert hasattr(restore, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
 
-    summary = fg.undo_restore_point()  # must not raise
+    summary = restore.undo_restore_point()  # must not raise
 
     assert isinstance(summary, dict)
     assert summary.get("games", 0) == 0
@@ -2803,18 +2804,18 @@ def test_restore_undo_with_no_restore_point_is_a_noop(tmp_path, monkeypatch):
 
 
 def test_restore_clear_restore_point_empties_store_and_size_is_float(tmp_path, monkeypatch):
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
-    assert hasattr(fg, "clear_restore_point"), "fg.clear_restore_point does not exist yet"
-    assert hasattr(fg, "restore_point_size"), "fg.restore_point_size does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "clear_restore_point"), "fg.clear_restore_point does not exist yet"
+    assert hasattr(restore, "restore_point_size"), "fg.restore_point_size does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
 
-    assert isinstance(fg.restore_point_size(), float)
-    fg.clear_restore_point()
+    assert isinstance(restore.restore_point_size(), float)
+    restore.clear_restore_point()
 
     assert not os.path.exists(os.path.join(p["RESTORE_FOLDER"], "manifest.json"))
-    assert fg.restore_point_size() == 0.0
+    assert restore.restore_point_size() == 0.0
 
 
 def test_restore_legacy_backup_size_reports_the_old_pile(tmp_path, monkeypatch):
@@ -2845,10 +2846,10 @@ def test_restore_legacy_backup_size_reports_the_old_pile(tmp_path, monkeypatch):
 def test_restore_clear_managed_artwork_wipes_restore_point(tmp_path, monkeypatch):
     """Clear All Artwork must wipe the restore point, or a later Undo silently
     re-copies and re-registers everything the operator just cleared."""
-    assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
+    assert hasattr(restore, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
     _touch(os.path.join(p["GRID_FOLDER"], "12345p.png"))
-    fg.snapshot_for_restore(12345)
+    restore.snapshot_for_restore(12345)
     manifest_path = os.path.join(p["RESTORE_FOLDER"], "manifest.json")
     assert os.path.exists(manifest_path)
 
