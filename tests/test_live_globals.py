@@ -22,15 +22,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
-    "tests/conftest.py must sandbox HOME before find_games is imported")
+    "tests/conftest.py must sandbox HOME before the backend is imported")
 
-import find_games as fg  # noqa: E402
 import artwork
 import restore
 import steam_files
 import sgdb
 import appfiles  # noqa: E402
+import artwork  # noqa: E402
+import operations  # noqa: E402
+import restore  # noqa: E402
+import sgdb  # noqa: E402
 import steam_env  # noqa: E402
+import steam_files  # noqa: E402
 
 APP_ID = 777
 
@@ -78,9 +82,10 @@ def test_switch_rebinds_the_owning_module_and_leaves_no_copy_behind(two_accounts
     assert steam_env.SHORTCUTS_PATH == vdf_b
     assert steam_env.get_active_user() == "222"
     assert open(appfiles.ACCOUNT_FILE, encoding="utf-8").read() == "222"
-    for name in ("GRID_FOLDER", "SHORTCUTS_PATH", "STEAM_USER_ID"):
-        assert not hasattr(fg, name), (
-            f"find_games must not hold a copy of {name}: a copy keeps the old account")
+    for mod in (appfiles, sgdb, steam_files, restore, artwork, operations):
+        for name in ("GRID_FOLDER", "SHORTCUTS_PATH", "STEAM_USER_ID"):
+            assert not hasattr(mod, name), (
+                f"{mod.__name__} must not hold a copy of {name}: a copy keeps the old account")
 
 
 def test_a_fetch_download_after_the_switch_lands_in_the_new_account(two_accounts, monkeypatch):
@@ -143,15 +148,16 @@ def test_init_picks_the_saved_account_and_creates_its_grid(two_accounts):
 
 
 def test_importing_the_backend_touches_nothing_under_home(tmp_path):
-    """A4: importing find_games used to detect Steam, read the account file and
-    create the grid folder. Now only steam_env.init() does that."""
+    """A4: importing the backend (find_games, before the split) used to detect
+    Steam, read the account file and create the grid folder. Now only
+    steam_env.init() does that."""
     home = tmp_path / "home"
     (home / ".steam" / "steam" / "userdata" / "111" / "config").mkdir(parents=True)
     _shortcuts(home / ".steam" / "steam" / "userdata" / "111" / "config" / "shortcuts.vdf")
     before = sorted(str(p.relative_to(home)) for p in home.rglob("*"))
     env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
     code = ("import sys; sys.path.insert(0, %r)\n"
-            "import find_games, steam_env, appfiles\n"
+            "import appfiles, steam_env, sgdb, steam_files, restore, artwork, operations\n"
             "assert steam_env.STEAM_NOT_FOUND and steam_env.GRID_FOLDER == ''\n" % ROOT)
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr

@@ -7,7 +7,6 @@ to. tkinter-free; tests patch http_get / _sgdb_get HERE."""
 from requests.adapters import HTTPAdapter
 from urllib.parse import quote as _url_quote
 from datetime import datetime, timezone
-import json
 import re
 import requests
 import threading
@@ -16,7 +15,7 @@ from appcommon import debug as _debug
 import appfiles
 
 
-# The app installs a callable taking one message string; find_games stays UI-free.
+# The app installs a callable taking one message string; this module stays UI-free.
 RATE_LIMIT_HOOK = None
 
 # The three answers to "will SteamGridDB take this key?" (check_api_key). Only a

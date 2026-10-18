@@ -3,7 +3,7 @@
 These tests parse the module sources with `ast` and assert STRUCTURE, never
 token presence — a substring check is satisfied by a comment or by inverted
 logic. The modules are NOT imported: they pull in tkinter and would need a
-display, and find_games has import-time side effects (it creates directories
+display, and the backend binds HOME-derived paths at import (it once created directories
 under the real HOME).
 
 The product wiring does not exist yet, so each gate fails by ASSERTION with a
@@ -32,7 +32,7 @@ def _func(module, name):
 def _calls_named(node, name):
     """All Call nodes inside `node` whose callee's final name is `name`.
     Handles both the Name form (`snapshot_for_restore(...)`) and the Attribute
-    form (`fg.snapshot_for_restore(...)`), matching on the final attribute name."""
+    form (`restore.snapshot_for_restore(...)`), matching on the final attribute name."""
     out = []
     for sub in ast.walk(node):
         if isinstance(sub, ast.Call):
@@ -99,7 +99,7 @@ def test_wiring_undo_fetch_delegates_to_undo_restore_point():
 
 
 def test_wiring_undo_fetch_has_no_os_remove_copy():
-    """Deletion moved into find_games.undo_restore_point — a leftover os.remove
+    """Deletion moved into restore.undo_restore_point — a leftover os.remove
     here would double-delete."""
     tree = _module("fetch_mixin.py")
     fn = _func(tree, "undo_fetch")
@@ -107,7 +107,7 @@ def test_wiring_undo_fetch_has_no_os_remove_copy():
     hits = _unlink_calls(fn)
     assert not hits, (
         "fetch_mixin.undo_fetch must not delete files (os.remove/os.unlink) — "
-        "deletion moved into find_games.undo_restore_point")
+        "deletion moved into restore.undo_restore_point")
 
 
 def test_wiring_last_fetch_files_attribute_gone_from_fetch_mixin():
@@ -208,7 +208,7 @@ def test_wiring_app_captures_restore_point_inherited_at_startup():
                 if isinstance(n, ast.Attribute) and n.attr == "_restore_point_inherited"]
     assert assigned, "app.py must capture self._restore_point_inherited at startup"
     has = _calls_named(tree, "has_restore_point")
-    assert has, "app.py must initialise it from fg.has_restore_point()"
+    assert has, "app.py must initialise it from restore.has_restore_point()"
 
 
 def test_wiring_fetch_marks_the_session_as_having_fetched():

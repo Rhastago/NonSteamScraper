@@ -12,7 +12,6 @@ from tkinter import messagebox
 
 from appcommon import DEBUG
 from theming import PAD_XS, PAD_L
-import find_games as fg
 import restore
 import steam_files
 import steam_env
@@ -48,7 +47,7 @@ class FetchMixin:
 
     def undo_fetch(self):
         """Restore the artwork that was present before the last fetch or Re-fetch,
-        delegating the work to find_games.undo_restore_point (deletion, restore,
+        delegating the work to restore.undo_restore_point (deletion, restore,
         icon writes). Runs on the Tk thread — it is a button command — so the
         confirmation messagebox is safe here. Undo is destructive and cannot itself
         be undone, and its state now comes from disk, so when the restore point was
@@ -59,7 +58,7 @@ class FetchMixin:
             self.log("Nothing to undo.", icon="warning")
             return
         if self._restore_point_inherited and not self._fetched_this_session:
-            # Count comes from the live manifest (fg. reads rebound globals).
+            # Count comes from the live manifest (account-aware, read at call time).
             count = restore.restore_point_game_count()
             if not messagebox.askyesno(
                 "Undo Last Fetch",
@@ -91,7 +90,7 @@ class FetchMixin:
         """Auto-apply deferred icon writes when it's safe. No-op (cheap existence check)
         when nothing is pending or Steam is running. Steam is closed when this writes, so
         the icons show on Steam's next launch. Part of the "defer & auto-apply" design:
-        no dialog, no Steam restart by us (see find_games.PENDING_ICONS_FILE)."""
+        no dialog, no Steam restart by us (see appfiles.PENDING_ICONS_FILE)."""
         # Skip while the results window's explicit "Close Steam & Apply Icons" flow is
         # mid-run — it applies the queue itself; letting the poll also fire is harmless
         # (idempotent) but this avoids the two racing over the same file.

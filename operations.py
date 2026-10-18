@@ -3,19 +3,19 @@ re-match one game to a SteamGridDB entry, apply one results option, restore a
 hidden game. The UI files (fetch_mixin, library_mixin, dialogs, results_window)
 call these and only draw what comes back.
 
-Every rule that changes files lives here or below (find_games), never in a UI
+Every rule that changes files lives here or below (appfiles, steam_env, sgdb,
+steam_files, restore, artwork), never in a UI
 file, so it is written once and tested without a display. Nothing here touches a
 widget: run_fetch reports through the callbacks it is given, and the caller
 marshals them onto the Tk thread.
 
-find_games is read live (`fg.X` at call time), never imported by value: an
-account switch rebinds fg.GRID_FOLDER / fg.SHORTCUTS_PATH.
+Those modules are read live (`module.X` at call time), never imported by value:
+an account switch rebinds steam_env.GRID_FOLDER / steam_env.SHORTCUTS_PATH.
 """
 
 import time
 
 from appcommon import debug as _debug
-import find_games as fg
 import artwork
 import restore
 import steam_files

@@ -8,7 +8,6 @@ are kept (on the widget and/or a cache) so they aren't garbage-collected to blan
 """
 
 import threading
-import find_games as fg
 import artwork
 from PIL import Image, ImageTk
 

@@ -9,7 +9,6 @@ from tkinter import ttk
 
 from theming import PAD_XS, PAD_S, PAD_M, PAD_L, FONT_UI, FONT_MONO
 from imaging import _decode_row_thumb
-import find_games as fg
 import artwork
 import restore
 import steam_env
@@ -300,7 +299,7 @@ class LibraryMixin:
     def _refresh_undo_button(self):
         """The ONE place Undo's enabled state is derived: from the on-disk restore
         point. has_restore_point() returns false when the manifest's grid_folder
-        no longer matches the live fg.GRID_FOLDER, so an account switch greys the
+        no longer matches the live steam_env.GRID_FOLDER, so an account switch greys the
         button out. Called from load_games(), which runs at startup, after a
         fetch, after a Re-fetch, after an Undo and on account switch. Always
         disabled while a fetch runs."""
@@ -463,7 +462,7 @@ class LibraryMixin:
         re-fetch swaps art) naturally produces a new key and re-decodes. Decoding runs
         on the bounded thumbnail executor; assignment happens on the UI thread."""
         t = self.theme
-        # fg.GRID_FOLDER (not the by-value import) so account switches are honored.
+        # steam_env.GRID_FOLDER (not the by-value import) so account switches are honored.
         path = artwork.row_thumbnail_path(steam_env.GRID_FOLDER, game["app_id"])
         if path:
             try:

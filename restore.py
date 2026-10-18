@@ -17,6 +17,12 @@ import appfiles
 import steam_env
 import steam_files
 
+# ~/.steamart_restore/ holds ONE restore point: manifest.json plus <id>/<file>
+# byte copies (mtime preserved via copy2) taken before a fetch or Re-fetch
+# destroys art, so Undo can put back what was there. The manifest is written
+# atomically (temp file + os.replace), the same rule as the shortcuts.vdf writer
+# and the download path.
+
 
 def _restore_manifest_path():
     """Absolute path of the restore-point manifest. Lives inside RESTORE_FOLDER
@@ -49,7 +55,7 @@ def _save_restore_manifest(m):
 def _files_matching_id(fnames, unsigned_id):
     """The filenames whose LEADING DIGIT RUN equals str(unsigned_id). NEVER a
     bare str(uid) prefix: uid 12345 would match 123456p.png, a DIFFERENT game
-    (find_games.py:549-557 documents the same false positive)."""
+    (steam_files.get_non_steam_games documents the same false positive)."""
     uid = str(unsigned_id)
     matched = []
     for f in fnames:

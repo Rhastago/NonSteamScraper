@@ -1,38 +1,16 @@
-import os, re, sys, platform, shutil, subprocess, time, json, threading, glob, tempfile, vdf, requests
-from requests.adapters import HTTPAdapter
-from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote as _url_quote
-from datetime import datetime, timedelta, timezone
+"""What is left of the old god module after T-A5 split it into appfiles,
+steam_env, sgdb, steam_files, restore, artwork, winplace and updates: the
+original command-line fetch. Nothing imports this file."""
+
 import appfiles
-
-from appcommon import DEBUG, debug as _debug
-import steam_env
-import sgdb
-import steam_files
-import restore
 import artwork
-
-
-# --- Restore point (SPEC.md S3) --------------------------------------------------
-# ~/.steamart_restore/ holds ONE restore point: manifest.json plus <id>/<file>
-# byte copies (mtime preserved via copy2) taken before a fetch or Re-fetch
-# destroys art, so Undo can put back what was there. The manifest is written
-# atomically (temp file + os.replace), the same rule as _write_shortcuts_atomic
-# and the download path. Every function here never raises (module contract).
-
-
-# ---------------------------------------------------------------------------
-# Window-placement helpers — pure arithmetic, no tkinter dependency.
-# Extracted here so they can be unit-tested without a display.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Update check — pure network helper, no tkinter dependency.
-# ---------------------------------------------------------------------------
+import sgdb
+import steam_env
+import steam_files
 
 
 if __name__ == "__main__":
+    steam_env.init()
     key = appfiles.load_api_key()
     if not key: print("❌ No API key set."); exit()
     print(f"API key: {key[:6]}...\n")

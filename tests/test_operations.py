@@ -5,7 +5,7 @@ These replace AST "wiring" tests that pinned WHERE a call sat in a UI file
 log line, Re-fetch / Search → Select clearing through clear_game_art). With the
 rules out of the UI they are run and observed instead.
 
-HOME is sandboxed by tests/conftest.py before find_games is imported.
+HOME is sandboxed by tests/conftest.py before the backend is imported.
 """
 
 import json
@@ -18,9 +18,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
-    "tests/conftest.py must sandbox HOME before find_games is imported")
+    "tests/conftest.py must sandbox HOME before the backend is imported")
 
-import find_games as fg  # noqa: E402
 import artwork
 import restore
 import steam_files

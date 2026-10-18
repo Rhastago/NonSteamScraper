@@ -16,7 +16,6 @@ from tkinter import ttk
 
 from appcommon import open_url
 from theming import FONT_UI
-import find_games as fg
 import steam_files
 import steam_env
 import operations
@@ -169,7 +168,7 @@ class ResultsWindow:
 
     def refresh_steam_ui(self):
         """Re-render the results window's Steam-status line and pending-icon action to
-        match the LIVE state (fg.is_steam_running / fg.has_pending_icons). Safe to call
+        match the LIVE state (steam_env.is_steam_running / steam_files.has_pending_icons). Safe to call
         repeatedly: it tears down and rebuilds the two frames' children each time rather
         than appending, so widgets never stack up. NO-OPs while the apply flow is running
         (it owns those widgets then) or once the window is gone."""
@@ -738,7 +737,7 @@ class ResultsWindow:
         status = tk.Label(popup, text="Starting…", font=(FONT_UI, 9),
                           bg=t["bg"], fg=t["muted2"])
         status.pack()
-        # Real per-frame progress comes from find_games.install_into_slot (it counts the
+        # Real per-frame progress comes from artwork.install_into_slot (it counts the
         # APNG frame chunks Pillow writes), so this is an accurate determinate bar.
         try:
             bar = ttk.Progressbar(popup, mode="determinate", maximum=100, length=300,

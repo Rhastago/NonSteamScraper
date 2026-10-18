@@ -1,22 +1,21 @@
 """Suite-wide sandbox HOME, its G-HOME guard, and the no-network guard.
 
-Sandbox HOME: importing find_games binds every ~/.steamart_* path (and the Steam
-discovery) to HOME at import time, so HOME must point at a throw-away folder
-BEFORE any test module imports it. pytest loads this conftest before it collects
-the test modules, so this is the one place that creates it — and the one place
+Sandbox HOME: importing appfiles binds every ~/.steamart_* path to HOME at import
+time, so HOME must point at a throw-away folder BEFORE any test module imports
+it. pytest loads this conftest before it collects the test modules, so this is the one place that creates it — and the one place
 that removes it again when the session ends (pytest_unconfigure runs after a
 normal run, a failed run and a --collect-only run alike). The real HOME is
 never read or written.
 
 G-HOME: a test must write into its own tmp_path, never into the sandbox HOME.
-A test that patches a path on the wrong module (find_games re-exports a name
-that another module owns) silently falls back to the HOME-derived default and
-may still pass; the guard turns that into a failure naming what appeared.
+A test that patches a path on the wrong module (not the one that owns it)
+silently falls back to the HOME-derived default and may still pass; the guard turns that into a failure naming what appeared.
 
 No-network: any test that attempts a real outbound socket connection fails with
 an AssertionError naming the address — the backstop for every HTTP seam patch.
 
-Must NOT import find_games (it would bind before the sandbox exists).
+Must NOT import appfiles or any backend module (they would bind before the
+sandbox exists).
 """
 
 import os

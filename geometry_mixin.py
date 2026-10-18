@@ -3,7 +3,7 @@
 Handles work-area-aware sizing/centering (so windows never open under a taskbar
 or panel), the dynamic main-window refit, the application-local modal grab stack,
 and window lifecycle (icon, close). The pure size/position math lives in
-find_games (compute_window_fit / parse_net_workarea) so it can be unit-tested
+winplace (compute_window_fit / parse_net_workarea) so it can be unit-tested
 without a display; the tkinter side effects stay here. Mixed into SteamArtApp."""
 
 import tkinter as tk
@@ -12,7 +12,6 @@ from PIL import Image, ImageTk
 
 from appcommon import resource_path
 from theming import PAD_XS, PAD_L
-import find_games as fg
 import artwork
 from winplace import parse_net_workarea, compute_window_fit
 
@@ -158,7 +157,7 @@ class GeometryMixin:
                 out = subprocess.run(
                     ["xprop", "-root", "_NET_WORKAREA"],
                     capture_output=True, text=True, timeout=1).stdout
-                # Parsing delegated to the pure find_games helper so it can be
+                # Parsing delegated to the pure winplace helper so it can be
                 # unit-tested without a display.
                 parsed = parse_net_workarea(out)
                 if parsed is not None:
@@ -184,7 +183,7 @@ class GeometryMixin:
         """
         window.update_idletasks()
         wa_x, wa_y, wa_w, wa_h = self._get_workarea(window)
-        # The pure size+position math lives in find_games.compute_window_fit so it
+        # The pure size+position math lives in winplace.compute_window_fit so it
         # can be unit-tested without a display.  The tkinter-specific side effects
         # (minsize adjustment, geometry call) stay here.
         RESERVE = 80

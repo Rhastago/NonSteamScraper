@@ -2,7 +2,6 @@ import tkinter as tk
 from tkinter import messagebox
 import sys
 from concurrent.futures import ThreadPoolExecutor
-import find_games as fg  # live access to rebound globals (e.g. fg.GRID_FOLDER after account switch)
 import restore
 import sgdb
 import steam_env

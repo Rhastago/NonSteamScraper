@@ -9,8 +9,8 @@ state and the skip-list decisions all run for real.
 The stand-in modules are installed into sys.modules for this file only and removed
 again afterwards, so no other test can pick them up.
 
-HOME is sandboxed by tests/conftest.py before find_games is imported (importing it
-binds every ~/.steamart_* path to HOME).
+HOME is sandboxed by tests/conftest.py before the backend is imported (importing
+appfiles binds every ~/.steamart_* path to HOME).
 """
 
 import os
@@ -23,9 +23,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
-    "tests/conftest.py must sandbox HOME before find_games is imported")
+    "tests/conftest.py must sandbox HOME before the backend is imported")
 
-import find_games as fg  # noqa: E402
 import artwork
 import restore
 import steam_files
@@ -153,7 +152,7 @@ def _fake_tk_modules():
 
 _UI_MODULES = ("fetch_mixin", "library_mixin", "geometry_mixin", "ui_mixin",
                "settings_window", "results_window", "dialogs", "imaging",
-               "PIL.ImageTk")
+               "PIL.ImageTk", "app")
 
 
 @pytest.fixture(scope="module")
@@ -308,7 +307,7 @@ def make_app(ui, games=()):
 def make_settings_app(ui, monkeypatch, busy=False, users=("111",)):
     """A fake app that can BUILD the real settings_window.open_settings under the
     stand-in tkinter: real UIMixin widget helpers and modal stack, a full theme,
-    no icons, no work-area probing. find_games reads are patched in settings_window."""
+    no icons, no work-area probing. Backend reads are patched in settings_window."""
     from theming import resolve_theme
     sw = ui.settings_window
     monkeypatch.setattr(sw, "get_all_steam_users", lambda: list(users))
@@ -373,7 +372,7 @@ def fetch_env(ui, tmp_path, monkeypatch):
         rec.downloaded.append(app_id)
         return artwork.FetchedArt()
 
-    # operations.run_fetch reads find_games live, so these are patched on fg.
+    # operations.run_fetch reads the backend modules live, so these are patched there.
     monkeypatch.setattr(sgdb, "search_game", fake_search)
     monkeypatch.setattr(artwork, "download_all_artwork", fake_download)
     monkeypatch.setattr(appfiles, "add_to_skip_list", lambda app_id: rec.skipped.append(app_id))
@@ -1146,3 +1145,17 @@ def test_results_window_state_lives_on_the_window_not_the_app(ui, results_env):
                  "_results_steam_state", "results_window", "_build_pending_icons"):
         assert not hasattr(app, name), f"app.{name} must not exist (T-A4)"
     assert view.widgets["window"] is view.top
+
+
+
+def test_app_module_imports_and_composes_every_mixin(ui):
+    """The whole import chain of app.py loads (no missing or circular import
+    after the T-A5 split), SteamArtApp composes the four mixins, and startup
+    calls steam_env.init() before the window. Under the stand-in tkinter: this
+    proves imports and structure, not a real window."""
+    import app
+    assert [c.__name__ for c in app.SteamArtApp.__mro__[1:5]] == [
+        "UIMixin", "GeometryMixin", "LibraryMixin", "FetchMixin"]
+    src = open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
+    main = src[src.index('if __name__ == "__main__":'):]
+    assert main.index("steam_env.init()") < main.index("tk.Tk()")

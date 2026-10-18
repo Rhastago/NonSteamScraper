@@ -10,7 +10,6 @@ from tkinter import messagebox
 
 from appcommon import VERSION, open_url
 from theming import ACCENTS, PAD_XS, PAD_S, FONT_UI, FONT_MONO
-import find_games as fg
 import updates
 import restore
 import steam_files
@@ -400,7 +399,7 @@ def open_settings(app):
         account_var = tk.StringVar(value=id_to_label.get(active, users[0]))
 
         def on_account_change(label):
-            # A switch rebinds fg.GRID_FOLDER, which a running fetch reads live (B2).
+            # A switch rebinds steam_env.GRID_FOLDER, which a running fetch reads live (B2).
             if app._refuse_if_busy():
                 account_var.set(id_to_label.get(steam_env.get_active_user(), users[0]))
                 return
