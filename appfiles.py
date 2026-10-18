@@ -11,8 +11,8 @@ elsewhere use appfiles.NAME at call time, never a by-value import."""
 import glob
 import json
 import os
+import secrets
 import shutil
-import tempfile
 import threading
 from datetime import datetime, timedelta
 
@@ -56,11 +56,18 @@ def write_text_atomic(path, text):
     """Replace `path` with `text` (UTF-8) atomically: a unique temp file in the
     same folder, fsync, then os.replace. A crash mid-write leaves the old file or
     the new one, never a truncated one (B15: a truncated pending-icon file loaded
-    as {} and silently dropped the queued icons). An existing file keeps its mode.
+    as {} and silently dropped the queued icons). An existing file keeps its mode;
+    a new one gets the usual mode for the user's umask, like a plain open() — the
+    temp file is created with 0o666 (umask applied), not mkstemp's owner-only 0600.
     The folder must exist."""
     folder = os.path.dirname(path) or "."
-    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp",
-                               dir=folder)
+    while True:
+        tmp = os.path.join(folder, f"{os.path.basename(path)}.{secrets.token_hex(4)}.tmp")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            break
+        except FileExistsError:
+            continue
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)

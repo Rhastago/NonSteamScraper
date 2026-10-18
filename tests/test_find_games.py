@@ -3433,3 +3433,15 @@ def test_clean_old_cache_finishes_the_list_and_counts_failures(tmp_path, monkeyp
 
     assert appfiles.clean_old_cache() == 1
     assert sorted(os.listdir(cache)) == ["a.png", "new.png"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Unix mode bits")
+def test_write_text_atomic_new_file_gets_the_umask_mode_not_owner_only(tmp_path):
+    """A new app file is created like a plain open() would (0o666 minus the
+    umask), not with mkstemp's owner-only 0600 (operator ruling 2026-10-18)."""
+    mask = os.umask(0)
+    os.umask(mask)
+    p = tmp_path / "new"
+    appfiles.write_text_atomic(str(p), "x")
+    assert (os.stat(p).st_mode & 0o777) == (0o666 & ~mask)
+    assert os.listdir(tmp_path) == ["new"]
