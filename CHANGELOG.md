@@ -48,9 +48,6 @@ A safety release: every fix below stops the app from losing or hiding your artwo
   previews the fetch had just downloaded, so the results screen could show blank images.
 - **Settings left open while a fetch ends comes back to life.** Its greyed-out options and
   the "Fetch in progress" note used to stay until you closed and reopened Settings.
-- **An animated icon you apply is now set as the game's icon.** Picking an animated icon on
-  the results screen placed the file but never told Steam to use it; it now does, right away
-  when Steam is closed, or once you close Steam.
 - **Search → Select fetches the exact game you picked.** When two SteamGridDB games share a
   name (DOOM 1993 and DOOM 2016), the fetch searched by name again and could take the other
   one. The app now remembers the SteamGridDB game you picked (in `~/.steamart_ids`) and
@@ -81,6 +78,10 @@ A safety release: every fix below stops the app from losing or hiding your artwo
   crash can never leave them half-written.
 - The record of which artwork files the app created no longer grows without end.
 - The results window and the fetch results are tidier inside, with no change in behaviour.
+- An animated pick in the icon slot is now written to Steam's shortcut list like a static one
+  (it used to be placed in the artwork folder only). You are unlikely to meet it: Steam's own
+  artwork is never animated, and none of 23 popular games checked on SteamGridDB has an animated
+  icon.
 - The test suite cleans up after itself and checks that no test touches files outside its
   own temporary folder; the release workflow now runs the tests on Linux and Windows before
   it builds anything.
