@@ -44,6 +44,7 @@ class StandInWidget:
     and pressed. Any other Tk method is a no-op. Every instance lands in
     StandInWidget.created (reset per test by the fixtures that use it)."""
     created = []
+    pack_order = []
 
     def __init__(self, *args, **opts):
         self.args = args
@@ -54,6 +55,11 @@ class StandInWidget:
     def config(self, **kw):
         self.opts.update(kw)
     configure = config
+
+    def pack(self, *a, **kw):
+        # Records the pack options and the order of every pack() call.
+        StandInWidget.pack_order.append(self)
+        self.packed = dict(kw)
 
     def cget(self, key):
         return self.opts.get(key)
@@ -1011,6 +1017,7 @@ def search_env(ui, fetch_env, monkeypatch):
 
 def _open_search(ui, rec, game):
     StandInWidget.created = []
+    StandInWidget.pack_order = []
     ui.dialogs.open_sgdb_search(rec.app, game)
     rec.threads.run_all()          # the autocomplete worker fills the list
     widgets = list(StandInWidget.created)
@@ -1376,3 +1383,22 @@ def test_settings_clear_cache_reports_files_it_could_not_remove(ui, fetch_env, m
     widget_by_text(widgets, "Clear Cache").opts["command"]()
 
     assert "Cache cleared — 2 file(s) could not be removed." in app.logged
+
+
+
+def test_search_dialog_buttons_cannot_be_pushed_out_by_a_long_list(ui, search_env):
+    """Walk finding: with 10 results the list pushed Select / Cancel out of the
+    window. The button bar is packed at the BOTTOM before the list (so the list
+    takes only the space left), and the buttons sit on the left (ruling W7)."""
+    widgets, listbox = _open_search(ui, search_env, _game(12345))
+    select = widget_by_text(widgets, "Select")
+    cancel = widget_by_text(widgets, "Cancel")
+    bar = select.args[0]
+    assert cancel.args[0] is bar
+    list_frame = [w for w in widgets if type(w).__name__ == "Scrollbar"][0].args[0]
+    order = StandInWidget.pack_order
+    assert bar.packed.get("side") == "bottom"
+    assert order.index(bar) < order.index(list_frame), (
+        "the button bar must be packed before the list, or the list can push it out")
+    assert select.packed.get("side") == "left" and cancel.packed.get("side") == "left"
+    assert order.index(select) < order.index(cancel), "Select first, then Cancel"

@@ -171,6 +171,10 @@ def open_sgdb_search(app, game):
                            bg=t["bg"], fg=t["muted"])
     status_lbl.pack(padx=12, anchor="w")
 
+    # Select / Cancel pinned to the bottom edge FIRST, so a long result list can
+    # never push them out of the window (10 results did); the list scrolls above.
+    btn_bar = tk.Frame(dlg, bg=t["bg"])
+    btn_bar.pack(side="bottom", fill="x", padx=12, pady=(4, 10))
     list_frame = tk.Frame(dlg, bg=t["bg"])
     list_frame.pack(fill="both", expand=True, padx=12, pady=4)
     scrollbar = tk.Scrollbar(list_frame)
@@ -185,8 +189,6 @@ def open_sgdb_search(app, game):
     listbox.pack(side="left", fill="both", expand=True)
     scrollbar.config(command=listbox.yview)
 
-    btn_bar = tk.Frame(dlg, bg=t["bg"])
-    btn_bar.pack(fill="x", padx=12, pady=(4, 10))
 
     results = []
     _after_id = [None]
@@ -273,8 +275,8 @@ def open_sgdb_search(app, game):
     dlg.bind("<Escape>", _close_dlg)
     dlg.protocol("WM_DELETE_WINDOW", _close_dlg)
 
-    app._btn(btn_bar, "Select", _apply, primary=True).pack(side="right")
-    app._btn(btn_bar, "Cancel", _close_dlg).pack(side="right", padx=(0, 6))
+    app._btn(btn_bar, "Select", _apply, primary=True).pack(side="left")
+    app._btn(btn_bar, "Cancel", _close_dlg).pack(side="left", padx=(6, 0))
 
     # Centre over parent (size + position in one call), then reveal flash-free.
     app.window.update_idletasks()
