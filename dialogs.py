@@ -13,7 +13,8 @@ from tkinter import messagebox
 from appcommon import VERSION, open_url
 from theming import FONT_UI
 import operations
-from find_games import search_sgdb_autocomplete, load_prefs, save_prefs, DEFAULT_PREFS
+from find_games import search_sgdb_autocomplete
+from appfiles import load_prefs, save_prefs, DEFAULT_PREFS
 
 
 # --- Flash-free popup reveal ------------------------------------------------

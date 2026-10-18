@@ -8,19 +8,19 @@ import tkinter as tk
 from tkinter import ttk
 
 from theming import PAD_XS, PAD_S, PAD_M, PAD_L, FONT_UI, FONT_MONO
-from appcommon import FIRST_RUN_FILE
 from imaging import _decode_row_thumb
 import find_games as fg
 import operations
-from find_games import get_non_steam_games, load_api_key, add_to_skip_list
+import appfiles
+from find_games import get_non_steam_games
+from appfiles import load_api_key, add_to_skip_list
 
 class LibraryMixin:
 
     def check_first_run(self):
         """Show the quick-start guide automatically on the first launch."""
-        if not os.path.exists(FIRST_RUN_FILE):
-            with open(FIRST_RUN_FILE, "w") as f:
-                f.write("done")
+        if not os.path.exists(appfiles.FIRSTRUN_FILE):
+            appfiles.write_text_atomic(appfiles.FIRSTRUN_FILE, "done")
             self.window.after(300, self.show_info)
 
 

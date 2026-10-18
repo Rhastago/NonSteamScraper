@@ -8,74 +8,14 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
+import appfiles
 
-# Set STEAMART_DEBUG=1 to surface the detail behind the defensive `except` blocks.
-DEBUG = os.environ.get("STEAMART_DEBUG", "").lower() in ("1", "true", "yes")
+from appcommon import DEBUG, debug as _debug
 
-def _debug(context):
-    """Print the current exception's traceback to stderr when STEAMART_DEBUG is set,
-    otherwise stay silent. Call from inside an `except` block so failures that are
-    intentionally swallowed can still be diagnosed without changing default behavior."""
-    if DEBUG:
-        import traceback
-        print(f"[steamart] {context}:", file=sys.stderr)
-        traceback.print_exc()
-
-APIKEY_FILE = os.path.expanduser("~/.steamart_apikey")
 
 # The app installs a callable taking one message string; find_games stays UI-free.
 RATE_LIMIT_HOOK = None
 
-# ---------------------------------------------------------------------------
-# API-key mtime cache (Task #9)
-# Invariant: _apikey_cache holds (path, mtime_or_None, value).
-#   - On each load_api_key() call we stat APIKEY_FILE.
-#   - If the stat succeeds and mtime equals the cached mtime, return the
-#     cached value (fast path — no file open).
-#   - If the mtime differs (file changed) or is None (file appeared after a
-#     previous miss), we re-read the file and update the cache.
-#   - If stat raises (file missing/unreadable), we cache (path, None, "") so
-#     a persistently missing file isn't re-stat-thrashed, but a new file that
-#     later appears will have a different mtime and force a re-read.
-# A threading.Lock serialises reads from the concurrent SGDB worker threads.
-# ---------------------------------------------------------------------------
-_apikey_lock  = threading.Lock()
-_apikey_cache = (None, None, "")   # (path, mtime, value)
-
-def load_api_key():
-    global _apikey_cache
-    path = APIKEY_FILE
-    with _apikey_lock:
-        cached_path, cached_mtime, cached_value = _apikey_cache
-        # Fast path: stat the file and compare mtime.
-        try:
-            mtime = os.stat(path).st_mtime
-        except OSError:
-            mtime = None   # file missing or unreadable
-        if cached_path == path and cached_mtime == mtime:
-            return cached_value   # cache hit (mtime unchanged, or still missing)
-        # Cache miss — read the file (or return "" if missing).
-        try:
-            with open(path, encoding="utf-8") as f:
-                value = f.read().strip()
-        except Exception:
-            _debug("load_api_key")
-            value = ""
-        _apikey_cache = (path, mtime, value)
-        return value
-
-def save_api_key(key):
-    # Write the file, then update the cache so the new key is visible
-    # immediately without a round-trip through the mtime check.
-    global _apikey_cache
-    with open(APIKEY_FILE, "w", encoding="utf-8") as f:
-        f.write(key.strip())
-    with _apikey_lock:
-        try:
-            mtime = os.stat(APIKEY_FILE).st_mtime
-        except OSError:
-            mtime = None
-        _apikey_cache = (APIKEY_FILE, mtime, key.strip())
 
 # The three answers to "will SteamGridDB take this key?" (check_api_key). Only a
 # refusal blames the key; "unreachable" means we could not ask.
@@ -91,7 +31,7 @@ def check_api_key(key=None):
     a timeout, a 5xx, a 429 that outlasted _sgdb_get's retries). Every fetch runs
     this before it changes anything on disk. Never raises."""
     if key is None:
-        key = load_api_key()
+        key = appfiles.load_api_key()
     if not key or not key.strip():
         return KEY_REJECTED
     try:
@@ -181,7 +121,7 @@ def _release_year(ts):
 
 def search_sgdb_autocomplete(query):
     """Return list of {id, name} dicts from the SGDB autocomplete endpoint."""
-    key = load_api_key()
+    key = appfiles.load_api_key()
     if not key or not query.strip():
         return []
     try:
@@ -256,7 +196,6 @@ def get_all_steam_users():
     return [u for u in os.listdir(udp)
             if u != "0" and os.path.exists(os.path.join(udp, u, "config", "shortcuts.vdf"))]
 
-ACCOUNT_FILE  = os.path.expanduser("~/.steamart_account")
 
 STEAM_USERDATA, STEAM_USER_ID = find_steam_user()
 if STEAM_USER_ID is None:
@@ -269,7 +208,7 @@ if STEAM_USER_ID is None:
 # saved id either matches the sole account or is invalid, so the fallback stands.
 if STEAM_USER_ID is not None:
     try:
-        with open(ACCOUNT_FILE, encoding="utf-8") as _f:
+        with open(appfiles.ACCOUNT_FILE, encoding="utf-8") as _f:
             _saved = _f.read().strip()
         _udp = get_steam_path()
         if _saved and _udp and os.path.exists(os.path.join(_udp, _saved, "config", "shortcuts.vdf")):
@@ -304,7 +243,7 @@ def set_active_user(user_id):
     GRID_FOLDER    = os.path.join(udp, user_id, "config", "grid")
     os.makedirs(GRID_FOLDER, exist_ok=True)
     try:
-        with open(ACCOUNT_FILE, "w", encoding="utf-8") as f:
+        with open(appfiles.ACCOUNT_FILE, "w", encoding="utf-8") as f:
             f.write(user_id)
     except Exception:
         _debug("set_active_user persist")
@@ -335,41 +274,6 @@ def get_steam_user_personas():
         _debug("get_steam_user_personas")
     return personas
 
-SKIP_FILE     = os.path.expanduser("~/.steamart_skip")
-NAMES_FILE    = os.path.expanduser("~/.steamart_names")
-# The SteamGridDB game id the user picked in Search → Select, per app id
-# ("appid|sgdb_id" per line). A separate file, not a new form in NAMES_FILE: an
-# older build reads that file with split("|", 1) and would take an id as a name.
-IDS_FILE      = os.path.expanduser("~/.steamart_ids")
-CACHE_FOLDER  = os.path.expanduser("~/.steamart_cache")
-BACKUP_FOLDER = os.path.expanduser("~/.steamart_backup")
-RESTORE_FOLDER = os.path.expanduser("~/.steamart_restore")
-MANAGED_FILE  = os.path.expanduser("~/.steamart_managed")
-PREFS_FILE    = os.path.expanduser("~/.steamart_prefs")
-# Settings/state files cleared by full_reset (the UI-side app.py also references the
-# same paths). Defined as constants so full_reset is monkeypatch-testable.
-FIRSTRUN_FILE = os.path.expanduser("~/.steamart_firstrun")
-THEME_FILE    = os.path.expanduser("~/.steamart_theme")
-ACCENT_FILE   = os.path.expanduser("~/.steamart_accent")
-GEOMETRY_FILE = os.path.expanduser("~/.steamart_geometry")
-# Icons are only safe to write into shortcuts.vdf while Steam is CLOSED (Steam
-# rewrites the file on exit and would clobber our change). When a fetch finishes
-# with Steam open we therefore DEFER the icon writes to this file instead of
-# prompting and restarting Steam ourselves. WHY no dialog/restart:
-#   - the old prompt was marshaled from the fetch worker thread to the UI thread
-#     and could hang forever (the dialog didn't reliably appear), and
-#   - auto-restarting (stop → sleep(3) → write → start) was racy — Steam shutting
-#     down gracefully could rewrite shortcuts.vdf and clobber our icon.
-# Instead the app polls and flushes these pending icons the moment Steam is closed.
-PENDING_ICONS_FILE = os.path.expanduser("~/.steamart_pending_icons")
-
-DEFAULT_PREFS = {
-    "animated": "never", "nsfw": "never", "humor": "ok",
-    "grid_no_logo": "ok", "grid_blurred": "ok", "grid_alternate": "ok", "grid_material": "ok",
-    "hero_alternate": "ok", "hero_blurred": "ok",
-    "logo_official": "ok", "logo_white": "ok", "logo_black": "ok",
-    "icon_official": "ok",
-}
 
 _STYLE_MAP = {
     "grids":  {"grid_no_logo": "no_logo", "grid_blurred": "blurred",
@@ -379,111 +283,18 @@ _STYLE_MAP = {
     "icons":  {"icon_official": "official"},
 }
 
-def load_skip_list():
-    if not os.path.exists(SKIP_FILE): return set()
-    with open(SKIP_FILE, encoding="utf-8") as f: return set(l.strip() for l in f if l.strip())
-
-def add_to_skip_list(app_id):
-    if str(app_id) not in load_skip_list():
-        with open(SKIP_FILE, "a", encoding="utf-8") as f: f.write(f"{app_id}\n")
-
-def remove_from_skip_list(app_id):
-    """Take one app id off the skip list (Restore, Re-fetch, Search → Select)."""
-    if not os.path.exists(SKIP_FILE):
-        return
-    with open(SKIP_FILE, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    with open(SKIP_FILE, "w", encoding="utf-8") as f:
-        for line in lines:
-            if line.strip() != str(app_id):
-                f.write(line)
-
-def load_name_overrides():
-    o = {}
-    if not os.path.exists(NAMES_FILE): return o
-    with open(NAMES_FILE, encoding="utf-8") as f:
-        for l in f:
-            l = l.strip()
-            if "|" in l:
-                a, n = l.split("|", 1); o[a.strip()] = n.strip()
-    return o
-
-def save_name_override(app_id, name):
-    o = load_name_overrides(); o[str(app_id)] = name
-    with open(NAMES_FILE, "w", encoding="utf-8") as f:
-        for a, n in o.items(): f.write(f"{a}|{n}\n")
-
-def load_id_overrides():
-    """{app_id_str: sgdb_id_int} from IDS_FILE. A malformed line is skipped."""
-    o = {}
-    if not os.path.exists(IDS_FILE): return o
-    with open(IDS_FILE, encoding="utf-8") as f:
-        for l in f:
-            a, _, i = l.strip().partition("|")
-            if a.strip() and i.strip().isdigit():
-                o[a.strip()] = int(i.strip())
-    return o
-
-def save_id_override(app_id, sgdb_id):
-    o = load_id_overrides(); o[str(app_id)] = int(sgdb_id)
-    with open(IDS_FILE, "w", encoding="utf-8") as f:
-        for a, i in o.items(): f.write(f"{a}|{i}\n")
-
-def register_managed_file(path):
-    with open(MANAGED_FILE, "a", encoding="utf-8") as f: f.write(f"{path}\n")
-
-def load_managed_files():
-    if not os.path.exists(MANAGED_FILE): return set()
-    with open(MANAGED_FILE, encoding="utf-8") as f: return set(l.strip() for l in f if l.strip())
 
 def clear_managed_artwork():
-    managed = load_managed_files(); deleted = 0
+    managed = appfiles.load_managed_files(); deleted = 0
     for p in managed:
         if os.path.exists(p): os.remove(p); deleted += 1
-    if os.path.exists(MANAGED_FILE): os.remove(MANAGED_FILE)
+    if os.path.exists(appfiles.MANAGED_FILE): os.remove(appfiles.MANAGED_FILE)
     # The restore point snapshots the very art being cleared; leaving it behind
     # would let a later Undo silently re-copy and re-register everything the
     # operator just removed ("Clear All Artwork" promises to remove it all).
     clear_restore_point()
     return deleted
 
-def load_prefs():
-    if not os.path.exists(PREFS_FILE):
-        return dict(DEFAULT_PREFS)
-    try:
-        with open(PREFS_FILE, encoding="utf-8") as f:
-            loaded = json.load(f)
-        prefs = dict(DEFAULT_PREFS)
-        prefs.update({k: v for k, v in loaded.items() if k in DEFAULT_PREFS})
-        return prefs
-    except Exception:
-        _debug("load_prefs")
-        return dict(DEFAULT_PREFS)
-
-def save_prefs(prefs):
-    with open(PREFS_FILE, "w", encoding="utf-8") as f:
-        json.dump(prefs, f, indent=2)
-
-def get_cache_size():
-    if not os.path.exists(CACHE_FOLDER): return 0.0
-    total = sum(os.path.getsize(os.path.join(CACHE_FOLDER, f))
-                for f in os.listdir(CACHE_FOLDER)
-                if os.path.isfile(os.path.join(CACHE_FOLDER, f)))
-    return round(total / (1024 * 1024), 2)
-
-def clear_cache():
-    if not os.path.exists(CACHE_FOLDER): return
-    for f in os.listdir(CACHE_FOLDER):
-        p = os.path.join(CACHE_FOLDER, f)
-        if os.path.isfile(p): os.remove(p)
-
-def clean_old_cache(days=30):
-    if not os.path.exists(CACHE_FOLDER): return
-    cutoff = datetime.now() - timedelta(days=days)
-    for f in os.listdir(CACHE_FOLDER):
-        p = os.path.join(CACHE_FOLDER, f)
-        if os.path.isfile(p) and datetime.fromtimestamp(os.path.getmtime(p)) < cutoff:
-            os.remove(p)
 
 # --- Restore point (SPEC.md S3) --------------------------------------------------
 # ~/.steamart_restore/ holds ONE restore point: manifest.json plus <id>/<file>
@@ -495,7 +306,7 @@ def clean_old_cache(days=30):
 def _restore_manifest_path():
     """Absolute path of the restore-point manifest. Lives inside RESTORE_FOLDER
     so monkeypatching RESTORE_FOLDER redirects the whole store (tests)."""
-    return os.path.join(RESTORE_FOLDER, "manifest.json")
+    return os.path.join(appfiles.RESTORE_FOLDER, "manifest.json")
 
 def _load_restore_manifest():
     """Load the restore manifest as a dict. A missing or corrupt manifest loads
@@ -514,8 +325,8 @@ def _save_restore_manifest(m):
     """Atomically write the restore manifest: temp file inside RESTORE_FOLDER,
     then os.replace() onto position — a crash mid-write can never leave a
     corrupt manifest that pretends copies exist which do not."""
-    os.makedirs(RESTORE_FOLDER, exist_ok=True)
-    tmp = os.path.join(RESTORE_FOLDER, "manifest.json.tmp")
+    os.makedirs(appfiles.RESTORE_FOLDER, exist_ok=True)
+    tmp = os.path.join(appfiles.RESTORE_FOLDER, "manifest.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(m, f, indent=2)
     os.replace(tmp, _restore_manifest_path())
@@ -571,7 +382,7 @@ def snapshot_for_restore(unsigned_id, existing_files=None, pending=False):
     try:
         m = _load_restore_manifest()
         if m.get("grid_folder") and m.get("grid_folder") != GRID_FOLDER:
-            shutil.rmtree(RESTORE_FOLDER, ignore_errors=True)
+            shutil.rmtree(appfiles.RESTORE_FOLDER, ignore_errors=True)
             m = {"version": 1, "grid_folder": "", "entries": {}}
         eid = str(unsigned_id)
         entry = m.get("entries", {}).get(eid)
@@ -579,15 +390,15 @@ def snapshot_for_restore(unsigned_id, existing_files=None, pending=False):
             return  # unsealed entry wins — never re-snapshot over it
         if entry is not None:
             # sealed entry is superseded: its copies belong to an accepted run
-            shutil.rmtree(os.path.join(RESTORE_FOLDER, eid), ignore_errors=True)
+            shutil.rmtree(os.path.join(appfiles.RESTORE_FOLDER, eid), ignore_errors=True)
             del m["entries"][eid]
-        managed = load_managed_files()
+        managed = appfiles.load_managed_files()
         if existing_files is None:
             try:
                 existing_files = os.listdir(GRID_FOLDER)
             except OSError:
                 existing_files = []
-        entry_dir = os.path.join(RESTORE_FOLDER, eid)
+        entry_dir = os.path.join(appfiles.RESTORE_FOLDER, eid)
         os.makedirs(entry_dir, exist_ok=True)
         files = []
         managed_subset = []
@@ -645,7 +456,7 @@ def begin_restore_run():
         if not m.get("entries"):
             return
         for eid in [e for e, entry in m["entries"].items() if entry.get("sealed")]:
-            shutil.rmtree(os.path.join(RESTORE_FOLDER, eid), ignore_errors=True)
+            shutil.rmtree(os.path.join(appfiles.RESTORE_FOLDER, eid), ignore_errors=True)
             del m["entries"][eid]
         for entry in m["entries"].values():
             entry["pending"] = False
@@ -700,7 +511,7 @@ def undo_restore_point():
         if not has_restore_point():
             return zero
         m = _load_restore_manifest()
-        managed = load_managed_files()
+        managed = appfiles.load_managed_files()
         icons = {}
         restored = 0
         removed = 0
@@ -721,14 +532,14 @@ def undo_restore_point():
             for fname in entry.get("files", []):
                 dst = os.path.join(GRID_FOLDER, fname)
                 try:
-                    shutil.copy2(os.path.join(RESTORE_FOLDER, eid, fname), dst)
+                    shutil.copy2(os.path.join(appfiles.RESTORE_FOLDER, eid, fname), dst)
                     restored += 1
                 except OSError:
                     _debug("undo_restore_point copy")
                     continue
                 if fname in entry.get("managed", []):
                     try:
-                        register_managed_file(dst)
+                        appfiles.register_managed_file(dst)
                     except OSError:
                         _debug("undo_restore_point register")
             # 3. collect the icon ("" restores "no icon"; None = no shortcut)
@@ -754,16 +565,16 @@ def undo_restore_point():
 
 def clear_restore_point():
     """Wipe the whole restore store (manifest + copies). Never raises."""
-    shutil.rmtree(RESTORE_FOLDER, ignore_errors=True)
+    shutil.rmtree(appfiles.RESTORE_FOLDER, ignore_errors=True)
 
 def restore_point_size():
     """MB occupied by the restore store, rounded to 2 dp (mirrors
     get_cache_size). The store nests <id>/<file>, so this walks recursively."""
-    if not os.path.exists(RESTORE_FOLDER):
+    if not os.path.exists(appfiles.RESTORE_FOLDER):
         return 0.0
     total = 0
     try:
-        for root, _dirs, files in os.walk(RESTORE_FOLDER):
+        for root, _dirs, files in os.walk(appfiles.RESTORE_FOLDER):
             for f in files:
                 try:
                     total += os.path.getsize(os.path.join(root, f))
@@ -783,7 +594,7 @@ def _shortcuts_backup_path():
     """The ACTIVE account's shortcuts.vdf backup. Per account (B10): one shared
     file meant only the first account ever written got a backup. Reads the live
     STEAM_USER_ID, so an account switch is honored."""
-    return os.path.join(BACKUP_FOLDER, f"shortcuts.vdf.{STEAM_USER_ID}.bak")
+    return os.path.join(appfiles.BACKUP_FOLDER, f"shortcuts.vdf.{STEAM_USER_ID}.bak")
 
 def legacy_backup_size():
     """MB of the art copies still sitting in ~/.steamart_backup from every past
@@ -791,13 +602,13 @@ def legacy_backup_size():
     2 dp like get_cache_size. The shortcuts.vdf backups are EXCLUDED — they are
     never deleted (the only pre-app shortcut-list copies), so the Settings clear
     button could never zero them out. Never raises."""
-    if not os.path.exists(BACKUP_FOLDER):
+    if not os.path.exists(appfiles.BACKUP_FOLDER):
         return 0.0
     try:
         total = 0
-        for f in os.listdir(BACKUP_FOLDER):
+        for f in os.listdir(appfiles.BACKUP_FOLDER):
             if _is_shortcuts_backup(f): continue  # never deleted; not clearable
-            p = os.path.join(BACKUP_FOLDER, f)
+            p = os.path.join(appfiles.BACKUP_FOLDER, f)
             if os.path.isfile(p):
                 total += os.path.getsize(p)
     except OSError:
@@ -805,34 +616,12 @@ def legacy_backup_size():
     return round(total / (1024 * 1024), 2)
 
 def clear_backup():
-    if not os.path.exists(BACKUP_FOLDER): return
-    for f in os.listdir(BACKUP_FOLDER):
+    if not os.path.exists(appfiles.BACKUP_FOLDER): return
+    for f in os.listdir(appfiles.BACKUP_FOLDER):
         if _is_shortcuts_backup(f): continue
-        p = os.path.join(BACKUP_FOLDER, f)
+        p = os.path.join(appfiles.BACKUP_FOLDER, f)
         if os.path.isfile(p): os.remove(p)
 
-def full_reset():
-    """Reset the app to a first-launch state WITHOUT touching the user's fetched/
-    applied artwork. Clears SETTINGS only — API key, prefs, theme/accent, skip list,
-    name overrides, picked SGDB ids, saved account, window geometry, first-run flag — plus the
-    regenerable thumbnail cache and any pending (un-applied) icon queue.
-
-    DELIBERATELY PRESERVES the applied grid artwork, the managed-file registry
-    (~/.steamart_managed), the artwork backup and the restore point
-    (~/.steamart_restore) so a settings reset can NEVER lose the user's art
-    collection. Removing art is the job of the separate `clear_managed_artwork()`
-    ("Clear All Artwork") action only — not this one."""
-    clear_cache()
-    files = [APIKEY_FILE, PREFS_FILE, SKIP_FILE, NAMES_FILE, IDS_FILE, ACCOUNT_FILE,
-             FIRSTRUN_FILE, THEME_FILE, ACCENT_FILE, GEOMETRY_FILE]
-    # Pending-icon queues are per-account (namespaced), so sweep the whole family
-    # plus any legacy un-namespaced file. (Applied icons in shortcuts.vdf are kept.)
-    files += glob.glob(PENDING_ICONS_FILE + "*")
-    for f in files:
-        try:
-            if os.path.exists(f): os.remove(f)
-        except Exception:
-            pass
 
 # ---------------------------------------------------------------------------
 # is_steam_running TTL cache (Task #10)
@@ -900,7 +689,7 @@ def get_non_steam_games():
     with open(SHORTCUTS_PATH, "rb") as f:
         data = vdf.binary_loads(f.read())
     shortcuts = data.get("shortcuts", {})
-    skip_list = load_skip_list(); seen = set(); games = []
+    skip_list = appfiles.load_skip_list(); seen = set(); games = []
 
     # --- Task #3: single grid-folder scan with boundary-correct matching -------
     # Build a set of uids that have at least one art file by listing GRID_FOLDER
@@ -985,7 +774,7 @@ def set_shortcut_icons(mapping):
     if not mapping or not os.path.exists(SHORTCUTS_PATH): return 0
     try:
         with _SHORTCUTS_LOCK:
-            os.makedirs(BACKUP_FOLDER, exist_ok=True)
+            os.makedirs(appfiles.BACKUP_FOLDER, exist_ok=True)
             bak = _shortcuts_backup_path()
             if not os.path.exists(bak): shutil.copy2(SHORTCUTS_PATH, bak)
             with open(SHORTCUTS_PATH, "rb") as f: data = vdf.binary_loads(f.read())
@@ -1024,7 +813,7 @@ def _pending_path():
     cleared unconditionally — silently losing A's icons on any account switch. We read
     the LIVE STEAM_USER_ID global so a set_active_user() switch is honored immediately,
     and fall back to the un-namespaced base path when no account is resolved."""
-    base = PENDING_ICONS_FILE
+    base = appfiles.PENDING_ICONS_FILE
     if not STEAM_USER_ID:
         return base
     namespaced = f"{base}_{STEAM_USER_ID}"
@@ -1107,9 +896,9 @@ SEARCH_ERROR     = "error"       # network, timeout, 5xx, 429 after retries, bad
 def search_game(name, app_id=None):
     """Search SGDB for `name` (or the saved name override for app_id). Returns
     (outcome, sgdb_id); sgdb_id is set only when outcome is SEARCH_FOUND."""
-    key = load_api_key(); headers = {"Authorization": f"Bearer {key}"}
+    key = appfiles.load_api_key(); headers = {"Authorization": f"Bearer {key}"}
     if app_id:
-        o = load_name_overrides()
+        o = appfiles.load_name_overrides()
         if str(app_id) in o: name = o[str(app_id)]; print(f"  Using corrected name: {name}")
     clean = re.sub(r'\s*\(.*?\)', '', name).strip()
     short = ' '.join(clean.split()[:3])
@@ -1153,8 +942,8 @@ def _strip_never(results, art_type, prefs):
 
 def get_artwork(sgdb_id, art_type, prefs=None, dimensions=None):
     if prefs is None:
-        prefs = load_prefs()
-    key = load_api_key()
+        prefs = appfiles.load_prefs()
+    key = appfiles.load_api_key()
     headers = {"Authorization": f"Bearer {key}"}
     url = f"https://www.steamgriddb.com/api/v2/{art_type}/game/{sgdb_id}"
 
@@ -1257,7 +1046,7 @@ def download_artwork(url, save_path, register=True):
             raise IOError(f"incomplete download: {written}/{expected} bytes")
         os.replace(tmp, save_path)  # atomic within the same folder
         if register:
-            register_managed_file(save_path)
+            appfiles.register_managed_file(save_path)
         print(f"    ✅ Saved: {os.path.basename(save_path)}"); return True
     except Exception as e:
         _debug("download_artwork")
@@ -1298,7 +1087,7 @@ def remove_partial_downloads(grid_folder, unsigned_ids):
     removed. Never raises."""
     ids = {str(i) for i in unsigned_ids}
     removed = 0
-    for folder in (grid_folder, CACHE_FOLDER):
+    for folder in (grid_folder, appfiles.CACHE_FOLDER):
         try:
             names = os.listdir(folder)
         except OSError:
@@ -1336,7 +1125,7 @@ def install_into_slot(save_path, url, existing_files=None, animated=False,
         return False
     clear_slot_files(save_path, existing_files=existing_files,
                      keep=os.path.basename(save_path))
-    register_managed_file(save_path)
+    appfiles.register_managed_file(save_path)
     return True
 
 def apply_icon(unsigned_id, icon_path):
@@ -1459,8 +1248,8 @@ def _apng_into_place(url, out_path, progress_cb=None, status_cb=None):
     reports the current phase. Leaves no temp file behind. Returns True on success."""
     if status_cb:
         status_cb("Downloading…")
-    os.makedirs(CACHE_FOLDER, exist_ok=True)
-    fd, work = tempfile.mkstemp(prefix="apng_", dir=CACHE_FOLDER)
+    os.makedirs(appfiles.CACHE_FOLDER, exist_ok=True)
+    fd, work = tempfile.mkstemp(prefix="apng_", dir=appfiles.CACHE_FOLDER)
     os.close(fd)
     src = f"{work}.src.{url.split('.')[-1].split('?')[0]}"
     encoded = f"{work}.png"
@@ -1502,7 +1291,7 @@ def get_steam_platform_data(sgdb_id):
     None when there's no Steam link or the request fails. Never raises — a miss just
     means the fetch proceeds with SGDB art only."""
     try:
-        headers = {"Authorization": f"Bearer {load_api_key()}"}
+        headers = {"Authorization": f"Bearer {appfiles.load_api_key()}"}
         d = _sgdb_get(f"https://www.steamgriddb.com/api/v2/games/id/{sgdb_id}",
                       headers=headers, params={"platformdata": "steam"}, timeout=5).json()
         entries = ((d.get("data") or {}).get("external_platform_data") or {}).get("steam") or []
@@ -1593,7 +1382,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
     FetchedArt. With defer_icon=True the icon's shortcuts.vdf write is left to the
     caller (FetchedArt.icon_write) so a whole run writes once."""
     if prefs is None:
-        prefs = load_prefs()
+        prefs = appfiles.load_prefs()
     # slot key -> (label, SGDB endpoint, filename base, dimensions filter)
     # Portrait and wide covers share the "grids" endpoint, split by dimensions.
     slots = {
@@ -1612,7 +1401,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
     except OSError:
         existing_files = []
     snapshot_for_restore(unsigned_id, existing_files=existing_files)
-    os.makedirs(CACHE_FOLDER, exist_ok=True)
+    os.makedirs(appfiles.CACHE_FOLDER, exist_ok=True)
     results = FetchedArt()
     # N slots × (1 main + 3 previews) steps max
     total_steps = len(slots) * 4
@@ -1704,7 +1493,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
         def fetch_preview(arg):
             i, img = arg
             u = img["url"]; e = u.split(".")[-1].split("?")[0]
-            tp = os.path.join(CACHE_FOLDER, f"{base}_{i}.{e}")
+            tp = os.path.join(appfiles.CACHE_FOLDER, f"{base}_{i}.{e}")
             bump(f"Caching {art_label} preview {i+1}/3")
             download_artwork(u, tp, register=False)
             return i, tp
@@ -1941,10 +1730,10 @@ def check_for_update(current_version):
 
 
 if __name__ == "__main__":
-    key = load_api_key()
+    key = appfiles.load_api_key()
     if not key: print("❌ No API key set."); exit()
     print(f"API key: {key[:6]}...\n")
-    clean_old_cache()
+    appfiles.clean_old_cache()
     games = get_non_steam_games()
     needs = [g for g in games if not g["has_art"]]
     print(f"Found {len(games)} games, {len(needs)} need artwork\n")

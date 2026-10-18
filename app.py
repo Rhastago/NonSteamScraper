@@ -3,7 +3,7 @@ from tkinter import messagebox
 import sys
 from concurrent.futures import ThreadPoolExecutor
 import find_games as fg  # live access to rebound globals (e.g. fg.GRID_FOLDER after account switch)
-from find_games import clean_old_cache
+from appfiles import clean_old_cache
 
 from theming import resolve_theme, load_theme, load_accent
 from appcommon import VERSION

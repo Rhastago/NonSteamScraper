@@ -10,10 +10,12 @@ onto the Tk thread via self._ui / self.window.after."""
 import threading
 from tkinter import messagebox
 
+from appcommon import DEBUG
 from theming import PAD_XS, PAD_L
 import find_games as fg
 import operations
-from find_games import load_api_key, load_prefs, is_steam_running, restart_steam
+from find_games import is_steam_running, restart_steam
+from appfiles import load_api_key, load_prefs
 
 class FetchMixin:
 
@@ -182,7 +184,7 @@ class FetchMixin:
         except Exception as e:
             import traceback
             self.log(f"Fetch failed: {e}", icon="error")
-            if fg.DEBUG:
+            if DEBUG:
                 traceback.print_exc()
             self._reset_fetch_ui("Fetch failed — see log.")
         finally:

@@ -11,10 +11,8 @@ from tkinter import messagebox
 from appcommon import VERSION, open_url
 from theming import ACCENTS, PAD_XS, PAD_S, FONT_UI, FONT_MONO
 import find_games as fg
-from find_games import (
-    load_api_key, save_api_key, verify_api_key, get_cache_size, clear_cache,
-    clear_managed_artwork, full_reset, is_steam_running, get_all_steam_users,
-)
+from find_games import verify_api_key, clear_managed_artwork, is_steam_running, get_all_steam_users
+from appfiles import load_api_key, save_api_key, get_cache_size, clear_cache, full_reset
 
 
 def open_settings(app):

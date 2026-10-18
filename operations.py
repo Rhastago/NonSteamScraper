@@ -14,21 +14,23 @@ account switch rebinds fg.GRID_FOLDER / fg.SHORTCUTS_PATH.
 
 import time
 
+from appcommon import debug as _debug
 import find_games as fg
+import appfiles
 
 
 # --- One game ------------------------------------------------------------------
 
 def restore_from_skip(app_id):
     """Hidden → main list: take the game off the skip list. Its art is untouched."""
-    fg.remove_from_skip_list(app_id)
+    appfiles.remove_from_skip_list(app_id)
 
 
 def refetch(app_id):
     """Re-fetch: take the game off the skip list and clear its art so the next
     fetch downloads it again. clear_game_art snapshots first (Undo can put the art
     back) and deletes only this id's files. Returns the number of files removed."""
-    fg.remove_from_skip_list(app_id)
+    appfiles.remove_from_skip_list(app_id)
     return fg.clear_game_art(app_id)
 
 
@@ -37,8 +39,8 @@ def rematch(app_id, name, sgdb_id):
     which the next fetch uses without searching again — B8: a re-search by name
     could land on a same-named game — and its name, as before), then clear the
     game's art exactly like Re-fetch. The caller then fetches this one game."""
-    fg.save_id_override(app_id, sgdb_id)
-    fg.save_name_override(app_id, name)
+    appfiles.save_id_override(app_id, sgdb_id)
+    appfiles.save_name_override(app_id, name)
     return refetch(app_id)
 
 
@@ -52,7 +54,7 @@ def apply_option(save_path, url, unsigned_id, is_icon=False, animated=False,
                                  animated=animated, progress_cb=progress_cb,
                                  status_cb=status_cb)
     except Exception:
-        fg._debug("apply_option")
+        _debug("apply_option")
         return False, False
 
 
@@ -112,7 +114,7 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
     # Icon writes are collected during the loop and written once after it.
     icons_to_set = {}
     # Games matched by hand in Search → Select: fetch that SGDB id, no search.
-    picked_ids = fg.load_id_overrides()
+    picked_ids = appfiles.load_id_overrides()
 
     for i, game in enumerate(games):
         if should_stop():
@@ -147,7 +149,7 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
         if outcome != fg.SEARCH_FOUND:
             # Only a genuine "no results" (SEARCH_NOT_FOUND) reaches here.
             on_log("Not found on SteamGridDB — skipping permanently", "warning")
-            fg.add_to_skip_list(app_id)
+            appfiles.add_to_skip_list(app_id)
             continue
 
         def slot_progress(label, step, total_steps, _i=i, _short=short,

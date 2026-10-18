@@ -21,6 +21,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import appfiles
 import operations  # noqa: E402
 
 
@@ -55,14 +56,14 @@ def run_env(monkeypatch, tmp_path):
     monkeypatch.setattr(fg, "seal_restore_point", lambda: rec.calls.append("seal"))
     monkeypatch.setattr(fg, "search_game", search)
     monkeypatch.setattr(fg, "download_all_artwork", download)
-    monkeypatch.setattr(fg, "add_to_skip_list", lambda uid: rec.calls.append(("skip", uid)))
+    monkeypatch.setattr(appfiles, "add_to_skip_list", lambda uid: rec.calls.append(("skip", uid)))
     monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: rec.steam_running)
     monkeypatch.setattr(fg, "set_shortcut_icons",
                         lambda m: rec.calls.append(("write_icons", dict(m))) or len(m))
     monkeypatch.setattr(fg, "save_pending_icons",
                         lambda m: rec.calls.append(("queue_icons", dict(m))))
     rec.ids_file = tmp_path / "ids"
-    monkeypatch.setattr(fg, "IDS_FILE", str(rec.ids_file))
+    monkeypatch.setattr(appfiles, "IDS_FILE", str(rec.ids_file))
     rec.on_log = lambda msg, icon: rec.logs.append(msg)
     rec.on_progress = lambda pct, label, status=None: rec.progress.append((pct, label, status))
     return rec
@@ -161,11 +162,11 @@ def files(tmp_path, monkeypatch):
         (grid / f).write_bytes(f.encode())
     monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
     monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(tmp_path / "shortcuts.vdf"))
-    monkeypatch.setattr(fg, "RESTORE_FOLDER", str(tmp_path / "restore"))
-    monkeypatch.setattr(fg, "MANAGED_FILE", str(tmp_path / "managed"))
-    monkeypatch.setattr(fg, "SKIP_FILE", str(tmp_path / "skip"))
-    monkeypatch.setattr(fg, "NAMES_FILE", str(tmp_path / "names"))
-    monkeypatch.setattr(fg, "IDS_FILE", str(tmp_path / "ids"))
+    monkeypatch.setattr(appfiles, "RESTORE_FOLDER", str(tmp_path / "restore"))
+    monkeypatch.setattr(appfiles, "MANAGED_FILE", str(tmp_path / "managed"))
+    monkeypatch.setattr(appfiles, "SKIP_FILE", str(tmp_path / "skip"))
+    monkeypatch.setattr(appfiles, "NAMES_FILE", str(tmp_path / "names"))
+    monkeypatch.setattr(appfiles, "IDS_FILE", str(tmp_path / "ids"))
     (tmp_path / "skip").write_text("12345\n999\n", encoding="utf-8")
     return tmp_path
 
@@ -189,8 +190,8 @@ def test_refetch_clears_only_that_game_snapshots_first_and_unskips(files):
 
 def test_rematch_saves_the_name_then_clears_like_refetch(files):
     operations.rematch(12345, "DOOM", 1993)
-    assert fg.load_name_overrides() == {"12345": "DOOM"}
-    assert fg.load_id_overrides() == {"12345": 1993}
+    assert appfiles.load_name_overrides() == {"12345": "DOOM"}
+    assert appfiles.load_id_overrides() == {"12345": 1993}
     assert sorted(os.listdir(files / "grid")) == ["123456_logo.png", "123456p.png"]
     assert "12345" in _manifest(files)["entries"]
     assert (files / "skip").read_text(encoding="utf-8") == "999\n"

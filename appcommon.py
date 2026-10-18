@@ -1,8 +1,8 @@
 """Shared constants and helpers used across app.py and its mixin/window modules.
 
 Kept small and tkinter-free (only stdlib: os/sys/subprocess/webbrowser) so every
-other module — the mixins and the extracted window classes — can import VERSION,
-the resource locator, the first-run marker, and the URL opener WITHOUT importing
+other module — the mixins, the window classes and the tkinter-free backend modules —
+can import VERSION, the debug helper, the resource locator and the URL opener WITHOUT importing
 app.py (which would create a circular import, since app.py imports those modules
 in turn).
 """
@@ -14,7 +14,19 @@ import webbrowser
 
 VERSION = "1.5.2"
 
-FIRST_RUN_FILE = os.path.expanduser("~/.steamart_firstrun")
+# Set STEAMART_DEBUG=1 to surface the detail behind the defensive `except` blocks.
+DEBUG = os.environ.get("STEAMART_DEBUG", "").lower() in ("1", "true", "yes")
+
+
+def debug(context):
+    """Print the current exception's traceback to stderr when STEAMART_DEBUG is set,
+    otherwise stay silent. Call from inside an `except` block so failures that are
+    intentionally swallowed can still be diagnosed without changing default behavior.
+    Modules import it as `from appcommon import debug as _debug`."""
+    if DEBUG:
+        import traceback
+        print(f"[steamart] {context}:", file=sys.stderr)
+        traceback.print_exc()
 
 
 def resource_path(relative):

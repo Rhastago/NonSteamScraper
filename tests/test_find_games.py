@@ -36,8 +36,22 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import find_games as fg  # noqa: E402
+import appfiles
 
 from PIL import Image  # noqa: E402
+
+# find_games is being split into modules (T-A5). A patch must land on the module
+# that OWNS a name, or the code that reads it never sees the patch (and a path
+# patch then falls back to the sandbox HOME, which G-HOME fails). Helpers that
+# patch a name held in a variable go through _owner().
+_OWNER_MODULES = (appfiles, fg)
+
+
+def _owner(name):
+    for mod in _OWNER_MODULES:
+        if name in vars(mod):
+            return mod
+    raise AssertionError(f"no module owns {name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -268,26 +282,26 @@ def test_row_thumbnail_missing_folder_returns_none(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_skip_list_empty_when_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "SKIP_FILE", str(tmp_path / "skip"))
-    assert fg.load_skip_list() == set()
+    monkeypatch.setattr(appfiles, "SKIP_FILE", str(tmp_path / "skip"))
+    assert appfiles.load_skip_list() == set()
 
 
 def test_skip_list_add_and_load(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "SKIP_FILE", str(tmp_path / "skip"))
-    fg.add_to_skip_list(111)
-    fg.add_to_skip_list(222)
-    assert fg.load_skip_list() == {"111", "222"}
+    monkeypatch.setattr(appfiles, "SKIP_FILE", str(tmp_path / "skip"))
+    appfiles.add_to_skip_list(111)
+    appfiles.add_to_skip_list(222)
+    assert appfiles.load_skip_list() == {"111", "222"}
 
 
 def test_skip_list_dedup_guard(tmp_path, monkeypatch):
     skip = tmp_path / "skip"
-    monkeypatch.setattr(fg, "SKIP_FILE", str(skip))
-    fg.add_to_skip_list(111)
-    fg.add_to_skip_list(111)  # duplicate -> should not append a second line
+    monkeypatch.setattr(appfiles, "SKIP_FILE", str(skip))
+    appfiles.add_to_skip_list(111)
+    appfiles.add_to_skip_list(111)  # duplicate -> should not append a second line
     with open(skip, encoding="utf-8") as f:
         lines = [l for l in f.read().splitlines() if l.strip()]
     assert lines == ["111"]
-    assert fg.load_skip_list() == {"111"}
+    assert appfiles.load_skip_list() == {"111"}
 
 
 # ---------------------------------------------------------------------------
@@ -295,30 +309,30 @@ def test_skip_list_dedup_guard(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_name_overrides_empty_when_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "NAMES_FILE", str(tmp_path / "names"))
-    assert fg.load_name_overrides() == {}
+    monkeypatch.setattr(appfiles, "NAMES_FILE", str(tmp_path / "names"))
+    assert appfiles.load_name_overrides() == {}
 
 
 def test_name_overrides_save_and_load(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "NAMES_FILE", str(tmp_path / "names"))
-    fg.save_name_override(123, "Real Game Name")
-    fg.save_name_override(456, "Another Title")
-    assert fg.load_name_overrides() == {"123": "Real Game Name", "456": "Another Title"}
+    monkeypatch.setattr(appfiles, "NAMES_FILE", str(tmp_path / "names"))
+    appfiles.save_name_override(123, "Real Game Name")
+    appfiles.save_name_override(456, "Another Title")
+    assert appfiles.load_name_overrides() == {"123": "Real Game Name", "456": "Another Title"}
 
 
 def test_name_overrides_update_existing(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "NAMES_FILE", str(tmp_path / "names"))
-    fg.save_name_override(123, "Old")
-    fg.save_name_override(123, "New")
-    assert fg.load_name_overrides() == {"123": "New"}
+    monkeypatch.setattr(appfiles, "NAMES_FILE", str(tmp_path / "names"))
+    appfiles.save_name_override(123, "Old")
+    appfiles.save_name_override(123, "New")
+    assert appfiles.load_name_overrides() == {"123": "New"}
 
 
 def test_name_overrides_name_with_pipe_preserved_on_load(tmp_path, monkeypatch):
     # load splits on the FIRST pipe only, so a name containing '|' survives load.
-    monkeypatch.setattr(fg, "NAMES_FILE", str(tmp_path / "names"))
+    monkeypatch.setattr(appfiles, "NAMES_FILE", str(tmp_path / "names"))
     with open(tmp_path / "names", "w", encoding="utf-8") as f:
         f.write("789|Game | With Pipe\n")
-    assert fg.load_name_overrides() == {"789": "Game | With Pipe"}
+    assert appfiles.load_name_overrides() == {"789": "Game | With Pipe"}
 
 
 # ---------------------------------------------------------------------------
@@ -326,40 +340,40 @@ def test_name_overrides_name_with_pipe_preserved_on_load(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_load_prefs_returns_defaults_when_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "PREFS_FILE", str(tmp_path / "prefs"))
-    prefs = fg.load_prefs()
-    assert prefs == fg.DEFAULT_PREFS
+    monkeypatch.setattr(appfiles, "PREFS_FILE", str(tmp_path / "prefs"))
+    prefs = appfiles.load_prefs()
+    assert prefs == appfiles.DEFAULT_PREFS
     # Must be a fresh dict, not the module default object (mutation safety).
-    assert prefs is not fg.DEFAULT_PREFS
+    assert prefs is not appfiles.DEFAULT_PREFS
 
 
 def test_save_and_load_prefs_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "PREFS_FILE", str(tmp_path / "prefs"))
-    custom = dict(fg.DEFAULT_PREFS)
+    monkeypatch.setattr(appfiles, "PREFS_FILE", str(tmp_path / "prefs"))
+    custom = dict(appfiles.DEFAULT_PREFS)
     custom["animated"] = "must_have"
     custom["nsfw"] = "ok"
-    fg.save_prefs(custom)
-    assert fg.load_prefs() == custom
+    appfiles.save_prefs(custom)
+    assert appfiles.load_prefs() == custom
 
 
 def test_load_prefs_filters_unknown_keys(tmp_path, monkeypatch):
     prefs_file = tmp_path / "prefs"
-    monkeypatch.setattr(fg, "PREFS_FILE", str(prefs_file))
+    monkeypatch.setattr(appfiles, "PREFS_FILE", str(prefs_file))
     with open(prefs_file, "w", encoding="utf-8") as f:
         json.dump({"animated": "ok", "bogus_key": "zzz"}, f)
-    loaded = fg.load_prefs()
+    loaded = appfiles.load_prefs()
     assert "bogus_key" not in loaded
     assert loaded["animated"] == "ok"
     # All default keys still present.
-    assert set(loaded) == set(fg.DEFAULT_PREFS)
+    assert set(loaded) == set(appfiles.DEFAULT_PREFS)
 
 
 def test_load_prefs_corrupt_json_falls_back_to_defaults(tmp_path, monkeypatch):
     prefs_file = tmp_path / "prefs"
-    monkeypatch.setattr(fg, "PREFS_FILE", str(prefs_file))
+    monkeypatch.setattr(appfiles, "PREFS_FILE", str(prefs_file))
     with open(prefs_file, "w", encoding="utf-8") as f:
         f.write("{ this is not valid json ]")
-    assert fg.load_prefs() == fg.DEFAULT_PREFS
+    assert appfiles.load_prefs() == appfiles.DEFAULT_PREFS
 
 
 # ---------------------------------------------------------------------------
@@ -367,28 +381,28 @@ def test_load_prefs_corrupt_json_falls_back_to_defaults(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_load_managed_empty_when_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "MANAGED_FILE", str(tmp_path / "managed"))
-    assert fg.load_managed_files() == set()
+    monkeypatch.setattr(appfiles, "MANAGED_FILE", str(tmp_path / "managed"))
+    assert appfiles.load_managed_files() == set()
 
 
 def test_register_and_load_managed(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "MANAGED_FILE", str(tmp_path / "managed"))
-    fg.register_managed_file("/a/b/c.png")
-    fg.register_managed_file("/d/e/f.png")
-    assert fg.load_managed_files() == {"/a/b/c.png", "/d/e/f.png"}
+    monkeypatch.setattr(appfiles, "MANAGED_FILE", str(tmp_path / "managed"))
+    appfiles.register_managed_file("/a/b/c.png")
+    appfiles.register_managed_file("/d/e/f.png")
+    assert appfiles.load_managed_files() == {"/a/b/c.png", "/d/e/f.png"}
 
 
 def test_register_managed_appends_duplicates_but_set_dedups(tmp_path, monkeypatch):
     # register_managed_file has no de-dup guard; load returns a set so the result
     # is still de-duplicated even though the file holds two lines.
     managed = tmp_path / "managed"
-    monkeypatch.setattr(fg, "MANAGED_FILE", str(managed))
-    fg.register_managed_file("/a/b/c.png")
-    fg.register_managed_file("/a/b/c.png")
+    monkeypatch.setattr(appfiles, "MANAGED_FILE", str(managed))
+    appfiles.register_managed_file("/a/b/c.png")
+    appfiles.register_managed_file("/a/b/c.png")
     with open(managed, encoding="utf-8") as f:
         lines = [l for l in f.read().splitlines() if l.strip()]
     assert lines == ["/a/b/c.png", "/a/b/c.png"]
-    assert fg.load_managed_files() == {"/a/b/c.png"}
+    assert appfiles.load_managed_files() == {"/a/b/c.png"}
 
 
 # ---------------------------------------------------------------------------
@@ -671,7 +685,7 @@ def test_check_api_key_defaults_to_the_saved_key(monkeypatch):
         seen.append(headers["Authorization"])
         return _JsonResp(200, {"success": True})
     monkeypatch.setattr(fg, "_http_get", fake_get)
-    monkeypatch.setattr(fg, "load_api_key", lambda: "SAVED")
+    monkeypatch.setattr(appfiles, "load_api_key", lambda: "SAVED")
     assert fg.check_api_key() == fg.KEY_ACCEPTED
     assert seen == ["Bearer SAVED"]
 
@@ -687,8 +701,8 @@ def test_verify_api_key_keeps_its_bool_contract(monkeypatch):
 
 
 def _search_setup(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "NAMES_FILE", str(tmp_path / "names"))
-    monkeypatch.setattr(fg, "load_api_key", lambda: "KEY")
+    monkeypatch.setattr(appfiles, "NAMES_FILE", str(tmp_path / "names"))
+    monkeypatch.setattr(appfiles, "load_api_key", lambda: "KEY")
 
 
 def test_search_game_401_is_refused(tmp_path, monkeypatch):
@@ -963,7 +977,7 @@ def _setup_shortcuts(tmp_path, monkeypatch, shortcuts):
     sc = tmp_path / "shortcuts.vdf"
     _write_shortcuts(str(sc), shortcuts)
     monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
-    monkeypatch.setattr(fg, "BACKUP_FOLDER", str(tmp_path / "backup"))
+    monkeypatch.setattr(appfiles, "BACKUP_FOLDER", str(tmp_path / "backup"))
     return sc
 
 
@@ -1000,7 +1014,7 @@ def test_set_shortcut_icons_backs_up_once(tmp_path, monkeypatch):
     sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""}})
     monkeypatch.setattr(fg, "STEAM_USER_ID", "111")
     fg.set_shortcut_icons({100: "/a/i.png"})
-    bak = os.path.join(fg.BACKUP_FOLDER, "shortcuts.vdf.111.bak")
+    bak = os.path.join(appfiles.BACKUP_FOLDER, "shortcuts.vdf.111.bak")
     assert os.path.exists(bak)
     import shutil
     before = open(bak, "rb").read()
@@ -1021,7 +1035,7 @@ def _two_accounts(tmp_path, monkeypatch):
     backup = tmp_path / "backup"
     backup.mkdir()
     (backup / "shortcuts.vdf.bak").write_bytes(b"LEGACY")
-    monkeypatch.setattr(fg, "BACKUP_FOLDER", str(backup))
+    monkeypatch.setattr(appfiles, "BACKUP_FOLDER", str(backup))
     return paths, backup
 
 
@@ -1558,10 +1572,10 @@ def test_download_all_artwork_defer_icon_shape_consumable(tmp_path, monkeypatch)
     with an icon yields FetchedArt.icon_write as a tuple, and the consumer must
     not choke on it."""
     monkeypatch.setattr(fg, "GRID_FOLDER", str(tmp_path / "grid"))
-    monkeypatch.setattr(fg, "CACHE_FOLDER", str(tmp_path / "cache"))
-    monkeypatch.setattr(fg, "BACKUP_FOLDER", str(tmp_path / "backup"))
-    monkeypatch.setattr(fg, "MANAGED_FILE", str(tmp_path / "managed"))
-    monkeypatch.setattr(fg, "RESTORE_FOLDER", str(tmp_path / "restore"))
+    monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(tmp_path / "cache"))
+    monkeypatch.setattr(appfiles, "BACKUP_FOLDER", str(tmp_path / "backup"))
+    monkeypatch.setattr(appfiles, "MANAGED_FILE", str(tmp_path / "managed"))
+    monkeypatch.setattr(appfiles, "RESTORE_FOLDER", str(tmp_path / "restore"))
     os.makedirs(fg.GRID_FOLDER, exist_ok=True)
 
     # Every slot returns one static PNG option so each slot auto-applies (incl.
@@ -1610,7 +1624,7 @@ def test_download_all_artwork_defer_icon_shape_consumable(tmp_path, monkeypatch)
 
 def test_save_pending_icons_merges_with_existing(tmp_path, monkeypatch):
     pf = tmp_path / "pending"
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(pf))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(pf))
     fg.save_pending_icons({100: "/a/i100.png"})
     fg.save_pending_icons({200: "/a/i200.png", 100: "/a/i100b.png"})  # 100 overwritten
     loaded = fg.load_pending_icons()
@@ -1618,7 +1632,7 @@ def test_save_pending_icons_merges_with_existing(tmp_path, monkeypatch):
 
 
 def test_load_pending_icons_round_trips_int_keys(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     fg.save_pending_icons({12345: "/a/i.png"})
     loaded = fg.load_pending_icons()
     assert loaded == {12345: "/a/i.png"}
@@ -1626,12 +1640,12 @@ def test_load_pending_icons_round_trips_int_keys(tmp_path, monkeypatch):
 
 
 def test_load_pending_icons_missing_returns_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "nope"))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "nope"))
     assert fg.load_pending_icons() == {}
 
 
 def test_has_and_clear_pending_icons_reflect_state(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     assert fg.has_pending_icons() is False
     fg.save_pending_icons({100: "/a/i.png"})
     assert fg.has_pending_icons() is True
@@ -1641,7 +1655,7 @@ def test_has_and_clear_pending_icons_reflect_state(tmp_path, monkeypatch):
 
 
 def test_apply_pending_icons_skips_and_keeps_file_when_steam_running(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(tmp_path / "shortcuts.vdf"))
     monkeypatch.setattr(fg, "is_steam_running", lambda: True)
     called = []
@@ -1657,7 +1671,7 @@ def test_apply_pending_icons_writes_and_clears_when_steam_closed(tmp_path, monke
     _touch(icon)  # path must exist so it isn't filtered out
     sc = tmp_path / "shortcuts.vdf"
     sc.write_bytes(b"x")  # SHORTCUTS_PATH just needs to exist for the guard
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
     monkeypatch.setattr(fg, "is_steam_running", lambda: False)
     captured = {}
@@ -1670,7 +1684,7 @@ def test_apply_pending_icons_writes_and_clears_when_steam_closed(tmp_path, monke
 
 def test_apply_pending_icons_drops_missing_icon_paths(tmp_path, monkeypatch):
     sc = tmp_path / "shortcuts.vdf"; sc.write_bytes(b"x")
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
     monkeypatch.setattr(fg, "is_steam_running", lambda: False)
     captured = []
@@ -1686,7 +1700,7 @@ def test_apply_pending_icons_drops_missing_icon_paths(tmp_path, monkeypatch):
 def test_pending_icons_are_namespaced_per_account(tmp_path, monkeypatch):
     """Queues under different accounts must not see or overwrite each other — the
     file path is derived from the live STEAM_USER_ID."""
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
 
     monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
     fg.save_pending_icons({100: "/a/iA.png"})
@@ -1710,7 +1724,7 @@ def test_apply_pending_icons_does_not_clear_other_accounts_queue(tmp_path, monke
     (let alone clear) another account's queued icons. Previously the queue was
     account-agnostic, so applying under B wiped A's icons forever."""
     sc = tmp_path / "shortcuts.vdf"; sc.write_bytes(b"x")
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
     monkeypatch.setattr(fg, "is_steam_running", lambda: False)
     monkeypatch.setattr(fg, "set_shortcut_icons", lambda m: len(m))
@@ -1732,7 +1746,7 @@ def test_pending_icons_legacy_file_migrates_to_active_account(tmp_path, monkeypa
     """A v1.3.0 un-namespaced queue is adopted by the account active at upgrade time,
     not orphaned."""
     base = tmp_path / "pending"
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(base))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(base))
     monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
     # Simulate a leftover legacy (un-namespaced) queue from v1.3.0.
     base.write_text('{"100": "/a/legacy.png"}', encoding="utf-8")
@@ -1747,7 +1761,7 @@ def test_full_reset_preserves_art_but_clears_settings(tmp_path, monkeypatch):
     clear_managed_artwork/clear_backup are not called, the managed registry survives,
     and only the regenerable thumbnail cache + settings/pending files are removed."""
     calls = []
-    monkeypatch.setattr(fg, "clear_cache", lambda: calls.append("cache"))
+    monkeypatch.setattr(appfiles, "clear_cache", lambda: calls.append("cache"))
     monkeypatch.setattr(fg, "clear_managed_artwork", lambda: calls.append("art"))
     monkeypatch.setattr(fg, "clear_backup", lambda: calls.append("backup"))
 
@@ -1758,20 +1772,20 @@ def test_full_reset_preserves_art_but_clears_settings(tmp_path, monkeypatch):
                  "GEOMETRY_FILE"):
         p = tmp_path / name
         p.write_text("x", encoding="utf-8")
-        monkeypatch.setattr(fg, name, str(p))
+        monkeypatch.setattr(_owner(name), name, str(p))
         settings[name] = p
 
     # Managed-file registry — must be PRESERVED so the art (and 'Clear All Artwork') survive.
     managed = tmp_path / "managed"
     managed.write_text("123p.png\n", encoding="utf-8")
-    monkeypatch.setattr(fg, "MANAGED_FILE", str(managed))
+    monkeypatch.setattr(appfiles, "MANAGED_FILE", str(managed))
 
     # A pending (un-applied) icon queue — should be swept.
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     monkeypatch.setattr(fg, "STEAM_USER_ID", "AAA")
     fg.save_pending_icons({100: "/a/i.png"})
 
-    fg.full_reset()
+    appfiles.full_reset()
 
     assert "art" not in calls               # never deletes applied artwork
     assert "backup" not in calls            # backup (art history) preserved
@@ -1817,8 +1831,8 @@ def _install_fetch_mocks(monkeypatch, tmp_path, slot_assets,
     grid = tmp_path / "grid"
     cache = tmp_path / "cache"
     monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
-    monkeypatch.setattr(fg, "CACHE_FOLDER", str(cache))
-    monkeypatch.setattr(fg, "BACKUP_FOLDER", str(tmp_path / "backup"))
+    monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(cache))
+    monkeypatch.setattr(appfiles, "BACKUP_FOLDER", str(tmp_path / "backup"))
     os.makedirs(grid, exist_ok=True)
 
     def fake_sgdb_get(url, headers=None, params=None, timeout=None, retries=3):
@@ -1839,10 +1853,10 @@ def _install_fetch_mocks(monkeypatch, tmp_path, slot_assets,
     icon_calls = []
     monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get)
     monkeypatch.setattr(fg, "download_artwork", fake_download_artwork)
-    monkeypatch.setattr(fg, "register_managed_file", lambda *a, **k: None)
+    monkeypatch.setattr(appfiles, "register_managed_file", lambda *a, **k: None)
     monkeypatch.setattr(fg, "snapshot_for_restore", lambda *a, **k: None)
     monkeypatch.setattr(fg, "is_steam_running", lambda *a, **k: False)
-    monkeypatch.setattr(fg, "load_api_key", lambda *a, **k: "FAKEKEY")
+    monkeypatch.setattr(appfiles, "load_api_key", lambda *a, **k: "FAKEKEY")
     if record_icon:
         monkeypatch.setattr(
             fg, "set_shortcut_icon",
@@ -2038,7 +2052,7 @@ def test_remove_partial_downloads_only_the_runs_part_files(tmp_path, monkeypatch
         (grid / f).write_bytes(b"x")
     (cache / "12345p_0.png.part").write_bytes(b"x")
     (cache / "12345p_1.png").write_bytes(b"x")
-    monkeypatch.setattr(fg, "CACHE_FOLDER", str(cache))
+    monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(cache))
 
     assert fg.remove_partial_downloads(str(grid), [12345]) == 3
 
@@ -2050,8 +2064,8 @@ def _grid_and_cache(tmp_path, monkeypatch):
     grid, cache = tmp_path / "grid", tmp_path / "cache"
     grid.mkdir(); cache.mkdir()
     monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
-    monkeypatch.setattr(fg, "CACHE_FOLDER", str(cache))
-    monkeypatch.setattr(fg, "register_managed_file", lambda p: None)
+    monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(cache))
+    monkeypatch.setattr(appfiles, "register_managed_file", lambda p: None)
     return grid, cache
 
 
@@ -2140,7 +2154,7 @@ def test_install_into_slot_same_extension_success_keeps_the_new_file(tmp_path, m
     grid.mkdir()
     (grid / "12345p.png").write_bytes(b"OLD")
     listing = os.listdir(grid)
-    monkeypatch.setattr(fg, "register_managed_file", lambda p: None)
+    monkeypatch.setattr(appfiles, "register_managed_file", lambda p: None)
     _failing_downloads(monkeypatch, set())
 
     assert fg.install_into_slot(str(grid / "12345p.png"), "https://x/a.png",
@@ -2262,7 +2276,7 @@ def test_http_seam_download_artwork_uses_seam_with_stream_and_timeout(monkeypatc
 
     monkeypatch.setattr(fg, "_http_get", fake_http_get, raising=False)
     monkeypatch.setattr(fg.requests, "get", _forbidden_get)
-    monkeypatch.setattr(fg, "MANAGED_FILE", str(tmp_path / "managed"))
+    monkeypatch.setattr(appfiles, "MANAGED_FILE", str(tmp_path / "managed"))
 
     save_path = str(tmp_path / "12345p.png")
     assert fg.download_artwork("http://x/img.png", save_path) is True
@@ -2348,7 +2362,7 @@ def _restore_setup(tmp_path, monkeypatch):
         "SHORTCUTS_PATH": str(tmp_path / "shortcuts.vdf"),
     }
     for name, value in paths.items():
-        monkeypatch.setattr(fg, name, value, raising=False)
+        monkeypatch.setattr(_owner(name), name, value)
     return paths
 
 
@@ -2384,7 +2398,7 @@ def test_restore_snapshot_records_unmanaged_files(tmp_path, monkeypatch):
     unmanaged_art = os.path.join(p["GRID_FOLDER"], "12345_hero.jpg")
     _touch(managed_art)
     _touch(unmanaged_art)
-    fg.register_managed_file(managed_art)
+    appfiles.register_managed_file(managed_art)
 
     fg.snapshot_for_restore(12345)
 
@@ -2400,7 +2414,7 @@ def test_restore_snapshot_records_managed_subset(tmp_path, monkeypatch):
     unmanaged_art = os.path.join(p["GRID_FOLDER"], "12345_hero.jpg")
     _touch(managed_art)
     _touch(unmanaged_art)
-    fg.register_managed_file(managed_art)
+    appfiles.register_managed_file(managed_art)
 
     fg.snapshot_for_restore(12345)
 
@@ -2653,7 +2667,7 @@ def test_restore_undo_restores_byte_identical_files(tmp_path, monkeypatch):
     os.remove(original)
     with open(original, "wb") as f:  # the fetch wrote something new
         f.write(b"NEW-FETCHED-ART")
-    fg.register_managed_file(original)
+    appfiles.register_managed_file(original)
 
     fg.undo_restore_point()
 
@@ -2665,7 +2679,7 @@ def test_restore_undo_restores_byte_identical_files(tmp_path, monkeypatch):
     assert fg.has_restore_point() is False
     # ...and the restored file is registered again, so Clear All Artwork still
     # covers it.
-    assert original in fg.load_managed_files()
+    assert original in appfiles.load_managed_files()
 
 
 def test_restore_undo_removes_fetched_file_with_different_extension(tmp_path, monkeypatch):
@@ -2679,7 +2693,7 @@ def test_restore_undo_removes_fetched_file_with_different_extension(tmp_path, mo
     os.remove(os.path.join(p["GRID_FOLDER"], "1234p.png"))
     webp = os.path.join(p["GRID_FOLDER"], "1234p.webp")
     _touch(webp)
-    fg.register_managed_file(webp)  # the fetch's file is managed
+    appfiles.register_managed_file(webp)  # the fetch's file is managed
 
     fg.undo_restore_point()
 
@@ -2715,7 +2729,7 @@ def test_restore_undo_never_deletes_a_neighbouring_games_file(tmp_path, monkeypa
     os.remove(os.path.join(p["GRID_FOLDER"], "12345p.png"))
     neighbour = os.path.join(p["GRID_FOLDER"], "123456p.png")
     _touch(neighbour)
-    fg.register_managed_file(neighbour)
+    appfiles.register_managed_file(neighbour)
 
     fg.undo_restore_point()
 
@@ -2746,7 +2760,7 @@ def test_restore_undo_queues_icon_when_steam_running(tmp_path, monkeypatch):
     assert hasattr(fg, "snapshot_for_restore"), "fg.snapshot_for_restore does not exist yet"
     assert hasattr(fg, "undo_restore_point"), "fg.undo_restore_point does not exist yet"
     p = _restore_setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/old/icon.png"}})
     fg.snapshot_for_restore(12345)
     monkeypatch.setattr(fg, "is_steam_running", lambda: True)
@@ -2762,7 +2776,7 @@ def test_restore_queued_empty_icon_survives_apply(tmp_path, monkeypatch):
     os.path.exists('') is False (find_games.py:658), so the restore is silently
     dropped — this gate forces the one-line fix (path == '' or exists)."""
     p = _restore_setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(fg, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
     _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/a/current.png"}})
     fg.save_pending_icons({12345: ""})  # queued while Steam was running
     monkeypatch.setattr(fg, "is_steam_running", lambda: False)
@@ -2930,7 +2944,7 @@ def test_get_steam_platform_data_parses_link(monkeypatch):
         return types.SimpleNamespace(json=lambda p=payload: p)
 
     monkeypatch.setattr(fg, "_sgdb_get", fake_sgdb_get)
-    monkeypatch.setattr(fg, "load_api_key", lambda *a, **k: "K")
+    monkeypatch.setattr(appfiles, "load_api_key", lambda *a, **k: "K")
 
     assert fg.get_steam_platform_data(17830) == ("620", _STEAM_META_PORTAL2)
     assert recorded["url"].endswith("/games/id/17830")
@@ -2938,7 +2952,7 @@ def test_get_steam_platform_data_parses_link(monkeypatch):
 
 
 def test_get_steam_platform_data_none_on_missing_or_error(monkeypatch):
-    monkeypatch.setattr(fg, "load_api_key", lambda *a, **k: "K")
+    monkeypatch.setattr(appfiles, "load_api_key", lambda *a, **k: "K")
 
     def fake_sgdb_get_no_platform(url, headers=None, params=None, timeout=None, retries=3):
         payload = {"success": True, "data": {"id": 17830}}
@@ -3080,7 +3094,7 @@ def test_ignored_game_lands_in_hidden(tmp_path, monkeypatch):
         "0": {"appid": 100, "AppName": "Game One"},
         "1": {"appid": 200, "AppName": "Game Two"},
     })
-    monkeypatch.setattr(fg, "SKIP_FILE", str(skip_file))
+    monkeypatch.setattr(appfiles, "SKIP_FILE", str(skip_file))
     monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
     monkeypatch.setattr(fg, "SHORTCUTS_PATH", str(sc))
 
@@ -3088,7 +3102,7 @@ def test_ignored_game_lands_in_hidden(tmp_path, monkeypatch):
     assert _find_game(before, 100)["skipped"] is False
     assert _find_game(before, 200)["skipped"] is False
 
-    fg.add_to_skip_list(100)
+    appfiles.add_to_skip_list(100)
 
     after = fg.get_non_steam_games()
     assert _find_game(after, 100)["skipped"] is True
@@ -3211,26 +3225,87 @@ def test_install_option_non_icon_slot_writes_no_icon(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_id_overrides_round_trip_and_update(tmp_path, monkeypatch):
-    monkeypatch.setattr(fg, "IDS_FILE", str(tmp_path / "ids"))
-    assert fg.load_id_overrides() == {}
-    fg.save_id_override(12345, 2016)
-    fg.save_id_override(777, 5)
-    fg.save_id_override(12345, 1993)
-    assert fg.load_id_overrides() == {"12345": 1993, "777": 5}
+    monkeypatch.setattr(appfiles, "IDS_FILE", str(tmp_path / "ids"))
+    assert appfiles.load_id_overrides() == {}
+    appfiles.save_id_override(12345, 2016)
+    appfiles.save_id_override(777, 5)
+    appfiles.save_id_override(12345, 1993)
+    assert appfiles.load_id_overrides() == {"12345": 1993, "777": 5}
     assert (tmp_path / "ids").read_text(encoding="utf-8") == "12345|1993\n777|5\n"
 
 
 def test_id_overrides_skip_malformed_lines(tmp_path, monkeypatch):
     p = tmp_path / "ids"
     p.write_text("12345|1993\njunk\n55|DOOM\n|9\n 66 | 7 \n", encoding="utf-8")
-    monkeypatch.setattr(fg, "IDS_FILE", str(p))
-    assert fg.load_id_overrides() == {"12345": 1993, "66": 7}
+    monkeypatch.setattr(appfiles, "IDS_FILE", str(p))
+    assert appfiles.load_id_overrides() == {"12345": 1993, "66": 7}
 
 
 def test_id_override_lives_apart_from_the_names_file(tmp_path, monkeypatch):
     """An older build reads ~/.steamart_names with split("|", 1); the id must
     never land there, or that build would search for "1993" as the name."""
-    monkeypatch.setattr(fg, "IDS_FILE", str(tmp_path / "ids"))
-    monkeypatch.setattr(fg, "NAMES_FILE", str(tmp_path / "names"))
-    fg.save_id_override(12345, 1993)
+    monkeypatch.setattr(appfiles, "IDS_FILE", str(tmp_path / "ids"))
+    monkeypatch.setattr(appfiles, "NAMES_FILE", str(tmp_path / "names"))
+    appfiles.save_id_override(12345, 1993)
     assert not (tmp_path / "names").exists()
+
+
+# ---------------------------------------------------------------------------
+# appfiles — one registry, atomic writes for the app's own files (B15, H2)
+# ---------------------------------------------------------------------------
+
+def test_write_text_atomic_replaces_whole_file_and_leaves_no_temp(tmp_path):
+    p = tmp_path / "f"
+    p.write_text("old contents, longer than the new ones", encoding="utf-8")
+    os.chmod(p, 0o640)
+    appfiles.write_text_atomic(str(p), "new")
+    assert p.read_text(encoding="utf-8") == "new"
+    assert os.listdir(tmp_path) == ["f"], "no temp file may be left behind"
+    assert (os.stat(p).st_mode & 0o777) == 0o640, "an existing file keeps its mode"
+
+
+def test_write_text_atomic_failure_keeps_the_old_file(tmp_path, monkeypatch):
+    p = tmp_path / "f"
+    p.write_text("old", encoding="utf-8")
+
+    def boom(src, dst):
+        raise OSError("disk full")
+    monkeypatch.setattr(appfiles.os, "replace", boom)
+    with pytest.raises(OSError):
+        appfiles.write_text_atomic(str(p), "new")
+    assert p.read_text(encoding="utf-8") == "old"
+    assert os.listdir(tmp_path) == ["f"]
+
+
+def test_every_app_file_writer_goes_through_the_atomic_write(tmp_path, monkeypatch):
+    """B15: the skip list, overrides, prefs, API key, theme, accent and
+    first-run files were opened with "w" in place; a crash mid-write truncated
+    them. Each writer must hand its whole content to write_text_atomic."""
+    for name in ("SKIP_FILE", "NAMES_FILE", "IDS_FILE", "PREFS_FILE", "APIKEY_FILE",
+                 "THEME_FILE", "ACCENT_FILE"):
+        monkeypatch.setattr(appfiles, name, str(tmp_path / name))
+    written = []
+    real = appfiles.write_text_atomic
+    monkeypatch.setattr(appfiles, "write_text_atomic",
+                        lambda path, text: written.append(os.path.basename(path)) or real(path, text))
+    import theming
+    appfiles.add_to_skip_list(5)
+    appfiles.remove_from_skip_list(5)
+    appfiles.save_name_override(5, "N")
+    appfiles.save_id_override(5, 9)
+    appfiles.save_prefs({"animated": "ok"})
+    appfiles.save_api_key("k")
+    theming.save_theme("light")
+    theming.save_accent("green")
+    assert written == ["SKIP_FILE", "SKIP_FILE", "NAMES_FILE", "IDS_FILE", "PREFS_FILE",
+                       "APIKEY_FILE", "THEME_FILE", "ACCENT_FILE"]
+    assert theming.load_theme() == "light" and theming.load_accent() == "green"
+    assert appfiles.load_api_key() == "k"
+
+
+def test_add_to_skip_list_keeps_existing_lines(tmp_path, monkeypatch):
+    p = tmp_path / "skip"
+    p.write_text("1\n2", encoding="utf-8")   # no trailing newline
+    monkeypatch.setattr(appfiles, "SKIP_FILE", str(p))
+    appfiles.add_to_skip_list(3)
+    assert p.read_text(encoding="utf-8") == "1\n2\n3\n"

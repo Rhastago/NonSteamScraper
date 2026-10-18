@@ -26,6 +26,7 @@ assert os.path.basename(os.environ["HOME"]).startswith("steamart_test_home_"), (
     "tests/conftest.py must sandbox HOME before find_games is imported")
 
 import find_games as fg  # noqa: E402
+import appfiles  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +371,7 @@ def fetch_env(ui, tmp_path, monkeypatch):
     # operations.run_fetch reads find_games live, so these are patched on fg.
     monkeypatch.setattr(fg, "search_game", fake_search)
     monkeypatch.setattr(fg, "download_all_artwork", fake_download)
-    monkeypatch.setattr(fg, "add_to_skip_list", lambda app_id: rec.skipped.append(app_id))
+    monkeypatch.setattr(appfiles, "add_to_skip_list", lambda app_id: rec.skipped.append(app_id))
     monkeypatch.setattr(fm, "load_prefs", lambda: {})
     monkeypatch.setattr(fm, "load_api_key", lambda: "KEY")
     monkeypatch.setattr(fg, "check_api_key", lambda key=None: fg.KEY_ACCEPTED)
@@ -615,7 +616,7 @@ def test_write_commands_refuse_while_busy(ui, fetch_env, monkeypatch):
     monkeypatch.setattr(ui.ui_mixin, "save_accent", lambda n: done.append(("accent", n)))
     monkeypatch.setattr(ui.ui_mixin, "ACCENTS", {"blue": {}, "green": {}})
     app = make_app(ui)
-    monkeypatch.setattr(fg, "remove_from_skip_list", lambda uid: done.append(("unskip", uid)))
+    monkeypatch.setattr(appfiles, "remove_from_skip_list", lambda uid: done.append(("unskip", uid)))
     monkeypatch.setattr(app, "relaunch_app", lambda: done.append("relaunch"))
     g = _game(5)
 
@@ -668,7 +669,7 @@ def test_close_during_fetch_stops_between_games_and_removes_its_parts(
         (grid / f).write_bytes(b"x")
     (cache / "1p_0.png.part").write_bytes(b"x")
     monkeypatch.setattr(fg, "GRID_FOLDER", str(grid))
-    monkeypatch.setattr(fg, "CACHE_FOLDER", str(cache))
+    monkeypatch.setattr(appfiles, "CACHE_FOLDER", str(cache))
     fetch_env.library = [_game(1), _game(2), _game(3)]
     app = make_app(ui, fetch_env.library)
     app.start_fetch()
@@ -953,11 +954,11 @@ def search_env(ui, fetch_env, monkeypatch):
     monkeypatch.setattr(dl, "search_sgdb_autocomplete", lambda q: [
         {"id": 2016, "name": "DOOM", "year": "2016", "type": "game"},
         {"id": 1993, "name": "DOOM", "year": "1993", "type": "game"}])
-    monkeypatch.setattr(fg, "save_id_override",
+    monkeypatch.setattr(appfiles, "save_id_override",
                         lambda uid, sid: rec.calls.append(("id", uid, sid)))
-    monkeypatch.setattr(fg, "save_name_override",
+    monkeypatch.setattr(appfiles, "save_name_override",
                         lambda uid, name: rec.calls.append(("name", uid, name)))
-    monkeypatch.setattr(fg, "remove_from_skip_list", lambda uid: rec.calls.append(("unskip", uid)))
+    monkeypatch.setattr(appfiles, "remove_from_skip_list", lambda uid: rec.calls.append(("unskip", uid)))
     monkeypatch.setattr(fg, "clear_game_art", lambda uid: rec.calls.append(("clear", uid)) or 0)
     app = make_settings_app(ui, monkeypatch)
     app.start_fetch = lambda games=None: rec.fetches.append(games)
