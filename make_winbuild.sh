@@ -22,13 +22,15 @@ echo "Staging source (working tree)…"
 # changes are included). Every *.py at the repo root is an app module: a fixed
 # list once missed a new module and broke only the Windows build.
 for item in *.py \
-            requirements.txt requirements-build.txt icon.png icon.ico \
+            requirements.txt requirements-build.txt requirements-dev.txt tests \
+            icon.png icon.ico \
             build_windows.sh assets README.md CHANGELOG.md LICENSE; do
     [ -e "$item" ] && cp -r "$item" "$APP/"
 done
+find "$APP" -name __pycache__ -type d -prune -exec rm -rf {} +
 
 echo "Fetching Windows wheels (cp312)…"
-"$PY" -m pip download -r requirements-build.txt --platform win_amd64 \
+"$PY" -m pip download -r requirements-build.txt -r requirements-dev.txt --platform win_amd64 \
     --python-version 3.12 --only-binary=:all: -d "$APP/wheels" >/dev/null
 
 cat > "$APP/BUILD.txt" <<'TXT'
@@ -50,10 +52,15 @@ NonSteamScraper — Windows test build (run these in Git Bash)
    (The offline wheels target Python 3.12. On a different Python version the
     offline step is skipped automatically and pip installs from the internet.)
 
-4. Build the executable:
+4. Run the test suite (the same one CI runs before a release):
+       pip install --no-index --find-links wheels -r requirements-dev.txt \
+         || pip install -r requirements-dev.txt
+       python -m pytest -q
+
+5. Build the executable:
        ./build_windows.sh
 
-5. Result:  dist/NonSteamScraper.exe   (run it to manually test)
+6. Result:  dist/NonSteamScraper.exe   (run it to manually test)
 TXT
 
 echo "Zipping…"

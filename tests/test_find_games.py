@@ -1171,7 +1171,8 @@ def test_write_shortcuts_atomic_unique_temp_fsync_then_replace(tmp_path, monkeyp
     assert os.path.basename(tmp) != "shortcuts.vdf.tmp", "no fixed temp name"
     assert events.index("fsync") < events.index(replaces[0]), "fsync before replace"
     assert sorted(os.listdir(tmp_path)) == ["backup", "shortcuts.vdf"]
-    assert (os.stat(sc).st_mode & 0o777) == 0o644, "the file keeps its mode"
+    if os.name == "posix":   # Windows has no Unix mode bits to keep
+        assert (os.stat(sc).st_mode & 0o777) == 0o644, "the file keeps its mode"
 
 
 def test_write_shortcuts_atomic_failure_leaves_original_and_no_temp(tmp_path, monkeypatch):
@@ -3272,7 +3273,8 @@ def test_write_text_atomic_replaces_whole_file_and_leaves_no_temp(tmp_path):
     appfiles.write_text_atomic(str(p), "new")
     assert p.read_text(encoding="utf-8") == "new"
     assert os.listdir(tmp_path) == ["f"], "no temp file may be left behind"
-    assert (os.stat(p).st_mode & 0o777) == 0o640, "an existing file keeps its mode"
+    if os.name == "posix":   # Windows has no Unix mode bits to keep
+        assert (os.stat(p).st_mode & 0o777) == 0o640, "an existing file keeps its mode"
 
 
 def test_write_text_atomic_failure_keeps_the_old_file(tmp_path, monkeypatch):

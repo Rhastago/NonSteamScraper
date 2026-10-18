@@ -47,6 +47,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
 
+      # The suite runs on both runners before anything is built; a red test stops
+      # the release. It needs no display (the UI tests stand tkinter in).
+      - name: Test
+        shell: bash
+        run: |
+          pip install -r requirements-dev.txt
+          python -m pytest -q
+
       # Reuse the same build scripts you run locally, then give the artifact its
       # platform-specific release name.
       - name: Build
