@@ -85,7 +85,7 @@ SHORTCUTS_PATH = GRID_FOLDER = ""
 def init():
     """Find Steam's userdata folder and pick the account: the first one with a
     shortcuts.vdf (else any account folder), replaced by the account saved in
-    ~/.steamart_account when that one is still valid — which only matters with
+    appfiles.ACCOUNT_FILE when that one is still valid — which only matters with
     2+ accounts. Binds the account globals and creates the account's grid
     folder. Called once by app.py at startup."""
     global STEAM_USERDATA, STEAM_USER_ID, SHORTCUTS_PATH, GRID_FOLDER, STEAM_NOT_FOUND
@@ -104,6 +104,10 @@ def init():
                 userdata, user_id = udp, saved
         except Exception:
             _debug("restore_active_user")
+    if user_id is not None:
+        # The folder first, the globals after (N15): a makedirs that raises must
+        # not leave the globals pointing at an account whose folder is missing.
+        os.makedirs(os.path.join(userdata, user_id, "config", "grid"), exist_ok=True)
     STEAM_USERDATA, STEAM_USER_ID = userdata, user_id
     STEAM_NOT_FOUND = user_id is None
     if STEAM_NOT_FOUND:
@@ -111,7 +115,6 @@ def init():
     else:
         SHORTCUTS_PATH = os.path.join(userdata, user_id, "config", "shortcuts.vdf")
         GRID_FOLDER    = os.path.join(userdata, user_id, "config", "grid")
-        os.makedirs(GRID_FOLDER, exist_ok=True)
 
 def get_active_user():
     """Return the currently active userdata folder id (or None if Steam not found)."""
@@ -120,18 +123,25 @@ def get_active_user():
 def set_active_user(user_id):
     """Switch the active Steam account by rebinding the module globals
     (STEAM_USERDATA, STEAM_USER_ID, SHORTCUTS_PATH, GRID_FOLDER) and persisting
-    the choice to ~/.steamart_account. Backend functions read these globals, so
+    the choice to appfiles.ACCOUNT_FILE. Backend functions read these globals, so
     the switch takes effect for subsequent calls. Returns True on success, False
-    if user_id is not a valid account folder with a shortcuts.vdf."""
+    if user_id is not a valid account folder with a shortcuts.vdf, or its grid
+    folder cannot be created — then nothing is switched (N15: the globals used to
+    be rebound first, and a failing makedirs raised out of a half-done switch)."""
     global STEAM_USERDATA, STEAM_USER_ID, SHORTCUTS_PATH, GRID_FOLDER
     udp = get_steam_path()
     if not udp or not user_id or not os.path.exists(os.path.join(udp, user_id, "config", "shortcuts.vdf")):
         return False
+    grid = os.path.join(udp, user_id, "config", "grid")
+    try:
+        os.makedirs(grid, exist_ok=True)
+    except OSError as e:
+        print(f"Failed to switch to account {user_id}: {e}")
+        return False
     STEAM_USERDATA = udp
     STEAM_USER_ID  = user_id
     SHORTCUTS_PATH = os.path.join(udp, user_id, "config", "shortcuts.vdf")
-    GRID_FOLDER    = os.path.join(udp, user_id, "config", "grid")
-    os.makedirs(GRID_FOLDER, exist_ok=True)
+    GRID_FOLDER    = grid
     try:
         appfiles.write_text_atomic(appfiles.ACCOUNT_FILE, user_id)
     except Exception:

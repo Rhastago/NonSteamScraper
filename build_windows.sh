@@ -8,6 +8,9 @@ cd "$(dirname "$0")"
 if [ -f venv/Scripts/activate ]; then
     # shellcheck disable=SC1091
     source venv/Scripts/activate
+    # The exact versions the release was tested with (constraints.txt). A no-op
+    # when the venv already matches them.
+    python -m pip install -q -r requirements-build.txt -c constraints.txt
 fi
 
 # Generate icon.ico from icon.png if it doesn't exist yet.
@@ -34,8 +37,7 @@ pyinstaller --onefile --windowed --name NonSteamScraper \
     --hidden-import psutil \
     --hidden-import _socket \
     --hidden-import socket \
-    --collect-all pillow \
-    --collect-all multiprocessing app.py
+    app.py
 
 echo
 echo "Done. Binary is at: dist/NonSteamScraper.exe"

@@ -22,16 +22,22 @@ echo "Staging source (working tree)…"
 # changes are included). Every *.py at the repo root is an app module: a fixed
 # list once missed a new module and broke only the Windows build.
 for item in *.py \
-            requirements.txt requirements-build.txt requirements-dev.txt tests \
+            requirements.txt requirements-build.txt requirements-dev.txt constraints.txt tests \
             icon.png icon.ico \
             build_windows.sh assets README.md CHANGELOG.md LICENSE; do
     [ -e "$item" ] && cp -r "$item" "$APP/"
 done
 find "$APP" -name __pycache__ -type d -prune -exec rm -rf {} +
 
-echo "Fetching Windows wheels (cp312)…"
-"$PY" -m pip download -r requirements-build.txt -r requirements-dev.txt --platform win_amd64 \
-    --python-version 3.12 --only-binary=:all: -d "$APP/wheels" >/dev/null
+echo "Fetching Windows wheels (cp313, pinned by constraints.txt)…"
+"$PY" -m pip download -r requirements-build.txt -r requirements-dev.txt -c constraints.txt \
+    --platform win_amd64 --python-version 3.13 --only-binary=:all: -d "$APP/wheels" >/dev/null
+# pip judges the sys_platform markers by THIS machine, so the Windows-only
+# dependencies are never pulled in above; fetch them by their exact pins.
+WIN_ONLY=$(grep 'sys_platform == "win32"' constraints.txt | cut -d';' -f1)
+# shellcheck disable=SC2086
+"$PY" -m pip download $WIN_ONLY --no-deps --platform win_amd64 --python-version 3.13 \
+    --only-binary=:all: -d "$APP/wheels" >/dev/null
 
 cat > "$APP/BUILD.txt" <<'TXT'
 NonSteamScraper — Windows test build (run these in Git Bash)
@@ -44,17 +50,18 @@ NonSteamScraper — Windows test build (run these in Git Bash)
        python -m venv venv
        source venv/Scripts/activate
 
-3. Install dependencies (the app's and PyInstaller) — tries the bundled offline
-   wheels first, falls back online:
-       pip install --no-index --find-links wheels -r requirements-build.txt \
-         || pip install -r requirements-build.txt
+3. Install dependencies (the app's and PyInstaller) at the exact versions in
+   constraints.txt — tries the bundled offline wheels first, falls back online:
+       pip install --no-index --find-links wheels -r requirements-build.txt -c constraints.txt \
+         || pip install -r requirements-build.txt -c constraints.txt
 
-   (The offline wheels target Python 3.12. On a different Python version the
-    offline step is skipped automatically and pip installs from the internet.)
+   (The offline wheels target Python 3.13, the version CI builds with. On a
+    different Python version the offline step fails and pip installs the same
+    pinned versions from the internet.)
 
 4. Run the test suite (the same one CI runs before a release):
-       pip install --no-index --find-links wheels -r requirements-dev.txt \
-         || pip install -r requirements-dev.txt
+       pip install --no-index --find-links wheels -r requirements-dev.txt -c constraints.txt \
+         || pip install -r requirements-dev.txt -c constraints.txt
        python -m pytest -q
 
 5. Build the executable:

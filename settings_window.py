@@ -17,7 +17,8 @@ import steam_env
 from artwork import clear_managed_artwork
 from sgdb import verify_api_key
 from steam_env import is_steam_running, get_all_steam_users
-from appfiles import load_api_key, save_api_key, get_cache_size, clear_cache, full_reset
+from appfiles import (load_api_key, save_api_key, get_cache_size, clear_cache, full_reset,
+                      load_prefs, save_prefs)
 
 
 def open_settings(app):
@@ -37,15 +38,17 @@ def open_settings(app):
 
     tk.Label(settings, text="Settings", font=(FONT_UI, 16, "bold"),
               bg=t["bg"], fg=t["fg"]).pack(pady=10)
-    # While a fetch runs, every control that writes to disk is built disabled
-    # (Q3, and Clear Cache by S1); the API key, update check, cache size and Steam
-    # status still work. Settings is modal, so a fetch can end while it is open but
-    # cannot start: the fetch end releases them through release_write_controls
-    # below (S2). Each command also refuses on its own (_refuse_if_busy).
-    busy = app._fetch_busy
+    # While a fetch runs — or a results-window apply is still in flight (N4) —
+    # every control that writes to disk is built disabled (Q3, and Clear Cache by
+    # S1); the API key, update check, cache size and Steam status still work.
+    # Settings is modal, so a fetch or an apply can end while it is open but
+    # cannot start: that end releases them through release_write_controls below
+    # (S2). Each command also refuses on its own (_refuse_if_busy).
+    busy = app._is_busy()
     busy_note = None
     if busy:
-        busy_note = tk.Label(settings, text="Fetch in progress — options that change "
+        what = "Fetch in progress" if app._fetch_busy else "Artwork is being applied"
+        busy_note = tk.Label(settings, text=f"{what} — options that change "
                                             "your files are unavailable until it finishes.",
                              font=(FONT_UI, 9), fg=t["warn"], bg=t["bg"],
                              wraplength=420)
@@ -206,7 +209,36 @@ def open_settings(app):
 
     lock(app._btn(cache_frame, "Clear Cache", do_clear_cache, font=(FONT_UI, 9))).pack(side="right")
 
-    # Storage — the Undo restore point plus the legacy ~/.steamart_backup pile
+    # Previews — the results screen's pictures come from SteamGridDB thumbnails;
+    # this brings back the old full-size previews (ruling Q14b). Read by the next
+    # fetch; saved with the art-style preferences.
+    previews_frame = tk.LabelFrame(body, text="Previews", padx=10, pady=8,
+                                   bg=t["bg"], fg=t["link"])
+    previews_frame.pack(fill="x", padx=15, pady=5)
+    full_var = tk.StringVar(value=load_prefs().get("full_previews", "no"))
+
+    def do_toggle_full_previews():
+        # Ruling Q15: turning it ON asks first; No leaves it off.
+        if full_var.get() == "yes" and not messagebox.askyesno(
+                "Full-Size Previews",
+                "Full-size previews download every option as the full image, so "
+                "fetches take much longer and use much more data.\n\n"
+                "Turn on full-size previews?", parent=settings):
+            full_var.set("no")
+            return
+        prefs = load_prefs()
+        prefs["full_previews"] = full_var.get()
+        save_prefs(prefs)
+        app.log("Full-size previews " + ("on." if full_var.get() == "yes" else "off."),
+                icon="palette")
+
+    tk.Checkbutton(previews_frame, text="Full-size previews", variable=full_var,
+                   onvalue="yes", offvalue="no", command=do_toggle_full_previews,
+                   font=(FONT_UI, 10), bg=t["bg"], fg=t["fg"], selectcolor=t["entry_bg"],
+                   activebackground=t["bg"], activeforeground=t["fg"],
+                   highlightthickness=0).pack(side="left")
+
+    # Storage — the Undo restore point plus the legacy backup-folder pile
     # from past fetches (which had no caller until this button). The shortcuts.vdf
     # backups (legacy and per-account) are never deleted — clear_backup skips them.
     storage_frame = tk.LabelFrame(body, text="Storage", padx=10, pady=8,
@@ -424,6 +456,11 @@ def open_settings(app):
         om = tk.OptionMenu(account_frame, account_var, *id_to_label.values(),
                            command=on_account_change)
         om.config(bg=t["button_bg"], fg=t["button_fg"], highlightthickness=0)
+        # The list that drops down is a separate Menu widget; without its own
+        # colours it opened light in dark mode (N17). Same styling as the Sort menu.
+        om["menu"].config(bg=t["entry_bg"], fg=t["fg"],
+                          activebackground=t["accent"],
+                          activeforeground=t["accent_fg"])
         lock(om).pack(side="left", padx=8)
     else:
         # 0 or 1 accounts — show a disabled placeholder so the section is
@@ -457,11 +494,7 @@ def open_settings(app):
     # Auto-size to fit all content, fully within the screen work area (so it
     # can't open under a taskbar/panel) — same shared placement helper the
     # main and results windows use.
-    settings.update_idletasks()
-    body_h  = body.winfo_reqheight()
-    overhead = 110  # title label + close button + padding
-    body_w = body.winfo_reqwidth() + 40  # +40 for scrollbar and frame padding
-    app._fit_window_to_workarea(settings, max(480, body_w), max(360, body_h + overhead))
+    app._fit_dialog(settings, canvas, body, centre_on_screen=True)
     # Reveal now that it's correctly sized and positioned, then grab it modal.
     settings.deiconify()
     app._open_modal(settings)

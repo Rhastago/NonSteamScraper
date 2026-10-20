@@ -118,29 +118,41 @@ def _release_year(ts):
         return ""
 
 def search_sgdb_autocomplete(query):
-    """Return list of {id, name} dicts from the SGDB autocomplete endpoint."""
+    """The Search dialog's live lookup. Returns (outcome, hits): hits is a list of
+    {id, name, year, type}; outcome is SEARCH_FOUND, SEARCH_NOT_FOUND (a genuine
+    empty answer), SEARCH_REFUSED (no key saved, or SteamGridDB refused it) or
+    SEARCH_ERROR (no network, a timeout, a 5xx, a body that is not an answer) — N14:
+    every one of them used to read "No results found"."""
     key = appfiles.load_api_key()
-    if not key or not query.strip():
-        return []
+    if not key:
+        return SEARCH_REFUSED, []
+    if not query.strip():
+        return SEARCH_NOT_FOUND, []
     try:
         r = _sgdb_get(
             f"https://www.steamgriddb.com/api/v2/search/autocomplete/{_url_quote(query.strip())}",
             headers={"Authorization": f"Bearer {key}"},
             timeout=5,
-        ).json()
-        if r.get("success") and r.get("data"):
-            return [
-                {
-                    "id": g["id"],
-                    "name": g["name"],
-                    "year": _release_year(g.get("release_date")),
-                    "type": (g.get("types") or [""])[0],
-                }
-                for g in r["data"]
-            ]
+        )
+        if r.status_code in (401, 403):
+            return SEARCH_REFUSED, []
+        d = r.json()
+        if not isinstance(d, dict) or d.get("success") is not True \
+                or not isinstance(d.get("data"), list):
+            return SEARCH_ERROR, []
+        hits = [
+            {
+                "id": g["id"],
+                "name": g["name"],
+                "year": _release_year(g.get("release_date")),
+                "type": (g.get("types") or [""])[0],
+            }
+            for g in d["data"]
+        ]
+        return (SEARCH_FOUND if hits else SEARCH_NOT_FOUND), hits
     except Exception:
         _debug("search_sgdb_autocomplete")
-    return []
+        return SEARCH_ERROR, []
 
 _STYLE_MAP = {
     "grids":  {"grid_no_logo": "no_logo", "grid_blurred": "blurred",
@@ -206,11 +218,21 @@ def _strip_never(results, art_type, prefs):
     return [r for r in results if r.get("style") not in never] if never else results
 
 def get_artwork(sgdb_id, art_type, prefs=None, dimensions=None):
+    """The art SteamGridDB has for one slot, ranked and filtered by the art-style
+    preferences: a list of image records — or None when SteamGridDB did not answer
+    (a 429 that outlasted the retries, a timeout, a 5xx, a body that is not
+    {"success": true, "data": [...]}) and nothing was collected. [] means a real
+    "nothing exists" (N6: an error used to come back as [] too, and the fetch
+    logged "Artwork saved" over a silently empty slot).
+    Exclude is strict (N5): every request carries the Exclude parameters and every
+    record goes through _strip_never, so an excluded style, NSFW, humor or animated
+    record is never returned — even when that leaves the slot empty."""
     if prefs is None:
         prefs = appfiles.load_prefs()
     key = appfiles.load_api_key()
     headers = {"Authorization": f"Bearer {key}"}
     url = f"https://www.steamgriddb.com/api/v2/{art_type}/game/{sgdb_id}"
+    errors = []
 
     def fetch(params):
         p = dict(params)
@@ -219,10 +241,12 @@ def get_artwork(sgdb_id, art_type, prefs=None, dimensions=None):
             p["dimensions"] = dimensions
         try:
             d = _sgdb_get(url, headers=headers, params=p, timeout=5).json()
-            if d.get("success") and d.get("data"):
+            if isinstance(d, dict) and d.get("success") is True \
+                    and isinstance(d.get("data"), list):
                 return d["data"]
         except Exception:
             _debug("get_artwork fetch")
+        errors.append(p)
         return []
 
     animated_pref = prefs.get("animated", "never")
@@ -244,10 +268,17 @@ def get_artwork(sgdb_id, art_type, prefs=None, dimensions=None):
     collected, seen = [], set()
 
     def add(results):
-        for r in _strip_never(results, art_type, prefs):
+        # A malformed record (no url) is skipped, not fatal (N10: one used to
+        # raise here and abort the whole fetch run).
+        records = [r for r in results if isinstance(r, dict)
+                   and isinstance(r.get("url"), str) and r["url"]]
+        for r in _strip_never(records, art_type, prefs):
             if r["url"] not in seen:
                 seen.add(r["url"])
                 collected.append(r)
+
+    # Stop widening once a full set of options is in hand (the options pref).
+    limit = appfiles.option_count(prefs)
 
     must_have_count = (
         (1 if animated_pref == "must_have" else 0) +
@@ -264,29 +295,29 @@ def get_artwork(sgdb_id, art_type, prefs=None, dimensions=None):
         add(fetch(p1))
 
         # Tier 2: individual "always" fetches — only if Tier 1 didn't give enough results
-        if must_have_count > 1 and len(collected) < 5:
+        if must_have_count > 1 and len(collected) < limit:
             if animated_pref == "must_have":
                 p = dict(never_only_params()); p["types"] = "animated"
                 add(fetch(p))
-            if len(collected) < 5 and nsfw_pref == "must_have":
+            if len(collected) < limit and nsfw_pref == "must_have":
                 p = dict(never_only_params()); p["nsfw"] = "true"
                 add(fetch(p))
-            if len(collected) < 5 and humor_pref == "must_have":
+            if len(collected) < limit and humor_pref == "must_have":
                 p = dict(never_only_params()); p["humor"] = "true"
                 add(fetch(p))
-            if len(collected) < 5 and must_styles:
+            if len(collected) < limit and must_styles:
                 p = dict(never_only_params()); p["styles"] = ",".join(must_styles)
                 add(fetch(p))
 
     # Tier 3: popularity fill — only if we still need more results
-    if len(collected) < 5:
+    if len(collected) < limit:
         add(fetch(never_only_params()))
 
     if collected:
         return collected
-
-    # Absolute fallback: no filters at all
-    return fetch({})
+    # No unfiltered last resort (N5): it returned excluded art. Tier 3 above is
+    # already the widest search Exclude allows, so nothing is left to try.
+    return None if errors else []
 
 # Bounded concurrency for SGDB requests. SGDB publishes no rate limit and throttles
 # dynamically via HTTP 429 + Retry-After (handled by _sgdb_get's retry); a handful of
@@ -333,7 +364,15 @@ def steam_official_images(steam_appid, metadata):
 
     Size picks: cover 2x (600x900, Steam's grid size), hero 1x (1920 wide; the 2x is
     3840), logo 2x, header 1x (Steam serves no header_2x), icon = the 256px
-    clienticon .ico (the .jpg icon is 32x32), falling back to the .jpg."""
+    clienticon .ico (the .jpg icon is 32x32), falling back to the .jpg.
+    Unexpected metadata shapes yield {} (no Steam art), never an exception (N10)."""
+    try:
+        return _steam_official_images(steam_appid, metadata)
+    except Exception:
+        _debug("steam_official_images")
+        return {}
+
+def _steam_official_images(steam_appid, metadata):
     mtime = metadata.get("store_asset_mtime")
     suffix = f"?t={mtime}" if mtime else ""
 

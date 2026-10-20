@@ -72,3 +72,23 @@ def compute_window_fit(wa_x, wa_y, wa_w, wa_h, desired_w, desired_h, reserve=80)
     x = max(wa_x, min(x, wa_x + wa_w - final_w))
     y = max(wa_y, min(y, wa_y + wa_h - final_h))
     return final_w, final_h, x, y
+
+
+def place_over_parent(parent_x, parent_y, parent_w, parent_h, wa_x, wa_y, wa_w, wa_h,
+                      desired_w, desired_h, reserve=80):
+    """Return ``(w, h, x, y)`` for a dialog of *desired* size centred over its
+    parent window, then pulled fully inside the work area (N18: a fixed geometry
+    relative to a main window near a screen edge put part of the dialog off-screen).
+    The size shrinks only when the work area is smaller; ``reserve`` is the same
+    title-bar allowance compute_window_fit uses: the position given to Tk is the
+    window FRAME's, and the title bar sits above the content, so the content's
+    bottom edge needs reserve/2 of room (seen on a simulated 1280x800 screen: the
+    dialog's bottom 28 px past the screen)."""
+    avail_h = max(wa_h - reserve, 200)
+    w = max(1, min(desired_w, wa_w))
+    h = max(1, min(desired_h, avail_h, wa_h))
+    x = parent_x + parent_w // 2 - w // 2
+    y = parent_y + parent_h // 2 - h // 2
+    x = max(wa_x, min(x, wa_x + wa_w - w))
+    y = max(wa_y, min(y, wa_y + wa_h - h - reserve // 2))
+    return w, h, x, y

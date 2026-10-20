@@ -94,6 +94,10 @@ class StandInWidget:
     def __setitem__(self, key, value):
         self.opts[key] = value
 
+    def __getitem__(self, key):
+        # w["menu"] (an OptionMenu's drop-down) — a stand-in of its own.
+        return self.opts.setdefault(("item", key), StandInWidget())
+
     def after(self, ms, fn=None, *args):
         # like FakeWindow: the Tk thread is the test thread; after(0) runs at once,
         # a delayed call is recorded in .delayed (pump() runs them).
@@ -290,6 +294,7 @@ def make_app(ui, games=()):
             self._fetch_followup = None
             self._fetch_run = None
             self._closing = False
+            self._apply_targets = []
             self._settings_on_fetch_end = None
             self._results_view = None
             self._thumb_executor = types.SimpleNamespace(shutdown=lambda wait=True: None)
@@ -344,6 +349,7 @@ def make_settings_app(ui, monkeypatch, busy=False, users=("111",)):
     app.ICON_BTN = app.ICON_INLINE = app.ICON_ACTION = app.ICON_NAV = 24
     app._icon = lambda name, size=18: None
     app._fit_window_to_workarea = lambda win, desired_w, desired_h: (desired_w, desired_h)
+    app._place_over_main = lambda win, desired_w, desired_h: (desired_w, desired_h)
     app._fetch_busy = busy
     return app
 
@@ -632,9 +638,10 @@ def test_write_commands_refuse_while_busy(ui, fetch_env, monkeypatch):
     status line while a fetch runs — and do their job when it does not."""
     done = []
     monkeypatch.setattr(restore, "clear_game_art", lambda uid: done.append(("clear", uid)))
-    monkeypatch.setattr(ui.library_mixin, "add_to_skip_list", lambda uid: done.append(("skip", uid)))
+    monkeypatch.setattr(appfiles, "add_to_skip_list", lambda uid: done.append(("skip", uid)))
     monkeypatch.setattr(restore, "undo_restore_point", lambda: done.append("undo") or
-                        {"games": 0, "files": 0, "removed": 0, "queued": False})
+                        {"games": 0, "files": 0, "removed": 0, "queued": False,
+                         "failed": 0, "icon_write_failed": False})
     monkeypatch.setattr(ui.ui_mixin, "save_theme", lambda n: done.append(("theme", n)))
     monkeypatch.setattr(ui.ui_mixin, "save_accent", lambda n: done.append(("accent", n)))
     monkeypatch.setattr(ui.ui_mixin, "ACCENTS", {"blue": {}, "green": {}})
@@ -882,7 +889,7 @@ def results_env(ui, fetch_env, monkeypatch):
     threads = _InlineThreads()
     monkeypatch.setattr(rw, "threading", threads)
     monkeypatch.setattr(ui.imaging, "_DECODE_POOL", _ManualPool())   # decodes never run
-    monkeypatch.setattr(rw, "_display_image_on_label", lambda *a, **k: None)
+    monkeypatch.setattr(ui.imaging, "_display_image_on_label", lambda *a, **k: None)
     rec = types.SimpleNamespace(installed=[], written=[], queued=[], threads=threads,
                                 install_ok=True, steam_running=False)
 
@@ -908,11 +915,11 @@ def _slot_data(base, urls, animated, applied_index):
     ext = "png"
     return {"applied_path": f"/grid/{base}.{ext}", "applied_index": applied_index,
             "failed": False, "label": "Icon",
-            "option_urls": list(urls),
+            "option_urls": list(urls), "preview_urls": list(urls),
             "option_meta": [{"animated": a, "nsfw": False, "humor": False, "steam": False}
                             for a in animated],
             "thumb_paths": [f"/cache/{base}_{i}.png" for i in range(min(3, len(urls)))],
-            "filename_base": base}
+            "filename_base": base, "cache_base": f"/cache/{base}"}
 
 
 def build_results_section(env, app_id, slots):
@@ -1000,9 +1007,10 @@ def search_env(ui, fetch_env, monkeypatch):
     threads = _InlineThreads()
     monkeypatch.setattr(dl, "threading", threads)
     rec = types.SimpleNamespace(calls=[], threads=threads, fetches=[])
-    monkeypatch.setattr(dl, "search_sgdb_autocomplete", lambda q: [
+    rec.answer = (sgdb.SEARCH_FOUND, [
         {"id": 2016, "name": "DOOM", "year": "2016", "type": "game"},
         {"id": 1993, "name": "DOOM", "year": "1993", "type": "game"}])
+    monkeypatch.setattr(dl, "search_sgdb_autocomplete", lambda q: rec.answer)
     monkeypatch.setattr(appfiles, "save_id_override",
                         lambda uid, sid: rec.calls.append(("id", uid, sid)))
     monkeypatch.setattr(appfiles, "save_name_override",
@@ -1084,7 +1092,9 @@ def preview_env(ui, tmp_path, monkeypatch):
         (cache / f"7p_{i}.png").write_bytes(b"cached %d" % i)
     state = {"index": 0,
              "paths": {i: str(cache / f"7p_{i}.png") for i in range(3)},
+             "cache_base": str(cache / "7p"),
              "option_urls": [f"https://x/opt{i}.png" for i in range(5)],
+             "preview_urls": [f"https://x/opt{i}.png" for i in range(5)],
              "option_meta": [{} for _ in range(5)]}
     return types.SimpleNamespace(state=state, pool=pool, shown=shown,
                                  bodies=bodies, cache=cache, img=StandInWidget(),
@@ -1402,3 +1412,763 @@ def test_search_dialog_buttons_cannot_be_pushed_out_by_a_long_list(ui, search_en
         "the button bar must be packed before the list, or the list can push it out")
     assert select.packed.get("side") == "left" and cancel.packed.get("side") == "left"
     assert order.index(select) < order.index(cancel), "Select first, then Cancel"
+
+
+# ---------------------------------------------------------------------------
+# N2 — the pending-icon poll says when its write failed, once
+# ---------------------------------------------------------------------------
+
+def test_the_icon_poll_reports_a_failed_write_once_and_recovers(ui, fetch_env, monkeypatch):
+    app = make_app(ui)
+    result = [None]
+    monkeypatch.setattr(steam_files, "has_pending_icons", lambda: True)
+    monkeypatch.setattr(steam_files, "apply_pending_icons", lambda: result[0])
+    app._flush_pending_icons()
+    app._flush_pending_icons()   # the 4 s poll retrying
+    failures = [m for m in app.logged if "Couldn't write the queued icons" in m]
+    assert len(failures) == 1, app.logged
+    assert not any(m.startswith("Applied") for m in app.logged)
+    result[0] = 1
+    app._flush_pending_icons()
+    assert app.logged[-1].startswith("Applied 1 queued icon(s)")
+
+
+# ---------------------------------------------------------------------------
+# N9 — Undo says which games it could not put back
+# ---------------------------------------------------------------------------
+
+def test_undo_reports_games_it_could_not_put_back(ui, fetch_env, monkeypatch):
+    app = make_app(ui)
+    monkeypatch.setattr(restore, "undo_restore_point", lambda: {
+        "games": 0, "files": 0, "removed": 0, "queued": False, "failed": 2,
+        "icon_write_failed": False})
+    app.undo_fetch()
+    assert not any("Nothing to undo" in m for m in app.logged)
+    assert any("could not put back the art of 2 game(s)" in m for m in app.logged)
+
+
+# ---------------------------------------------------------------------------
+# N4 — an "Apply this one" in flight counts as busy
+# ---------------------------------------------------------------------------
+
+def _start_apply(env, grid):
+    """Press Apply on option 2 of a cover slot whose art lives in `grid`; the
+    worker is recorded, not run. Returns the button and the target path."""
+    data = _slot_data("7p", ["https://x/a.png", "https://x/b.jpg"], [False, False],
+                      applied_index=0)
+    data["applied_path"] = str(grid / "7p.png")
+    widgets = build_results_section(env, 7, {"grids": data})
+    [w for w in widgets if w.opts.get("text") == "▶"][0].opts["command"]()
+    btn = _apply_button(widgets)
+    btn.opts["command"]()
+    return btn, str(grid / "7p.jpg")
+
+
+def test_write_commands_refuse_while_an_apply_is_in_flight(ui, results_env, tmp_path, monkeypatch):
+    """Apply, Back, Undo: the late Apply used to land on top of the Undo."""
+    app = results_env.app
+    undone = []
+    monkeypatch.setattr(restore, "undo_restore_point", lambda: undone.append(1) or {
+        "games": 1, "files": 1, "removed": 0, "queued": False, "failed": 0,
+        "icon_write_failed": False})
+    monkeypatch.setattr(ui.ui_mixin, "save_theme", lambda n: undone.append("theme"))
+    monkeypatch.setattr(app, "relaunch_app", lambda: undone.append("relaunch"))
+    _start_apply(results_env, tmp_path)
+
+    app.undo_fetch()
+    app.toggle_theme()
+    app.start_fetch()
+    assert undone == [] and app._fetch_busy is False
+    assert app.status[-1] == app.APPLY_BUSY_MESSAGE
+
+    results_env.threads.run_all()          # the apply ends
+    assert app._apply_targets == []
+    app.undo_fetch()
+    assert undone == [1]
+
+
+def test_closing_during_an_apply_waits_for_it(ui, results_env, tmp_path):
+    """All Done / the X button / a relaunch used to kill the download mid-way."""
+    app = results_env.app
+    _start_apply(results_env, tmp_path)
+    app._on_close()
+    assert not app.window.destroyed
+    assert app.status[-1].startswith("Finishing the artwork apply")
+    assert [ms for ms, _fn in app.window.delayed] == [app.CLOSE_FALLBACK_MS]
+    results_env.threads.run_all()
+    assert app.window.destroyed, "the window closes once the apply has finished"
+
+
+def test_the_close_fallback_removes_the_applys_unfinished_download(ui, results_env, tmp_path):
+    app = results_env.app
+    _btn, target = _start_apply(results_env, tmp_path)
+    (tmp_path / "7p.jpg.part").write_bytes(b"half")
+    (tmp_path / "7p.png").write_bytes(b"art")
+    app._on_close()
+    app._finish_close()                     # CLOSE_FALLBACK_MS ran out
+    assert sorted(os.listdir(tmp_path)) == ["7p.png"]
+
+
+def test_all_done_closes_through_the_same_wait(ui, results_env, tmp_path):
+    app = results_env.app
+    StandInWidget.created = []
+    results_env.view.show([])
+    done = widget_by_text(list(StandInWidget.created), "All Done!")
+    _start_apply(results_env, tmp_path)
+    done.opts["command"]()
+    assert not app.window.destroyed
+    results_env.threads.run_all()
+    assert app.window.destroyed
+
+
+def test_settings_opened_during_an_apply_comes_back_when_it_ends(ui, results_env, tmp_path):
+    app = results_env.app
+    _start_apply(results_env, tmp_path)
+    widgets = open_settings_headless(ui, app)
+    notes = [w for w in widgets
+             if str(w.opts.get("text", "")).startswith("Artwork is being applied —")]
+    assert len(notes) == 1
+    # One Steam account here, so the account menu is the always-disabled placeholder.
+    buttons = [w for w in _write_controls(widgets) if type(w).__name__ == "Button"]
+    assert all(w.opts.get("state") == "disabled" for w in buttons)
+    results_env.threads.run_all()
+    assert all(w.opts.get("state") == "normal" for w in buttons)
+
+
+# ---------------------------------------------------------------------------
+# N8 — a failed preview shows no picture, never the previous option's
+# ---------------------------------------------------------------------------
+
+def test_a_failed_on_demand_preview_clears_the_previous_picture(ui, preview_env):
+    """The label still showed option 1's image while the counter said 4/5 —
+    Tk shows a label's image, not its text — and Apply then installed option 4."""
+    env = preview_env
+    env.img.opts["image"] = "option-1-photo"
+    env.bodies["https://x/opt3.png"] = _Resp(404, b"<html>not found</html>")
+    _view(ui, env, 3)
+    env.pool.finish_all()
+    env.img.pump()
+    assert env.img.opts["image"] == "" and env.img.opts["text"] == "preview\nunavailable"
+    assert env.counter.opts["text"] == "4 / 5"
+
+
+def test_an_unreadable_preview_clears_the_previous_picture(ui, monkeypatch, tmp_path):
+    im = ui.imaging
+    pool = _ManualPool()
+    monkeypatch.setattr(im, "_DECODE_POOL", pool)
+    lbl = StandInWidget(image="option-1-photo")
+    (tmp_path / "broken.png").write_bytes(b"not an image")
+    im._display_image_on_label(lbl, str(tmp_path / "broken.png"))
+    pool.finish_all()
+    lbl.pump()
+    assert lbl.opts["image"] == "" and lbl.opts["text"] == "preview\nunavailable"
+
+
+def test_a_preview_that_failed_during_the_fetch_is_fetched_when_shown(ui, results_env):
+    """Only previews that downloaded are recorded; option 1's failed one is
+    downloaded again when the results card shows it, not shown stale."""
+    data = _slot_data("7p", ["https://x/a.png", "https://x/b.png"], [False, False], 0)
+    data["thumb_paths"] = [None, "/cache/7p_1.png"]
+    pool = _ManualPool()
+    ui.imaging._FETCH_POOL, saved = pool, ui.imaging._FETCH_POOL
+    try:
+        build_results_section(results_env, 7, {"grids": data})
+    finally:
+        ui.imaging._FETCH_POOL = saved
+    assert len(pool.jobs) == 1
+    _future, fn, args = pool.jobs[0]
+    assert args[:2] == ("https://x/a.png", "/cache/7p_0.png")
+
+
+# ---------------------------------------------------------------------------
+# N11 — a tooltip can never be orphaned on screen
+# ---------------------------------------------------------------------------
+
+class _BindingWidget(StandInWidget):
+    """A widget that keeps its bindings so a test can fire them. `inside` says
+    whether the real pointer is over it (winfo_containing)."""
+    inside = True
+
+    def winfo_pointerxy(self):
+        return (10, 10)
+
+    def winfo_containing(self, x, y):
+        return self if self.inside else None
+
+    def bind(self, seq, fn, add=None):
+        self.opts.setdefault("_bind", {}).setdefault(seq, [])
+        if add != "+":
+            self.opts["_bind"][seq] = []
+        self.opts["_bind"][seq].append(fn)
+
+    def fire(self, seq):
+        for fn in self.opts.get("_bind", {}).get(seq, []):
+            fn(types.SimpleNamespace(x_root=10, y_root=10))
+
+
+def _tips():
+    return [w for w in StandInWidget.created if type(w).__name__ == "Toplevel"]
+
+
+def test_a_second_enter_without_a_leave_leaves_one_tooltip(ui):
+    """The operator's report: the sort ▲/▼ tooltip stuck until restart. Closing
+    the Sort menu sends the button a second <Enter> with no <Leave> between."""
+    app = make_app(ui)
+    StandInWidget.created = []
+    btn = _BindingWidget()
+    app._add_tooltip(btn, "Ascending")
+    btn.fire("<Enter>")
+    btn.fire("<Enter>")
+    assert [t.destroyed for t in _tips()] == [True, False], "the first tip was orphaned"
+    btn.fire("<Leave>")
+    assert all(t.destroyed for t in _tips())
+
+
+@pytest.mark.parametrize("seq", ["<ButtonPress>", "<Unmap>", "<Destroy>"])
+def test_a_click_an_unmap_or_a_destroy_hides_the_tooltip(ui, seq):
+    app = make_app(ui)
+    StandInWidget.created = []
+    btn = _BindingWidget()
+    app._add_tooltip(btn, "Reload")
+    btn.fire("<Enter>")
+    btn.fire(seq)
+    assert all(t.destroyed for t in _tips())
+
+
+def test_the_tooltip_text_is_read_again_after_a_click(ui):
+    app = make_app(ui)
+    StandInWidget.created = []
+    state = {"desc": False}
+    btn = _BindingWidget()
+    app._add_tooltip(btn, lambda: "Descending" if state["desc"] else "Ascending")
+    btn.fire("<Enter>")
+    btn.fire("<ButtonPress>")
+    state["desc"] = True
+    btn.fire("<Enter>")
+    labels = [w.opts.get("text") for w in StandInWidget.created if type(w).__name__ == "Label"]
+    assert labels == ["Ascending", "Descending"]
+
+
+# ---------------------------------------------------------------------------
+# N12 — a damaged shortcuts.vdf: an empty list and a message, not a crash
+# ---------------------------------------------------------------------------
+
+def test_an_unreadable_shortcuts_file_shows_a_message_instead_of_crashing(
+        ui, fetch_env, tmp_path, monkeypatch):
+    sc = tmp_path / "shortcuts.vdf"
+    sc.write_bytes(b"\x00shortcuts\x00\x00\x01broken")       # half-written
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", str(sc))
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(tmp_path))
+    monkeypatch.setattr(ui.library_mixin, "get_non_steam_games", steam_files.get_non_steam_games)
+    app = make_app(ui, [_game(1)])
+
+    assert app.load_games() is False
+    assert app.games == []
+    assert app.status[-1] == app.UNREADABLE_MESSAGE
+    assert app.fetch_button.opts["state"] == "disabled"
+
+    app.refresh_library()                     # Reload keeps the message up
+    assert app.status[-1] == app.UNREADABLE_MESSAGE
+
+
+# ---------------------------------------------------------------------------
+# T11 — dialog hygiene (N13, N14, N16, N17, N18)
+# ---------------------------------------------------------------------------
+
+class _Named(StandInWidget):
+    """A stand-in Toplevel with a Tk path name, recording transient()."""
+    def __init__(self, path):
+        super().__init__()
+        self.path = path
+
+    def __str__(self):
+        return self.path
+
+    def transient(self, parent):
+        self.opts["transient"] = parent
+
+
+def test_closing_a_window_takes_its_popups_off_the_modal_stack(ui):
+    """N13: the results window closed during an animated conversion destroyed the
+    progress popup with it, but the popup stayed on the stack; every later dialog
+    then chained itself to a dead window."""
+    app = make_app(ui)
+    app._modal_stack = []
+    results, popup = _Named(".!toplevel2"), _Named(".!toplevel2.!toplevel")
+    app._open_modal(results)
+    app._open_modal(popup)
+    app._close_modal(results)
+    results.destroy(); popup.destroy()
+    assert app._modal_stack == []
+
+
+def test_a_dead_window_is_never_a_new_dialogs_parent(ui):
+    app = make_app(ui)
+    dead = _Named(".!toplevel3")
+    app._modal_stack = [dead]
+    dead.destroy()
+    new = _Named(".!toplevel4")
+    app._open_modal(new)
+    assert new.opts["transient"] is app.window
+    assert app._modal_stack == [new]
+
+
+def _search_with_traces(ui, monkeypatch, rec, game):
+    """Open the Search dialog with a StringVar whose trace callbacks are kept, so
+    a test can type into it. Returns (widgets, listbox, type_fn)."""
+    sv_cls = ui.dialogs.tk.StringVar
+    monkeypatch.setattr(sv_cls, "trace_add", lambda self, mode, cb, _c=None:
+                        self.opts.setdefault("_traces", []).append(cb), raising=False)
+    StandInWidget.created = []
+    ui.dialogs.open_sgdb_search(rec.app, game)
+    widgets = list(StandInWidget.created)
+    var = [w for w in widgets if type(w).__name__ == "StringVar"][0]
+    dlg = [w for w in widgets if type(w).__name__ == "Toplevel"][0]
+    listbox = [w for w in widgets if type(w).__name__ == "Listbox"][0]
+
+    def type_(text):
+        var.set(text)
+        for cb in var.opts.get("_traces", []):
+            cb()
+        dlg.pump()                     # the 300 ms typing timer fires
+    return widgets, dlg, listbox, type_
+
+
+def test_an_older_search_answer_never_overwrites_a_newer_one(ui, search_env, monkeypatch):
+    rec = search_env
+    answers = {"doom": (sgdb.SEARCH_FOUND, [{"id": 1, "name": "OLD", "year": "", "type": ""}]),
+               "doom 2016": (sgdb.SEARCH_FOUND, [{"id": 2, "name": "NEW", "year": "", "type": ""}])}
+    monkeypatch.setattr(ui.dialogs, "search_sgdb_autocomplete", lambda q: answers[q])
+    widgets, dlg, listbox, type_ = _search_with_traces(ui, monkeypatch, rec, _game(1, "doom"))
+    inserted = []
+    listbox.insert = lambda where, text: inserted.append(text)
+    type_("doom 2016")
+    first, second = rec.threads.started
+    rec.threads.started = []
+    second.target(*second.args)        # the newer query answers first
+    first.target(*first.args)          # then the older, slower one
+    assert inserted == ["NEW"]
+
+
+def test_a_search_that_answers_after_the_dialog_closed_touches_nothing(ui, search_env, monkeypatch):
+    rec = search_env
+    widgets, dlg, listbox, type_ = _search_with_traces(ui, monkeypatch, rec, _game(1, "doom"))
+    inserted = []
+    listbox.insert = lambda where, text: inserted.append(text)
+    widget_by_text(widgets, "Cancel").opts["command"]()
+    rec.threads.run_all()
+    assert inserted == []
+
+
+@pytest.mark.parametrize("outcome,text", [
+    (sgdb.SEARCH_REFUSED, "SteamGridDB did not accept your API key — check it in Settings."),
+    (sgdb.SEARCH_ERROR, "Couldn't reach SteamGridDB — check your connection and try again."),
+    (sgdb.SEARCH_NOT_FOUND, "No results found"),
+])
+def test_the_search_dialog_tells_no_results_from_a_refused_key_or_no_network(
+        ui, search_env, outcome, text):
+    """N14: a refused key and no network both read "No results found"."""
+    search_env.answer = (outcome, [])
+    widgets, _listbox = _open_search(ui, search_env, _game(1, "doom"))
+    assert any(w.opts.get("text") == text for w in widgets)
+
+
+def test_search_sgdb_autocomplete_outcomes(monkeypatch):
+    monkeypatch.setattr(appfiles, "load_api_key", lambda: "KEY")
+    body = {"r": None}
+
+    def fake(url, headers=None, params=None, timeout=None, retries=2):
+        return body["r"]
+    monkeypatch.setattr(sgdb, "_sgdb_get", fake)
+    ok = types.SimpleNamespace(status_code=200, json=lambda: {"success": True, "data": [
+        {"id": 7, "name": "Celeste", "types": ["steam"]}]})
+    body["r"] = ok
+    assert sgdb.search_sgdb_autocomplete("cel") == (sgdb.SEARCH_FOUND, [
+        {"id": 7, "name": "Celeste", "year": "", "type": "steam"}])
+    body["r"] = types.SimpleNamespace(status_code=200, json=lambda: {"success": True, "data": []})
+    assert sgdb.search_sgdb_autocomplete("zzz") == (sgdb.SEARCH_NOT_FOUND, [])
+    body["r"] = types.SimpleNamespace(status_code=401, json=lambda: {"success": False})
+    assert sgdb.search_sgdb_autocomplete("cel") == (sgdb.SEARCH_REFUSED, [])
+    body["r"] = types.SimpleNamespace(status_code=502, json=lambda: (_ for _ in ()).throw(ValueError()))
+    assert sgdb.search_sgdb_autocomplete("cel") == (sgdb.SEARCH_ERROR, [])
+    monkeypatch.setattr(appfiles, "load_api_key", lambda: "")
+    assert sgdb.search_sgdb_autocomplete("cel") == (sgdb.SEARCH_REFUSED, [])
+
+
+def test_a_list_redraw_binds_the_wheel_only_on_its_new_rows(ui):
+    """N16: every redraw (each search keystroke) bound the session-long canvas and
+    list frame again; tkinter keeps every bound callback's Tcl command until the
+    widget is destroyed, so they piled up."""
+    app = make_app(ui)
+    rows = [StandInWidget(), StandInWidget()]
+    app.list_frame = StandInWidget()
+    app.list_frame.winfo_children = lambda: rows
+    app.list_canvas = StandInWidget()
+    app.window.winfo_screenheight = lambda: 800
+    bound = []
+    app._bind_wheel_to_canvas = lambda widget, canvas: bound.append(widget)
+    app._size_list_canvas()
+    assert bound == rows
+
+
+def test_the_account_dropdown_list_follows_the_theme(ui, monkeypatch):
+    """N17: the list that drops down opened light in dark mode."""
+    app = make_settings_app(ui, monkeypatch, users=("111", "222"))
+    widgets = open_settings_headless(ui, app)
+    om = [w for w in widgets if type(w).__name__ == "OptionMenu"][0]
+    menu = om["menu"]
+    assert (menu.opts.get("bg"), menu.opts.get("fg")) == (app.theme["entry_bg"], app.theme["fg"])
+
+
+def test_quick_start_and_art_preferences_are_placed_on_screen(ui, monkeypatch):
+    """N18 + rulings Q16/Q16b: both are sized from their measured content (a typed
+    500 px clipped the Options row), placed over the main window and kept on
+    screen; their size is then fixed (no maximize button under KDE)."""
+    app = make_settings_app(ui, monkeypatch)
+    placed = []
+    app._place_over_main = lambda win, w, h: placed.append((w, h)) or (w, h)
+    monkeypatch.setattr(ui.dialogs, "load_prefs", lambda: dict(appfiles.DEFAULT_PREFS))
+    for open_window in (ui.dialogs.show_info, ui.dialogs.open_art_prefs):
+        StandInWidget.created = []
+        resized = []
+        tops = []
+        real_toplevel = ui.dialogs.tk.Toplevel
+
+        class Top(real_toplevel):
+            def resizable(self, w, h):
+                resized.append((w, h))
+
+            def winfo_reqwidth(self):
+                return 612
+        monkeypatch.setattr(ui.dialogs.tk, "Toplevel", Top)
+        open_window(app)
+        canvases = [w for w in StandInWidget.created if type(w).__name__ == "Canvas"]
+        assert canvases and canvases[0].opts.get("width") == 100, "the canvas asks for its body's width"
+        assert resized[-1] == (False, False), "fixed size: no maximize button (Q16b)"
+        monkeypatch.setattr(ui.dialogs.tk, "Toplevel", real_toplevel)
+    assert [w for w, _h in placed] == [612, 612], "the measured width, not a typed one"
+
+
+# ---------------------------------------------------------------------------
+# N22 — the modal grab keeps trying while the dialog is not viewable yet
+# ---------------------------------------------------------------------------
+
+class _LateWindow(_BindingWidget):
+    """A dialog the compositor maps late: grab_set fails `fails` times."""
+    def __init__(self, ui, fails):
+        super().__init__()
+        self.fails = fails
+        self._err = ui.geometry_mixin.tk.TclError
+        self.grabs = 0
+
+    def grab_set(self):
+        if self.fails:
+            self.fails -= 1
+            raise self._err('grab failed: window "." not viewable')
+        self.grabs += 1
+
+    def title(self):
+        return "Settings"
+
+
+def test_a_late_mapping_dialog_still_becomes_modal(ui):
+    app = make_app(ui)
+    app._modal_stack = []
+    win = _LateWindow(ui, fails=3)
+    app._open_modal(win)
+    win.pump()
+    assert win.grabs == 1, "the grab gave up after one retry"
+
+
+def test_a_dialog_becomes_modal_when_it_maps(ui):
+    app = make_app(ui)
+    app._modal_stack = []
+    win = _LateWindow(ui, fails=1)
+    app._open_modal(win)
+    win.fire("<Map>")
+    assert win.grabs == 1
+
+
+def test_a_dialog_that_never_becomes_modal_says_so(ui, capsys):
+    app = make_app(ui)
+    app._modal_stack = []
+    win = _LateWindow(ui, fails=1000)
+    app._open_modal(win)
+    win.pump()
+    assert "Could not make the 'Settings' window modal" in capsys.readouterr().out
+    assert app._modal_stack == [win]
+
+
+def test_an_option_still_downloading_shows_no_previous_picture(ui, preview_env):
+    """N8, the in-flight half: while option 4 downloads, option 1's picture stayed
+    up under "4 / 5 (loading...)", and Apply installed option 4 unseen."""
+    env = preview_env
+    env.img.opts["image"] = "option-1-photo"
+    env.bodies["https://x/opt3.png"] = _Resp(200, b"option 4")
+    _view(ui, env, 3)
+    assert env.img.opts["image"] == "" and env.img.opts["text"] == "loading..."
+
+
+def test_a_finished_apply_draws_its_outcome_before_the_app_may_close(ui, results_env, tmp_path):
+    app = results_env.app
+    btn, _target = _start_apply(results_env, tmp_path)
+    seen = []
+    real = app._apply_finished
+    app._apply_finished = lambda path: seen.append(btn.opts["text"]) or real(path)
+    results_env.threads.run_all()
+    assert seen == ["Applied!"]
+
+
+# ---------------------------------------------------------------------------
+# Options per artwork in Art Style Preferences (Q10, Q12)
+# ---------------------------------------------------------------------------
+
+def _art_prefs(ui, monkeypatch, saved):
+    app = make_settings_app(ui, monkeypatch)
+    app._place_over_main = lambda win, w, h: (w, h)
+    monkeypatch.setattr(ui.dialogs, "load_prefs", lambda: dict(appfiles.DEFAULT_PREFS))
+    monkeypatch.setattr(ui.dialogs, "save_prefs", saved.append)
+    StandInWidget.created = []
+    ui.dialogs.open_art_prefs(app)
+    return list(StandInWidget.created)
+
+
+def test_the_options_row_offers_1_3_5_7_10_and_saves_the_choice(ui, monkeypatch):
+    saved = []
+    widgets = _art_prefs(ui, monkeypatch, saved)
+    buttons = {w.opts["text"]: w for w in widgets if type(w).__name__ == "Button"
+               and w.opts.get("text") in ("1", "3", "5", "7", "10")}
+    assert sorted(buttons, key=int) == ["1", "3", "5", "7", "10"]
+    assert buttons["5"].opts["relief"] == "sunken", "5 is the default"
+    buttons["3"].opts["command"]()
+    widget_by_text(widgets, "Save & Close").opts["command"]()
+    assert saved[-1]["options"] == "3"
+    assert ui.mb.calls == [], "3 asks nothing"
+
+
+def test_seven_or_ten_options_apply_without_a_question(ui, monkeypatch):
+    """Ruling Q12-C: with thumbnail previews 7 and 10 cost little, so no box asks."""
+    saved = []
+    widgets = _art_prefs(ui, monkeypatch, saved)
+    buttons = {w.opts["text"]: w for w in widgets if type(w).__name__ == "Button"
+               and w.opts.get("text") in ("7", "10")}
+    buttons["10"].opts["command"]()
+    assert ui.mb.calls == []
+    widget_by_text(widgets, "Save & Close").opts["command"]()
+    assert saved[-1]["options"] == "10"
+
+
+def test_art_preferences_reset_leaves_the_full_size_previews_setting(ui, monkeypatch):
+    saved = []
+    monkeypatch.setattr(appfiles, "DEFAULT_PREFS", dict(appfiles.DEFAULT_PREFS))
+    app = make_settings_app(ui, monkeypatch)
+    app._place_over_main = lambda win, w, h: (w, h)
+    monkeypatch.setattr(ui.dialogs, "load_prefs",
+                        lambda: dict(appfiles.DEFAULT_PREFS, full_previews="yes", options="3"))
+    monkeypatch.setattr(ui.dialogs, "save_prefs", saved.append)
+    StandInWidget.created = []
+    ui.dialogs.open_art_prefs(app)
+    widgets = list(StandInWidget.created)
+    reset = [w for w in widgets if w.opts.get("text") == "Reset to defaults"][0]
+    reset.opts["command"]()
+    widget_by_text(widgets, "Save & Close").opts["command"]()
+    assert saved[-1]["options"] == "5" and saved[-1]["full_previews"] == "yes"
+
+
+def test_settings_full_size_previews_checkbox_saves_the_choice(ui, monkeypatch):
+    stored = {"prefs": dict(appfiles.DEFAULT_PREFS)}
+    monkeypatch.setattr(ui.settings_window, "load_prefs", lambda: dict(stored["prefs"]))
+    monkeypatch.setattr(ui.settings_window, "save_prefs",
+                        lambda p: stored.update(prefs=dict(p)))
+    app = make_settings_app(ui, monkeypatch)
+    widgets = open_settings_headless(ui, app)
+    box = widget_by_text(widgets, "Full-size previews")
+    assert type(box).__name__ == "Checkbutton"
+    box.opts["variable"].set("yes")
+    box.opts["command"]()
+    assert stored["prefs"]["full_previews"] == "yes"
+    assert stored["prefs"]["options"] == "5", "the other prefs are kept"
+
+
+def test_an_on_demand_preview_downloads_the_preview_url_not_the_full_image(ui, preview_env):
+    env = preview_env
+    env.state["preview_urls"][3] = "https://x/thumb/opt3.jpg"
+    env.bodies["https://x/thumb/opt3.jpg"] = _Resp(200, b"small")
+    _view(ui, env, 3)
+    env.pool.finish_all()
+    env.img.pump()
+    assert env.state["paths"][3] == str(env.cache / "7p_3.jpg")
+    assert (env.cache / "7p_3.jpg").read_bytes() == b"small"
+
+
+
+def test_a_crossing_event_with_the_pointer_elsewhere_shows_no_tooltip(ui):
+    """The 1.5.3 walk: closing the results window released its grab, Tk sent the
+    ▲/▼ button an <Enter> though the pointer was on the game list, and the tip
+    stayed up — no <Leave> ever followed."""
+    app = make_app(ui)
+    StandInWidget.created = []
+    btn = _BindingWidget()
+    btn.inside = False
+    app._add_tooltip(btn, "Ascending")
+    btn.fire("<Enter>")
+    assert _tips() == []
+
+
+def test_a_tooltip_goes_when_the_pointer_leaves_without_a_leave_event(ui):
+    app = make_app(ui)
+    StandInWidget.created = []
+    btn = _BindingWidget()
+    app._add_tooltip(btn, "Ascending")
+    btn.fire("<Enter>")
+    btn.pump(rounds=2)
+    assert [t.destroyed for t in _tips()] == [False], "kept while the pointer is on it"
+    btn.inside = False
+    btn.pump()
+    assert all(t.destroyed for t in _tips())
+
+
+# ---------------------------------------------------------------------------
+# Round 5 — the Full-size previews warning (Q15) and window sizing (Q16, Q17)
+# ---------------------------------------------------------------------------
+
+_FULL_WARNING = ("Full-size previews download every option as the full image, so fetches "
+                 "take much longer and use much more data.\n\nTurn on full-size previews?")
+
+
+@pytest.mark.parametrize("answer,stored", [(True, "yes"), (False, "no")])
+def test_ticking_full_size_previews_asks_first(ui, monkeypatch, answer, stored):
+    prefs = {"p": dict(appfiles.DEFAULT_PREFS)}
+    monkeypatch.setattr(ui.settings_window, "load_prefs", lambda: dict(prefs["p"]))
+    monkeypatch.setattr(ui.settings_window, "save_prefs", lambda p: prefs.update(p=dict(p)))
+    app = make_settings_app(ui, monkeypatch)
+    widgets = open_settings_headless(ui, app)
+    box = widget_by_text(widgets, "Full-size previews")
+    ui.mb.answer = answer
+    box.opts["variable"].set("yes")
+    box.opts["command"]()
+    assert ui.mb.calls[-1][0] == "askyesno"
+    assert ui.mb.calls[-1][1] == ("Full-Size Previews", _FULL_WARNING)
+    assert prefs["p"]["full_previews"] == stored
+    assert box.opts["variable"].get() == stored, "No leaves it unticked"
+
+
+def test_unticking_full_size_previews_asks_nothing(ui, monkeypatch):
+    prefs = {"p": dict(appfiles.DEFAULT_PREFS, full_previews="yes")}
+    monkeypatch.setattr(ui.settings_window, "load_prefs", lambda: dict(prefs["p"]))
+    monkeypatch.setattr(ui.settings_window, "save_prefs", lambda p: prefs.update(p=dict(p)))
+    app = make_settings_app(ui, monkeypatch)
+    ui.mb.calls.clear()
+    box = widget_by_text(open_settings_headless(ui, app), "Full-size previews")
+    box.opts["variable"].set("no")
+    box.opts["command"]()
+    assert ui.mb.calls == [] and prefs["p"]["full_previews"] == "no"
+
+
+def test_the_main_column_is_capped_and_centred_when_the_window_is_wide(ui):
+    """Q17: maximized on 2560 px, rows used to span the whole screen."""
+    app = make_app(ui)
+    app.column = StandInWidget()
+    app.column.pack_configure = lambda **kw: app.column.opts.update(kw)
+    app._column_width = lambda: 1000
+    app._center_column(types.SimpleNamespace(widget=app.window, width=2560))
+    assert app.column.opts["padx"] == 780
+    app._center_column(types.SimpleNamespace(widget=app.window, width=900))
+    assert app.column.opts["padx"] == 0
+    app._center_column(types.SimpleNamespace(widget=StandInWidget(), width=4000))
+    assert app.column.opts["padx"] == 0, "a child's <Configure> is not the window's"
+
+
+def test_a_capped_scrollable_body_is_centred_in_a_wide_canvas(ui):
+    app = make_app(ui)
+    app.theme = {"bg": "#000"}
+    StandInWidget.created = []
+    binds = {}
+    calls = []
+    real_canvas = ui.ui_mixin.tk.Canvas
+
+    class Canvas(real_canvas):
+        def bind(self, seq, fn, add=None):
+            binds[seq] = fn
+
+        def create_window(self, *a, **k):
+            return "win1"
+
+        def itemconfig(self, item, **kw):
+            calls.append(("width", kw["width"]))
+
+        def coords(self, item, x, y):
+            calls.append(("x", x))
+    ui.ui_mixin.tk.Canvas = Canvas
+    try:
+        app._make_scrollable_frame(StandInWidget(), max_width=1000)
+    finally:
+        ui.ui_mixin.tk.Canvas = real_canvas
+    binds["<Configure>"](types.SimpleNamespace(width=2560))
+    assert calls == [("width", 1000), ("x", 780)]
+    calls.clear()
+    binds["<Configure>"](types.SimpleNamespace(width=700))
+    assert calls == [("width", 700), ("x", 0)]
+
+
+@pytest.mark.parametrize("which", ["settings", "search"])
+def test_settings_and_search_fit_their_content_and_keep_their_width(ui, monkeypatch, search_env, which):
+    app = search_env.app
+    fitted = []
+    app._fit_dialog = lambda win, canvas=None, body=None, centre_on_screen=False: \
+        fitted.append((canvas is not None, centre_on_screen))
+    if which == "settings":
+        open_settings_headless(ui, app)
+        assert fitted == [(True, True)]
+    else:
+        _open_search(ui, search_env, _game(1, "Doom"))
+        assert fitted == [(False, False)]
+
+
+def test_a_short_main_window_never_loses_its_bottom_rows(ui, monkeypatch):
+    """Seen 2026-10-20: the main window dragged to 700x520 pushed Fetch Missing
+    Artwork out of sight — the rows were packed in reading order, and Tk's packer
+    squeezes the last-packed widget first. Now the bottom rows are pinned to the
+    bottom FIRST and the list is packed LAST, so the list is what shrinks."""
+    app = make_settings_app(ui, monkeypatch)
+    app.window = StandInWidget()
+    app._refresh_onboarding = lambda: None
+    app.ICON_TOOLBAR = 24
+    app.open_art_prefs = app.show_info = lambda: None
+    app._sort_key, app._sort_desc = "name", False
+    StandInWidget.pack_order = []
+    ui.library_mixin.LibraryMixin.build_ui(app)
+    order = StandInWidget.pack_order
+    list_box = app.list_canvas.args[0]
+    bottom = [app.status_bar, app.log_toggle, app.undo_button, app.fetch_button]
+    assert [order.index(w) for w in bottom] == sorted(order.index(w) for w in bottom), \
+        "bottom-up: status line, Details, Undo, Fetch"
+    assert all(w.packed.get("side") == "bottom" for w in bottom)
+    assert order.index(list_box) > max(order.index(w) for w in bottom), "the list is packed last"
+    assert list_box.packed.get("expand") is True
+
+
+def test_the_progress_rows_sit_just_above_details(ui, monkeypatch):
+    app = make_settings_app(ui, monkeypatch)
+    app.progress_bar, app.progress_label = StandInWidget(), StandInWidget()
+    app.log_toggle = StandInWidget()
+    app._pack_progress()
+    assert app.progress_bar.packed["after"] is app.log_toggle
+    assert app.progress_label.packed["after"] is app.progress_bar
+
+
+def test_the_main_window_cannot_be_made_shorter_than_its_controls(ui):
+    """Seen 2026-10-20: with Details open, a 520 px window squeezed Fetch out of sight.
+    The minimum height is every row but the list, plus two list rows."""
+    app = make_app(ui)
+    app.ROW_THUMB_H = 59
+    app.column = types.SimpleNamespace(winfo_reqheight=lambda: 900)
+    app.list_canvas = types.SimpleNamespace(winfo_reqheight=lambda: 300)
+    app._get_workarea = lambda w: (0, 0, 1280, 1000)
+    sizes = []
+    app.window.minsize = lambda w, h: sizes.append((w, h))
+    app._update_min_height()
+    assert sizes == [(560, 600 + 2 * 65)]
+    app._get_workarea = lambda w: (0, 0, 1280, 600)
+    app._update_min_height()
+    assert sizes[-1] == (560, 520), "never more than the screen allows"

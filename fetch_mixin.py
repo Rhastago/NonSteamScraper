@@ -11,7 +11,6 @@ import threading
 from tkinter import messagebox
 
 from appcommon import DEBUG
-from theming import PAD_XS, PAD_L
 import restore
 import steam_files
 import steam_env
@@ -21,18 +20,46 @@ from appfiles import load_api_key, load_prefs
 
 class FetchMixin:
 
-    # The status line a write command shows while a fetch runs (Q3).
+    # The status line a write command shows while a fetch runs (Q3), and while a
+    # results-window "Apply this one" is still downloading or converting (N4).
     BUSY_MESSAGE = "Fetch in progress — try again when it finishes."
+    APPLY_BUSY_MESSAGE = "Artwork is being applied — try again when it finishes."
+
+    def _is_busy(self):
+        """True while a fetch runs or a results-window apply is in flight."""
+        return self._fetch_busy or bool(self._apply_targets)
 
     def _refuse_if_busy(self):
-        """Tk thread: True — and say so on the status line — while a fetch runs.
-        Every command that writes to disk calls this first (B2): a second fetch, an
-        account switch, a reset or a relaunch in the middle of a run writes into the
-        files the running fetch is writing."""
-        if self._fetch_busy:
-            self._set_status(self.BUSY_MESSAGE, self.theme["warn"], icon="warning")
+        """Tk thread: True — and say so on the status line — while a fetch runs or
+        an apply is in flight. Every command that writes to disk calls this first
+        (B2, N4): a second fetch, an Undo, an account switch, a reset or a relaunch
+        in the middle of either writes into the files it is writing (an Undo under
+        an Apply was overwritten by the late Apply)."""
+        if self._fetch_busy or self._apply_targets:
+            msg = self.BUSY_MESSAGE if self._fetch_busy else self.APPLY_BUSY_MESSAGE
+            self._set_status(msg, self.theme["warn"], icon="warning")
             return True
         return False
+
+    def _apply_started(self, save_path):
+        """Tk thread: a results-window apply worker is about to install into
+        save_path. Busy until _apply_finished."""
+        self._apply_targets.append(save_path)
+
+    def _apply_finished(self, save_path):
+        """Tk thread: that apply worker has ended. When it was the last one, a
+        close that waited for it goes ahead, and a Settings window opened under
+        it gets its write controls back."""
+        if save_path in self._apply_targets:
+            self._apply_targets.remove(save_path)
+        if self._apply_targets or self._fetch_busy:
+            return
+        if self._closing:
+            self._finish_close()
+            return
+        release, self._settings_on_fetch_end = self._settings_on_fetch_end, None
+        if release:
+            release()
 
     def check_steam_running(self):
         """Display a warning if Steam is open, since artwork changes require a restart."""
@@ -70,13 +97,25 @@ class FetchMixin:
             ):
                 return
         summary = restore.undo_restore_point()
-        if summary["games"] == 0:
+        if summary["games"] == 0 and not summary["failed"]:
             self.log("Nothing to undo.", icon="warning")
             return
-        queued = " Icons are queued and will apply when Steam closes." if summary["queued"] else ""
-        self.log(f"Undo complete — restored {summary['files']} file(s) for "
-                 f"{summary['games']} game(s), removed {summary['removed']} file(s)."
-                 f"{queued}", icon="undo")
+        if summary["icon_write_failed"]:
+            queued = (" The icons couldn't be written to shortcuts.vdf yet — they are "
+                      "queued and retried automatically.")
+        elif summary["queued"]:
+            queued = " Icons are queued and will apply when Steam closes."
+        else:
+            queued = ""
+        if summary["games"]:
+            self.log(f"Undo complete — restored {summary['files']} file(s) for "
+                     f"{summary['games']} game(s), removed {summary['removed']} file(s)."
+                     f"{queued}", icon="undo")
+        if summary["failed"]:
+            # N9: those games keep their current art and their restore point.
+            self.log(f"Undo could not put back the art of {summary['failed']} game(s) — "
+                     "a file could not be copied. Their current art and their saved "
+                     "copies are kept; press Undo again to retry.", icon="warning")
         self.load_games()
 
 
@@ -99,6 +138,15 @@ class FetchMixin:
             return
         if steam_files.has_pending_icons() and not steam_env.is_steam_running():
             n = steam_files.apply_pending_icons()
+            if n is None:
+                # The write failed and the queue stays; the poll tries again in 4 s.
+                # Say so once, not on every retry.
+                if not getattr(self, "_icon_flush_failed", False):
+                    self._icon_flush_failed = True
+                    self.log("Couldn't write the queued icons to shortcuts.vdf — they "
+                             "stay queued and are retried automatically.", icon="warning")
+                return
+            self._icon_flush_failed = False
             if n > 0:
                 self.log(f"Applied {n} queued icon(s) — restart Steam to see them.",
                          icon="applied")
@@ -143,6 +191,8 @@ class FetchMixin:
         None fetches every game missing art. Does nothing while a fetch runs."""
         if self._fetch_busy:
             return
+        if self._refuse_if_busy():   # an apply is still in flight (N4)
+            return
         if not load_api_key():
             messagebox.showinfo(
                 "API Key Required",
@@ -163,9 +213,7 @@ class FetchMixin:
         self.undo_button.config(state="disabled")
         self._set_status("Working...")
         self.progress_var.set(0)
-        self.progress_label.pack(pady=PAD_XS, before=self.log_toggle)
-        self.progress_bar.pack(fill="x", padx=PAD_L, pady=PAD_XS,
-                               before=self.log_toggle)
+        self._pack_progress()
         # Make sure the just-added progress widgets are visible (grow the window
         # if needed) rather than getting pushed off the bottom.
         self._refit_window_height()

@@ -14,8 +14,8 @@ import restore
 import steam_env
 import operations
 import appfiles
-from steam_files import get_non_steam_games
-from appfiles import load_api_key, add_to_skip_list
+from steam_files import get_non_steam_games, ShortcutsUnreadable
+from appfiles import load_api_key
 
 class LibraryMixin:
 
@@ -30,7 +30,7 @@ class LibraryMixin:
         """Create the onboarding banner (once). It remains hidden until
         _refresh_onboarding() decides to show it based on API-key state."""
         t = self.theme
-        banner = tk.Frame(self.window, bg=t["entry_bg"], pady=PAD_S)
+        banner = tk.Frame(self.column, bg=t["entry_bg"], pady=PAD_S)
         inner = tk.Frame(banner, bg=t["entry_bg"])
         inner.pack(expand=True)
         tk.Label(
@@ -66,8 +66,14 @@ class LibraryMixin:
     def build_ui(self):
         """Construct all main window UI elements."""
         t = self.theme
+        # Everything sits in ONE column frame, kept to a readable width and centred
+        # when the window is maximized on a wide screen (ruling Q17) — rows used to
+        # stretch across the whole screen, the action buttons far from the name.
+        self.column = self._frame(self.window)
+        self.column.pack(fill="both", expand=True)
+        self.window.bind("<Configure>", self._center_column, add="+")
 
-        header_frame = self._frame(self.window)
+        header_frame = self._frame(self.column)
         header_frame.pack(fill="x", padx=PAD_L, pady=PAD_M)
         # Title + a thin accent underline beneath it (tasteful brand touch).
         title_box = self._frame(header_frame)
@@ -91,7 +97,7 @@ class LibraryMixin:
         info_btn.pack(side="right", padx=PAD_S)
         self._add_tooltip(info_btn, "Information")
 
-        self.summary_label = self._label(self.window, "Loading...", font=(FONT_UI, 11))
+        self.summary_label = self._label(self.column, "Loading...", font=(FONT_UI, 11))
         self.summary_label.pack(pady=(PAD_S, 0))
 
         # Onboarding banner — built here (after summary_label exists so it can
@@ -100,7 +106,7 @@ class LibraryMixin:
         self._refresh_onboarding()
 
         # Search/filter bar — live-filters the visible game list by name.
-        search_frame = self._frame(self.window)
+        search_frame = self._frame(self.column)
         search_frame.pack(fill="x", padx=PAD_L, pady=(PAD_S, 0))
         search_icon = self._label(search_frame, "🔍", font=(FONT_UI, 12))
         ic = self._icon("search", self.ICON_INLINE)
@@ -125,7 +131,7 @@ class LibraryMixin:
 
         # Sort row — chooses how the visible list is ordered. Sits on top of the
         # search filter (sort applies to whatever the search leaves visible).
-        sort_frame = self._frame(self.window)
+        sort_frame = self._frame(self.column)
         sort_frame.pack(fill="x", padx=PAD_L, pady=(PAD_XS, 0))
         self._label(sort_frame, "Sort:", font=(FONT_UI, 10)).pack(
             side="left", padx=(0, PAD_S))
@@ -173,8 +179,7 @@ class LibraryMixin:
         self._add_tooltip(self._sort_dir_btn,
                           lambda: "Descending" if self._sort_desc else "Ascending")
 
-        list_container = self._frame(self.window)
-        list_container.pack(fill="both", expand=True, padx=PAD_L, pady=PAD_M)
+        list_container = self._frame(self.column)
 
         self.list_canvas = tk.Canvas(list_container, bg=t["bg"], highlightthickness=0)
         list_scrollbar = tk.Scrollbar(list_container, orient="vertical", command=self.list_canvas.yview)
@@ -189,44 +194,44 @@ class LibraryMixin:
         self.list_canvas.configure(yscrollcommand=list_scrollbar.set)
         self.list_canvas.pack(side="left", fill="both", expand=True)
         list_scrollbar.pack(side="right", fill="y")
+        # Wheel scrolling on the canvas and the list frame: bound ONCE here, as they
+        # live all session (_size_list_canvas binds only each redraw's new rows).
+        self._bind_wheel_to_canvas(self.list_canvas, self.list_canvas)
 
         # Progress bar — hidden until a fetch is in progress
         self.progress_var = tk.DoubleVar()
-        self.progress_label = self._label(self.window, "", font=(FONT_UI, 9))
+        self.progress_label = self._label(self.column, "", font=(FONT_UI, 9))
         # Accent-colored progress bar. ttk theming is finicky across platforms, so
         # build the named style defensively and fall back to the default bar.
         try:
             ttk.Style().configure("Accent.Horizontal.TProgressbar",
                                    background=t["accent"], troughcolor=t["entry_bg"])
             self.progress_bar = ttk.Progressbar(
-                self.window, variable=self.progress_var, maximum=100,
+                self.column, variable=self.progress_var, maximum=100,
                 style="Accent.Horizontal.TProgressbar")
         except Exception:
             self.progress_bar = ttk.Progressbar(
-                self.window, variable=self.progress_var, maximum=100)
+                self.column, variable=self.progress_var, maximum=100)
 
-        self.fetch_button = self._btn(self.window, "Fetch Missing Artwork",
+        self.fetch_button = self._btn(self.column, "Fetch Missing Artwork",
                                        self.start_fetch, primary=True,
                                        font=(FONT_UI, 13, "bold"), padx=PAD_M, pady=PAD_S)
-        self.fetch_button.pack(pady=PAD_M)
 
         # Undo button — enabled whenever a restore point exists on disk; its state
         # is derived in _refresh_undo_button (called from load_games), never here.
-        self.undo_button = self._btn(self.window, "Undo Last Fetch",
+        self.undo_button = self._btn(self.column, "Undo Last Fetch",
                                      self.undo_fetch, font=(FONT_UI, 10))
         self._iconify(self.undo_button, "undo", self.ICON_ACTION, compound="left")
         self.undo_button.config(state="disabled")
-        self.undo_button.pack(pady=PAD_S)
 
         # Activity log — collapsed into a "Details" drawer by default so the main
         # view stays clean; the status bar below is the everyday signal and the
         # progress bar covers fetches. Power users expand this for the full log.
         self._log_visible = False
-        self.log_toggle = self._flat_btn(self.window, "▶  Details", self._toggle_log,
+        self.log_toggle = self._flat_btn(self.column, "▶  Details", self._toggle_log,
                                           font=(FONT_UI, 9), anchor="w")
-        self.log_toggle.pack(fill="x", padx=PAD_L, pady=(PAD_XS, 0))
 
-        self.log_frame = self._frame(self.window)
+        self.log_frame = self._frame(self.column)
         log_scrollbar = tk.Scrollbar(self.log_frame)
         log_scrollbar.pack(side="right", fill="y")
         self.log_box = tk.Text(self.log_frame, height=7, font=(FONT_MONO, 10), state="disabled",
@@ -237,8 +242,26 @@ class LibraryMixin:
         log_scrollbar.config(command=self.log_box.yview)
         # log_frame intentionally not packed yet — drawer starts collapsed.
 
-        self.status_bar = self._label(self.window, "Ready", font=(FONT_UI, 9), anchor="w")
-        self.status_bar.pack(fill="x", padx=PAD_L, pady=PAD_S)
+        self.status_bar = self._label(self.column, "Ready", font=(FONT_UI, 9), anchor="w")
+
+        # The bottom rows are pinned to the bottom FIRST, bottom-up, and the list is
+        # packed LAST with expand: when the window is shorter than its content, Tk's
+        # packer squeezes the last-packed widget, so the list scrolls and Fetch, Undo,
+        # Details and the status line stay visible. (Packed in reading order, a
+        # window dragged to 700x520 pushed Fetch out of sight — seen 2026-10-20.)
+        self.status_bar.pack(side="bottom", fill="x", padx=PAD_L, pady=PAD_S)
+        self.log_toggle.pack(side="bottom", fill="x", padx=PAD_L, pady=(PAD_XS, 0))
+        self.undo_button.pack(side="bottom", pady=PAD_S)
+        self.fetch_button.pack(side="bottom", pady=PAD_M)
+        list_container.pack(fill="both", expand=True, padx=PAD_L, pady=PAD_M)
+
+
+    def _pack_progress(self):
+        """Show the fetch progress label + bar under Undo, just above the Details
+        toggle. Bottom-up packing: each goes right after the row it sits on."""
+        self.progress_bar.pack(side="bottom", fill="x", padx=PAD_L, pady=PAD_XS,
+                               after=self.log_toggle)
+        self.progress_label.pack(side="bottom", pady=PAD_XS, after=self.progress_bar)
 
 
     def _toggle_log(self):
@@ -249,7 +272,9 @@ class LibraryMixin:
             self.log_toggle.config(text="▶  Details")
             self._log_visible = False
         else:
-            self.log_frame.pack(fill="both", padx=PAD_L, pady=PAD_S, before=self.status_bar)
+            # bottom-up packing: right after the status line = just above it
+            self.log_frame.pack(side="bottom", fill="both", padx=PAD_L, pady=PAD_S,
+                                after=self.status_bar)
             self.log_toggle.config(text="▼  Details")
             self._log_visible = True
             self.log_box.see("end")
@@ -261,15 +286,28 @@ class LibraryMixin:
     def refresh_library(self):
         """Reload the library and recheck Steam status."""
         self.log("Reloading library...", icon="refresh")
-        self.load_games()
-        self._set_status("Ready")
+        if self.load_games():
+            self._set_status("Ready")   # never over the unreadable-file message
         self.log("Library reloaded — done.", icon="applied")
         self.check_steam_running()
 
 
+    # The status line when shortcuts.vdf cannot be read (N12).
+    UNREADABLE_MESSAGE = ("Couldn't read Steam's shortcuts.vdf — Steam may be writing it, "
+                          "or it is damaged. Press Reload to try again.")
+
     def load_games(self):
-        """Reload the game list from Steam and refresh the UI."""
-        self.games = get_non_steam_games()
+        """Reload the game list from Steam and refresh the UI. An unreadable
+        shortcuts.vdf shows an empty list and says so on the status line (N12: it
+        used to crash the app at startup with no message). Returns False then, else
+        True."""
+        try:
+            self.games = get_non_steam_games()
+            unreadable = False
+        except ShortcutsUnreadable as e:
+            print(f"Failed to read shortcuts.vdf: {e}")
+            self.games = []
+            unreadable = True
         # Stamp the original add-order (shortcuts.vdf order) so the "Date added"
         # sort stays stable even after the search filter reorders the view.
         for i, g in enumerate(self.games):
@@ -291,9 +329,13 @@ class LibraryMixin:
             # A running fetch owns this button (B2): Refresh, Ignore, Restore and
             # Re-fetch all call load_games, and must not re-enable it mid-run.
             self.fetch_button.config(state="disabled", text="Fetching...")
+        if unreadable:
+            self.summary_label.config(text="Couldn't read Steam's shortcut list")
+            self._set_status(self.UNREADABLE_MESSAGE, self.theme["warn"], icon="warning")
 
         self._render_list()
         self._refresh_undo_button()
+        return not unreadable
 
 
     def _refresh_undo_button(self):
@@ -433,14 +475,18 @@ class LibraryMixin:
 
     def _size_list_canvas(self, min_height=None):
         """Fit the list canvas to its content (capped at a third of the screen) and
-        re-bind wheel scrolling to the freshly built rows."""
+        bind wheel scrolling to the freshly built rows — only to them: every bind()
+        registers a Tcl command that lives as long as its widget, so re-binding the
+        session-long canvas and list frame on every redraw piled up three commands
+        per search keystroke (N16)."""
         self.window.update_idletasks()
         content_h = self.list_frame.winfo_reqheight()
         screen_h = self.window.winfo_screenheight()
         if min_height is not None:
             content_h = max(content_h, min_height)
         self.list_canvas.config(height=min(content_h, screen_h // 3))
-        self._bind_wheel_to_canvas(self.list_canvas, self.list_canvas)
+        for child in self.list_frame.winfo_children():
+            self._bind_wheel_to_canvas(child, self.list_canvas)
 
 
     def _make_thumb_placeholder(self, parent, bg):
@@ -632,7 +678,7 @@ class LibraryMixin:
         already has stays in place."""
         if self._refuse_if_busy():
             return
-        add_to_skip_list(game["app_id"])
+        operations.ignore(game["app_id"])
         self.log(f"Ignored: {game['name']} — moved to Hidden", icon="offline")
         self.load_games()
 

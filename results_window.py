@@ -9,7 +9,6 @@ _results_steam_state, results_window and _build_pending_icons). SteamArtApp keep
 only the open window, app._results_view; the main window's pending-icon poll
 (fetch_mixin) asks it is_applying()."""
 
-import time
 import threading
 import tkinter as tk
 from tkinter import ttk
@@ -19,7 +18,7 @@ from theming import FONT_UI
 import steam_files
 import steam_env
 import operations
-from imaging import _update_badge, _display_image_on_label, update_view
+from imaging import update_view
 
 
 class ResultsWindow:
@@ -102,9 +101,11 @@ class ResultsWindow:
         back_btn = app._btn(btn_frame, "← Back", _close_results,
                   font=(FONT_UI, 12), width=12)
         back_btn.pack(side="left", padx=10)
+        # All Done closes the app the way its X button does: at once, or — while
+        # an apply is still running — once it has finished (N4).
         done_btn = app._btn(btn_frame, "All Done!",
                   lambda: [app._close_modal(results_window),
-                           results_window.destroy(), app.window.destroy()],
+                           results_window.destroy(), app._on_close()],
                   font=(FONT_UI, 13, "bold"), width=12)
         done_btn.pack(side="left", padx=10)
         results_window.protocol("WM_DELETE_WINDOW", _close_results)
@@ -133,7 +134,8 @@ class ResultsWindow:
         self.refresh_steam_ui()
         self._poll_steam_ui()
 
-        canvas, scrollable_frame = app._make_scrollable_frame(results_window, padx=10, pady=5)
+        canvas, scrollable_frame = app._make_scrollable_frame(
+            results_window, padx=10, pady=5, max_width=app._column_width())
 
         # One-time snapshot of the pending-icon queue so each game's build can tell
         # whether its auto-applied icon was actually written or merely QUEUED (Steam
@@ -402,28 +404,18 @@ class ResultsWindow:
 
         def worker():
             # Runs OFF the UI thread. All widget writes go back via results_window.after.
-            steam_env.stop_steam()
-            results_window.after(0, lambda: set_loader("Closing Steam"))
-            # Poll until Steam is REALLY gone (force=True bypasses the stale cache),
-            # up to ~20s. No fixed sleep — we must confirm before writing.
-            deadline = time.monotonic() + 20.0
-            closed = not steam_env.is_steam_running(force=True)
-            while not closed and time.monotonic() < deadline:
-                time.sleep(1.5)
-                closed = not steam_env.is_steam_running(force=True)
-            if not closed:
+            # The flow itself (stop, confirm Steam is gone, write) is operations'.
+            outcome, n = operations.close_steam_and_apply_icons(
+                on_step=lambda text: results_window.after(0, lambda: set_loader(text)))
+            if outcome == operations.ICONS_APPLIED:
+                results_window.after(0, lambda: on_success(n))
+            elif outcome == operations.ICONS_STEAM_STAYED:
                 results_window.after(0, lambda:
                     on_fail("Couldn't close Steam — close it manually and try again."))
-                return
-            results_window.after(0, lambda: set_loader("Applying icons"))
-            n = steam_files.apply_pending_icons()
-            # The silent 4s poll may have won the race and applied them already, so
-            # treat an empty queue as success even if our own call wrote 0.
-            if n > 0 or not steam_files.has_pending_icons():
-                results_window.after(0, lambda: on_success(n))
             else:
                 results_window.after(0, lambda:
-                    on_fail("Couldn't apply icons — see the log."))
+                    on_fail("Couldn't write the icons to shortcuts.vdf — they stay "
+                            "queued; try again."))
 
         def start_apply():
             # UI thread: lock everything, show the loader, then hand off to the worker.
@@ -569,8 +561,11 @@ class ResultsWindow:
                 "index": 0,
                 # option index -> its preview file. A dict, not a list: on-demand
                 # previews finish in any order (B9), so they are filed by index.
-                "paths": dict(enumerate(art_data["thumb_paths"])),
+                "paths": {i: p for i, p in enumerate(art_data["thumb_paths"]) if p},
+                # where an option's preview is downloaded on demand (imaging.update_view)
+                "cache_base": art_data["cache_base"],
                 "option_urls": art_data["option_urls"],
+                "preview_urls": art_data["preview_urls"],
                 "option_meta": art_data.get("option_meta", [{}] * len(art_data["option_urls"])),
                 "applied_path": art_data["applied_path"],
                 # None when nothing was auto-applied (animated-only slot).
@@ -615,16 +610,9 @@ class ResultsWindow:
                                       font=(FONT_UI, 9), bg=t["bg"], fg=t["fg"])
             counter_label.grid(row=1, column=0, columnspan=3, pady=(0, 6))
 
-            def load_thumb(path, lbl=img_label):
-                meta0 = state["option_meta"][0] if state["option_meta"] else {}
-                def on_anim(is_anim, _m=meta0):
-                    if badge_label and is_anim != _m.get("animated"):
-                        _m["animated"] = is_anim
-                        _update_badge(badge_label, _m)
-                _display_image_on_label(lbl, path, on_anim)
-
-            _update_badge(badge_label, state["option_meta"][0] if state["option_meta"] else {})
-            load_thumb(art_data["thumb_paths"][0])
+            # Option 1's preview, through the same path as ◀/▶: shown when it
+            # downloaded during the fetch, fetched now when it did not (N8).
+            update_view(state, img_label, counter_label)
 
             # The auto-applied static option (if any) is index 0 on arrival; animated
             # slots auto-apply nothing, so their button starts as "Apply this one".
@@ -676,6 +664,7 @@ class ResultsWindow:
                     # The download runs on a worker (B6: it used to freeze the window for
                     # the whole download); the button is locked until finish() runs.
                     ab.config(text="Applying…", image="", compound="none", state="disabled")
+                    app._apply_started(new_path)   # busy until the outcome (N4)
 
                     def worker():
                         # OFF the Tk thread: no widget calls here, only the file work.
@@ -685,9 +674,12 @@ class ResultsWindow:
                         # it (Steam running). (s["app_id"] is the int uid.) Never raises.
                         ok, queued = operations.apply_option(new_path, url, s["app_id"],
                                                              is_icon=is_icon)
+                        def outcome():
+                            self._show_apply_outcome(s, ab, idx, ok, queued)
+                            # Last: when the app is waiting to close, this closes it.
+                            app._apply_finished(new_path)
                         try:
-                            app.window.after(0, lambda: self._show_apply_outcome(
-                                s, ab, idx, ok, queued))
+                            app.window.after(0, outcome)
                         except Exception:
                             pass  # the main window is gone; nothing left to update
 
@@ -710,6 +702,7 @@ class ResultsWindow:
         app = self.app
         t = app.theme
         apply_btn.config(text="Converting…", state="disabled")
+        app._apply_started(out_path)   # busy until finish() (N4)
 
         # Sit the popup on top of the results window (it's launched from there). Being
         # transient to the results window keeps that window as its master, so the WM
@@ -767,14 +760,19 @@ class ResultsWindow:
                               if status.winfo_exists() else None)
 
         def finish(ok, queued):
-            if popup.winfo_exists():
-                app._close_modal(popup)
-                popup.destroy()
+            try:
+                if popup.winfo_exists():
+                    app._close_modal(popup)
+                    popup.destroy()
+            except tk.TclError:
+                pass
             if ok and not queued:
                 state["queued_index"] = None
             # If the results window was destroyed mid-conversion, apply_btn is gone;
             # _show_apply_outcome checks that before touching it.
             self._show_apply_outcome(state, apply_btn, index, ok, queued)
+            # Last: when the app is waiting to close, this closes it (N4).
+            app._apply_finished(out_path)
 
         def worker():
             # Download + encode in the cache, then .part + os.replace into the slot,

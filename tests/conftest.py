@@ -1,8 +1,9 @@
 """Suite-wide sandbox HOME, its G-HOME guard, and the no-network guard.
 
-Sandbox HOME: importing appfiles binds every ~/.steamart_* path to HOME at import
-time, so HOME must point at a throw-away folder BEFORE any test module imports
-it. pytest loads this conftest before it collects the test modules, so this is the one place that creates it — and the one place
+Sandbox HOME: importing appfiles binds every app path (appfiles.DATA_FOLDER:
+~/.config/NonSteamScraper, or %APPDATA%\\NonSteamScraper on Windows) to HOME /
+APPDATA at import time, so HOME, APPDATA and XDG_CONFIG_HOME must point inside a
+throw-away folder BEFORE any test module imports it. pytest loads this conftest before it collects the test modules, so this is the one place that creates it — and the one place
 that removes it again when the session ends (pytest_unconfigure runs after a
 normal run, a failed run and a --collect-only run alike). The real HOME is
 never read or written.
@@ -28,6 +29,11 @@ import pytest
 SANDBOX_HOME = tempfile.mkdtemp(prefix="steamart_test_home_")
 os.environ["HOME"] = SANDBOX_HOME
 os.environ["USERPROFILE"] = SANDBOX_HOME   # Windows-style home resolution
+# The data folder's base on Windows; on a Windows runner the real one would be
+# the user's own %APPDATA%.
+os.environ["APPDATA"] = os.path.join(SANDBOX_HOME, "AppData", "Roaming")
+# Not read by the app (Q3), sandboxed anyway so nothing can follow it out.
+os.environ["XDG_CONFIG_HOME"] = os.path.join(SANDBOX_HOME, ".config")
 
 
 def pytest_unconfigure(config):

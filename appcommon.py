@@ -12,7 +12,7 @@ import sys
 import subprocess
 import webbrowser
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 # Set STEAMART_DEBUG=1 to surface the detail behind the defensive `except` blocks.
 DEBUG = os.environ.get("STEAMART_DEBUG", "").lower() in ("1", "true", "yes")

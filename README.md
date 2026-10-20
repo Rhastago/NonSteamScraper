@@ -53,7 +53,8 @@ Nothing to install. Download it and run it.
 
 **And around it:**
 
-- **Choose instead of accept.** Up to 5 alternatives for each art type, swappable after the fetch.
+- **Choose instead of accept.** Up to 5 alternatives for each art type (1, 3, 7 or 10 if you prefer,
+  in Art Style Preferences), previewed as small thumbnails and swappable after the fetch.
   Click any image to see it full size.
 - **Official art first.** If the game is also on the Steam store, its own Steam artwork is offered
   first, tagged STEAM.
@@ -95,8 +96,10 @@ You can steer **animated**, **NSFW** and **humor** artwork, plus style options p
   removes only those and leaves art you set by hand alone.
 - **Backups.** Before it first changes `shortcuts.vdf`, the app saves a copy of it for each Steam
   account.
-- **Where settings live.** Small `~/.steamart_*` files in your home folder. **Reset App to Factory
-  Defaults** clears them but keeps your artwork.
+- **Where settings live.** In one folder: `~/.config/NonSteamScraper` on Linux and the Steam Deck,
+  `%APPDATA%\NonSteamScraper` on Windows. Versions before 1.5.3 kept them as `~/.steamart_*` files in
+  your home folder; the first launch of 1.5.3 moves them. **Reset App to Factory Defaults** clears
+  them but keeps your artwork.
 
 ---
 

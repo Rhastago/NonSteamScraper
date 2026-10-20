@@ -79,6 +79,9 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self._fetch_cancel = None
         self._fetch_run = None
         self._closing = False
+        # The grid paths of the results-window applies still running (N4): while
+        # any is listed the app is busy, like during a fetch.
+        self._apply_targets = []
         # Set by a Settings window opened during a fetch; _end_fetch calls it (S2).
         self._settings_on_fetch_end = None
         # The open results window (results_window.ResultsWindow), or None.
@@ -99,6 +102,7 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         # _close_modal pops and restores the grab to the new top (or the main window).
         self._modal_stack = []
         self.build_ui()
+        self._report_migration(appfiles.LAST_MIGRATION)
         clean_old_cache()
         prune_managed_files()
         self.load_games()
@@ -115,6 +119,26 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
         self.window.deiconify()
         self.window.protocol("WM_DELETE_WINDOW", self._on_close)
         self.check_first_run()
+    def _report_migration(self, summary):
+        """Say in the activity log what migrate_legacy_files did at startup (R2).
+        Silent when there was nothing to move."""
+        if not summary or summary["skipped"]:
+            return   # skipped: __main__ never builds the window then
+        done = summary["moved"] + summary["copied"] + summary["merged"]
+        if done:
+            self.log(f"Moved {len(done)} settings item(s) from your home folder to "
+                     f"{appfiles.DATA_FOLDER}.", icon="applied")
+        if summary["copied"]:
+            self.log("Copied rather than moved (the originals stay in your home "
+                     f"folder): {', '.join(summary['copied'])}.", icon="warning")
+        if summary["kept"]:
+            self.log("Already in the new folder, so the old copies in your home "
+                     f"folder were left as they are: {', '.join(summary['kept'])}.",
+                     icon="warning")
+        if summary["failed"]:
+            self.log(f"Could not move {', '.join(summary['failed'])} — NonSteamScraper "
+                     "tries again next launch.", icon="warning")
+
     def open_sgdb_search(self, game):
         return dialogs.open_sgdb_search(self, game)
 
@@ -136,6 +160,10 @@ class SteamArtApp(UIMixin, GeometryMixin, LibraryMixin, FetchMixin):
 
 
 if __name__ == "__main__":
+    # The app's folder first: the lock file lives in it, and acquire_instance_lock
+    # lets the app start when it cannot open that file, so a missing folder would
+    # silently switch one-copy-at-a-time off.
+    appfiles.ensure_data_folder()
     # One copy at a time (W8): a second copy would share the icon queue and
     # Steam's shortcut list with this one.
     if not appfiles.acquire_instance_lock():
@@ -143,6 +171,18 @@ if __name__ == "__main__":
         root.withdraw()
         messagebox.showinfo("Already Running", "NonSteamScraper is already running.",
                             parent=root)
+        sys.exit(0)
+    # An older version's files move from the home folder into the app's folder
+    # (R1/R2) before anything reads them — the Steam lookup below reads the saved account.
+    # An older copy still running holds its own lock: then this copy does not start
+    # either (W8) — running on an empty folder next to it would write a second set of
+    # settings that shadows the old ones for good.
+    if appfiles.migrate_legacy_files()["skipped"]:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("Already Running",
+                            "An older version of NonSteamScraper is running.\n\n"
+                            "Close it, then start NonSteamScraper again.", parent=root)
         sys.exit(0)
     # Find Steam and the active account before anything reads them.
     steam_env.init()

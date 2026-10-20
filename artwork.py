@@ -41,7 +41,10 @@ def clear_managed_artwork():
 def download_artwork(url, save_path, register=True):
     # Download to a temp file and only swap it into place once it's complete, so a
     # dropped connection can never leave a truncated image that gets applied/registered.
+    # The streamed response is always closed (N19: a non-200 or an error left its
+    # connection open).
     tmp = save_path + ".part"
+    r = None
     try:
         r = sgdb.http_get(url, stream=True, timeout=10)
         if r.status_code != 200:
@@ -69,6 +72,12 @@ def download_artwork(url, save_path, register=True):
             if os.path.exists(tmp): os.remove(tmp)
         except OSError: pass
         print(f"    ❌ Network error: {e}"); return False
+    finally:
+        if r is not None:
+            try:
+                r.close()
+            except Exception:
+                _debug("download_artwork close")
 
 def clear_slot_files(save_path, existing_files=None, keep=None):
     """Delete any existing artwork sharing `save_path`'s grid slot but using a
@@ -119,6 +128,14 @@ def remove_partial_downloads(grid_folder, unsigned_ids):
                     _debug("remove_partial_downloads")
     return removed
 
+def remove_part_file(save_path):
+    """Delete save_path's unfinished download (save_path + ".part") — only ever this
+    app's own temp file, never the art. Never raises."""
+    try:
+        os.remove(save_path + ".part")
+    except OSError:
+        pass
+
 def install_into_slot(save_path, url, existing_files=None, animated=False,
                       progress_cb=None, status_cb=None):
     """The ONE way a new image lands in a grid slot — used by the fetch, by the
@@ -150,13 +167,17 @@ def install_option(save_path, url, unsigned_id, is_icon=False, animated=False,
     Steam's shortcut at it (apply_icon). An animated icon is an APNG served as
     image/png; it goes through the same icon write as a static one (C4: the
     animated apply used to place the file and never touch shortcuts.vdf).
-    Returns (ok, queued): ok when the file is in place, queued when the icon
-    write waits for Steam to close."""
+    Returns (ok, queued): ok when the file is in place (and, for an icon, Steam's
+    shortcut was written or queued), queued when the icon write waits for Steam to
+    close. A failed shortcuts.vdf write is not ok: the button says "Failed — retry"
+    instead of "Applied!" (N2)."""
     ok = install_into_slot(save_path, url, animated=animated,
                            progress_cb=progress_cb, status_cb=status_cb)
     queued = False
     if ok and is_icon:
         queued = steam_files.apply_icon(unsigned_id, save_path)
+        if queued is None:
+            return False, False
     return ok, queued
 
 def row_thumbnail_path(grid_folder, app_id, names=None):
@@ -187,6 +208,8 @@ def row_thumbnail_path(grid_folder, app_id, names=None):
 
     portrait, wide = [], []
     for name in names:
+        if name.endswith(".part"):
+            continue   # an unfinished download is never the cover (N7)
         if name.startswith(portrait_prefix):
             portrait.append(name)
         elif name.startswith(wide_prefix):
@@ -199,6 +222,33 @@ def row_thumbnail_path(grid_folder, app_id, names=None):
     if chosen is None:
         return None
     return os.path.join(grid_folder, chosen)
+
+# The results window's previews (a 300x200 box) come from SteamGridDB's thumbnail
+# of each option: ~7x smaller (measured 2026-10-20 on 200 options: 0.58 MB full vs
+# 0.083 MB thumbnail on average), which matters now that every option is
+# downloaded during the fetch (Q11). Three kinds keep the full file: an ANIMATED
+# option (its thumbnail is a still image — why an earlier thumbnail attempt was
+# reverted), Steam's own art (it has no thumbnail) and icons (thumbnails as small as
+# 48 px, little to save). A thumbnail is used only when it is a still image
+# (.jpg/.png): SteamGridDB gives every ANIMATED asset a .webm video thumbnail —
+# also an animated PNG served as image/png, which is_animated_image cannot tell
+# from a static one — and a video cannot be previewed (seen in the 1.5.3 walk).
+# Apply and "click to view full size" always use the full
+# image. The cache keeps its {base}_{i} names (the earlier attempt's own names
+# clashed with them). Settings → "Full-size previews" (prefs["full_previews"])
+# brings back full-size previews everywhere — the pre-1.5.3 path, kept to compare
+# and to revert (ruling Q14b).
+
+def preview_url(img, slot, full=False):
+    """The URL an option's preview is downloaded from: the full image when `full`
+    (the Settings checkbox), else as described above."""
+    if full or slot == "icons" or is_animated_image(img):
+        return img["url"]
+    thumb = img.get("thumb")
+    if isinstance(thumb, str) and \
+            thumb.split("?")[0].rsplit(".", 1)[-1].lower() in ("jpg", "jpeg", "png"):
+        return thumb
+    return img["url"]
 
 def is_animated_image(img):
     """True if an SGDB image record refers to animated artwork. SGDB serves animated
@@ -288,11 +338,14 @@ class FetchedArt:
                   slot order: grids, grids_wide, heroes, logos, icons.
       icon_write  (unsigned_id, icon_path) of an icon installed with
                   defer_icon=True, for the caller's batched shortcuts.vdf write;
-                  None otherwise."""
+                  None otherwise.
+      unanswered  the label of every slot left empty because SteamGridDB did
+                  not answer (N6) — not "nothing exists"; its old art is kept."""
 
     def __init__(self):
         self.slots = {}
         self.icon_write = None
+        self.unanswered = []
 
     def applied_paths(self):
         """The applied_path of every slot that auto-applied a static image."""
@@ -330,8 +383,12 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
     restore.snapshot_for_restore(unsigned_id, existing_files=existing_files)
     os.makedirs(appfiles.CACHE_FOLDER, exist_ok=True)
     results = FetchedArt()
-    # N slots × (1 main + 3 previews) steps max
-    total_steps = len(slots) * 4
+    # How many options each slot gets, all of them previewed now (Q10/Q11): the
+    # results window then cycles through them without a download per click.
+    limit = appfiles.option_count(prefs)
+    full = prefs.get("full_previews") == "yes"
+    # N slots × (1 main + `limit` previews) steps max
+    total_steps = len(slots) * (1 + limit)
     step = 0
     # Progress is bumped from concurrent preview threads, so guard the counter.
     step_lock = threading.Lock()
@@ -369,18 +426,20 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
         official = sgdb._strip_never([steam_images[slot]], endpoint, prefs) if slot in steam_images else []
         images = official + images
         if not images:
-            # A missing slot still consumes its 1 main + 3 preview steps so the bar
-            # reaches 100% exactly (same accounting as the serial version).
-            for _ in range(4):
+            # A missing slot still consumes its 1 main + `limit` preview steps so the
+            # bar reaches 100% exactly (same accounting as the serial version).
+            for _ in range(1 + limit):
                 bump(f"{art_label} — none found")
             results.slots[slot] = None
+            if slot_images.get(slot) is None:
+                results.unanswered.append(art_label)   # an error, not "none" (N6)
             continue
         # Keep SGDB's original ranking so animated options stay visible in the results
         # (don't resort static-first — that can push animated past the 5-option cap).
         # Animated art is NOT auto-applied (Steam needs a slow APNG conversion), so we
         # auto-apply the first STATIC option and leave animated ones as alternatives
         # the user commits on demand.
-        options = images[:5]
+        options = images[:limit]
         applied_index = next((i for i, im in enumerate(options)
                               if not is_animated_image(im)), None)
 
@@ -410,20 +469,21 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
             save_path = os.path.join(steam_env.GRID_FOLDER, f"{base}.png")
             bump(f"{art_label} — animated, apply to commit")
 
-        # Previews: first 3 options, downloaded at FULL resolution (img["url"]) using
+        # Previews: every option, downloaded at FULL resolution (img["url"]) using
         # the original {base}_{i} cache names — unchanged from the serial version, so
         # animated previews still animate and app.py's on-demand cycling path (which
         # reconstructs {base}_{i} names) stays valid. They write to DISTINCT paths, so
         # downloading them concurrently is safe.
-        preview_imgs = list(enumerate(options[:3]))
+        preview_imgs = list(enumerate(options))
 
-        def fetch_preview(arg):
+        def fetch_preview(arg, _slot=slot):
             i, img = arg
-            u = img["url"]; e = u.split(".")[-1].split("?")[0]
+            u = preview_url(img, _slot, full); e = u.split(".")[-1].split("?")[0]
             tp = os.path.join(appfiles.CACHE_FOLDER, f"{base}_{i}.{e}")
-            bump(f"Caching {art_label} preview {i+1}/3")
-            download_artwork(u, tp, register=False)
-            return i, tp
+            bump(f"Caching {art_label} preview {i+1}/{len(preview_imgs)}")
+            # Only a preview that downloaded is recorded (N8): None makes the
+            # results window fetch it on demand instead of showing a stale file.
+            return i, (tp if download_artwork(u, tp, register=False) else None)
 
         if preview_imgs:
             with ThreadPoolExecutor(max_workers=sgdb.SGDB_MAX_WORKERS) as ex:
@@ -438,6 +498,8 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
                                "failed": failed,
                                "label": art_label,
                                "option_urls": [img["url"] for img in options],
+                               # what each option's preview downloads (thumbnail or full)
+                               "preview_urls": [preview_url(img, slot, full) for img in options],
                                "option_meta": [
                                    {
                                        "animated": is_animated_image(img),
@@ -447,5 +509,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
                                    }
                                    for img in options
                                ],
-                               "thumb_paths": thumbs, "filename_base": base}
+                               "thumb_paths": thumbs, "filename_base": base,
+                               # where on-demand previews go: <cache_base>_<i>.<ext>
+                               "cache_base": os.path.join(appfiles.CACHE_FOLDER, base)}
     return results

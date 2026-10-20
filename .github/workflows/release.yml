@@ -33,26 +33,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # One Python version everywhere (N21, ruling Q8): the Deck venv, CI and the
+      # Windows test bundle all use 3.13.
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
 
       # tkinter ships with the Windows Python installer but not the Linux runner.
       - name: Install tkinter (Linux)
         if: matrix.os_name == 'linux'
         run: sudo apt-get update && sudo apt-get install -y python3-tk
 
+      # constraints.txt pins every dependency to the versions the release was
+      # tested with, so a tag never ships whatever is newest that day (N21).
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-build.txt
+          pip install -r requirements-build.txt -c constraints.txt
 
       # The suite runs on both runners before anything is built; a red test stops
       # the release. It needs no display (the UI tests stand tkinter in).
       - name: Test
         shell: bash
         run: |
-          pip install -r requirements-dev.txt
+          pip install -r requirements-dev.txt -c constraints.txt
           python -m pytest -q
 
       # Reuse the same build scripts you run locally, then give the artifact its

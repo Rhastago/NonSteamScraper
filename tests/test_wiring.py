@@ -291,11 +291,63 @@ def test_find_games_is_gone_and_nothing_imports_it():
 
 
 def test_app_takes_the_one_copy_lock_before_anything_else():
-    """W8: app.py's __main__ asks for the lock first and exits when another copy
-    holds it — before steam_env.init() and before the main window."""
+    """W8 + R2: app.py's __main__ creates the data folder (the lock file lives in
+    it, and an unopenable lock file lets the app start), then asks for the lock and
+    exits when another copy holds it, then moves an older version's files, and only
+    then lets steam_env.init() read the saved account — all before the window."""
     with open(os.path.join(ROOT, "app.py"), encoding="utf-8") as f:
         src = f.read()
     main = src[src.index('if __name__ == "__main__":'):]
+    folder = main.index("appfiles.ensure_data_folder()")
     lock = main.index("appfiles.acquire_instance_lock()")
-    assert lock < main.index("steam_env.init()") < main.index("window = tk.Tk()")
-    assert "sys.exit(0)" in main[lock:main.index("steam_env.init()")]
+    migrate = main.index("appfiles.migrate_legacy_files()")
+    assert folder < lock < migrate < main.index("steam_env.init()") < main.index("window = tk.Tk()")
+    assert "sys.exit(0)" in main[lock:migrate]
+    # an older copy still holding its lock: this copy does not start either
+    assert 'migrate_legacy_files()["skipped"]' in main
+    assert "sys.exit(0)" in main[migrate:main.index("steam_env.init()")]
+
+
+def test_the_build_scripts_carry_no_collect_all_flags():
+    """N23: --collect-all pillow collected nothing (the package is PIL), and
+    --collect-all multiprocessing bundled modules the app never imports."""
+    for script in ("build_linux.sh", "build_windows.sh"):
+        assert "--collect-all" not in _pyinstaller_flags(script), script
+
+
+def _pins():
+    with open(os.path.join(ROOT, "constraints.txt"), encoding="utf-8") as f:
+        lines = [l.split("#")[0].strip() for l in f]
+    return {l.split(";")[0].split("==")[0].lower(): l for l in lines if l}
+
+
+def test_every_dependency_is_pinned_to_one_version():
+    """N21: every dependency was a >= floor, so CI shipped whatever was newest on
+    tag day. constraints.txt pins each requirement to an exact version."""
+    pins = _pins()
+    assert all("==" in line for line in pins.values()), pins
+    for req in ("requirements.txt", "requirements-build.txt", "requirements-dev.txt"):
+        with open(os.path.join(ROOT, req), encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#")[0].strip()
+                if not line or line.startswith("-r"):
+                    continue
+                name = line.split(">")[0].split("=")[0].split("<")[0].strip().lower()
+                assert name in pins, f"{req}: {name} is not pinned in constraints.txt"
+
+
+def test_every_install_and_download_uses_the_pins_and_python_3_13():
+    """N21 + ruling Q8: CI, the build scripts and the Windows bundle install the
+    pinned versions, all on Python 3.13."""
+    with open(os.path.join(ROOT, ".github", "workflows", "release.yml"), encoding="utf-8") as f:
+        ci = f.read()
+    installs = [l for l in ci.splitlines() if "pip install -r" in l]
+    assert installs and all("-c constraints.txt" in l for l in installs), installs
+    assert "python-version: '3.13'" in ci and "3.12" not in ci
+    for script in ("build_linux.sh", "build_windows.sh"):
+        with open(os.path.join(ROOT, script), encoding="utf-8") as f:
+            assert "-r requirements-build.txt -c constraints.txt" in f.read(), script
+    with open(os.path.join(ROOT, "make_winbuild.sh"), encoding="utf-8") as f:
+        wb = f.read()
+    assert wb.count("--python-version 3.13") == 2 and "3.12" not in wb
+    assert "-c constraints.txt \\" in wb and "constraints.txt tests" in wb

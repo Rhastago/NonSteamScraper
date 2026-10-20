@@ -10,10 +10,9 @@ import tkinter as tk
 from tkinter import messagebox
 from PIL import Image, ImageTk
 
-from appcommon import resource_path
-from theming import PAD_XS, PAD_L
+from appcommon import resource_path, debug as _debug
 import artwork
-from winplace import parse_net_workarea, compute_window_fit
+from winplace import parse_net_workarea, compute_window_fit, place_over_parent
 
 class GeometryMixin:
 
@@ -26,6 +25,10 @@ class GeometryMixin:
             pass
 
 
+    # Backoff (ms) between grab attempts on a window that is not viewable yet: about
+    # 1.3 s in all, for a compositor that maps windows late (N22).
+    GRAB_RETRY_MS = (10, 20, 40, 80, 160, 320, 640)
+
     def _open_modal(self, win):
         """Make `win` modal over the current chain and push it onto _modal_stack.
 
@@ -33,23 +36,50 @@ class GeometryMixin:
         main window), so nested popups stack correctly and stay visible-with-parent.
         grab_set() is an application-local grab: it blocks this app's OTHER windows
         (lower in the stack) but not other OS apps. A grab on a withdrawn / not-yet-
-        mapped window raises TclError, so callers must deiconify first; we still
-        update_idletasks and retry the grab once via after() to be safe."""
+        mapped window raises TclError, so callers must deiconify first; when the
+        window is still not viewable, the grab is retried when it maps (<Map>) and
+        on the GRAB_RETRY_MS backoff, and a log line says so if it never takes (N22:
+        one retry after 10 ms, then the dialog silently stayed non-modal)."""
+        self._prune_modal_stack()
         parent = self._modal_stack[-1] if self._modal_stack else self.window
         self._safe(lambda: win.transient(parent))
         self._safe(win.update_idletasks)
+        grabbed = [False]
 
-        def _grab():
-            try:
-                win.grab_set()
-            except tk.TclError:
-                # Not viewable yet — try once more shortly.
+        def _try():
+            if not grabbed[0]:
                 try:
-                    win.after(10, lambda: self._safe(win.grab_set))
+                    win.grab_set()
+                    grabbed[0] = True
+                except tk.TclError:
+                    pass
+            return grabbed[0]
+
+        def _retry(attempt):
+            try:
+                if not win.winfo_exists():
+                    return   # closed before it ever became viewable
+            except Exception:
+                return
+            if _try():
+                return
+            if attempt == len(self.GRAB_RETRY_MS):
+                title = ""
+                try:
+                    title = win.title()
                 except Exception:
                     pass
+                print(f"Could not make the '{title}' window modal — it is open, but "
+                      "the windows behind it still take clicks.")
+                return
+            try:
+                win.after(self.GRAB_RETRY_MS[attempt], lambda: _retry(attempt + 1))
+            except Exception:
+                pass
 
-        _grab()
+        if not _try():
+            self._safe(lambda: win.bind("<Map>", lambda e: _try(), add="+"))
+            _retry(0)
         self._safe(win.lift)
         self._safe(win.focus_force)
         self._modal_stack.append(win)
@@ -67,8 +97,14 @@ class GeometryMixin:
             win.grab_release()
         except Exception:
             pass
-        if win in self._modal_stack:
-            self._modal_stack.remove(win)
+        # win and every popup inside it: closing a window destroys its child
+        # popups without their own close path running (N13: the results window
+        # closed during an animated conversion left the dead progress popup on the
+        # stack, and every later dialog chained itself to it and lost its focus).
+        inside = str(win) + "."
+        self._modal_stack[:] = [w for w in self._modal_stack
+                                if w is not win and not str(w).startswith(inside)]
+        self._prune_modal_stack()
         if self._modal_stack:
             top = self._modal_stack[-1]
             self._safe(top.grab_set)
@@ -77,6 +113,80 @@ class GeometryMixin:
         else:
             self._safe(self.window.lift)
             self._safe(self.window.focus_force)
+
+
+    def _prune_modal_stack(self):
+        """Drop windows that no longer exist from _modal_stack (N13)."""
+        alive = []
+        for w in self._modal_stack:
+            try:
+                if w.winfo_exists():
+                    alive.append(w)
+            except Exception:
+                pass
+        self._modal_stack[:] = alive
+
+
+    def _place_over_main(self, win, desired_w, desired_h):
+        """Size `win` and centre it over the main window, kept fully inside the
+        screen work area (N18). One geometry() call, as the flash-free reveal
+        needs. Returns the (w, h) applied."""
+        self.window.update_idletasks()
+        wa = self._get_workarea(win)
+        w, h, x, y = place_over_parent(
+            self.window.winfo_x(), self.window.winfo_y(),
+            self.window.winfo_width(), self.window.winfo_height(), *wa,
+            desired_w, desired_h)
+        win.geometry(f"{w}x{h}+{x}+{y}")
+        return w, h
+
+
+    def _fit_dialog(self, win, canvas=None, body=None, centre_on_screen=False):
+        """Size a pop-up window to what its content needs on THIS screen (ruling Q16):
+        measured after it is built, never typed — typed sizes clipped the content
+        on another display or font size. The scrolling canvas (when given) asks for
+        its body's full size first; the result is capped to the work area, so a
+        small screen gets a shorter window whose body scrolls. Then the size is
+        FIXED (ruling Q16b): under KDE any window whose height can be dragged keeps a
+        maximize button and fills the screen (the max-width hint is ignored), and
+        these windows have nothing to show in extra space. Centred over the main
+        window, or on the screen."""
+        win.update_idletasks()
+        if canvas is not None and body is not None:
+            canvas.config(width=body.winfo_reqwidth(), height=body.winfo_reqheight())
+            win.update_idletasks()
+        want_w, want_h = win.winfo_reqwidth(), win.winfo_reqheight()
+        if centre_on_screen:
+            w, h = self._fit_window_to_workarea(win, want_w, want_h)
+        else:
+            w, h = self._place_over_main(win, want_w, want_h)
+        # An older typed minimum must not push the window past a small screen.
+        win.minsize(w, h)
+        win.resizable(False, False)
+
+
+    # The widest the main window's content and the Results cards grow (ruling
+    # Q17), in pixels at 96 dpi; scaled by the display's font scaling.
+    COLUMN_MAX = 1000
+
+    def _column_width(self):
+        """COLUMN_MAX for this display: Tk's scaling is 96/72 at 96 dpi."""
+        try:
+            scaling = float(self.window.tk.call("tk", "scaling"))
+        except Exception:
+            scaling = 96 / 72
+        return int(self.COLUMN_MAX * scaling / (96 / 72))
+
+
+    def _center_column(self, event):
+        """<Configure> of the main window: pad the content column so it is never
+        wider than _column_width(), centred (Q17)."""
+        if event.widget is not self.window:
+            return
+        pad = max(0, (event.width - self._column_width()) // 2)
+        if pad != getattr(self, "_column_pad", 0):
+            self._column_pad = pad
+            self._safe(lambda: self.column.pack_configure(padx=pad))
 
 
     def _set_window_icon(self):
@@ -94,9 +204,7 @@ class GeometryMixin:
         positioned fully within the screen work area (never under a taskbar/panel)
         and centered. Temporarily packs the progress widgets to include them in
         the measurement, then hides them again so they only appear during a fetch."""
-        self.progress_label.pack(pady=PAD_XS, before=self.log_toggle)
-        self.progress_bar.pack(fill="x", padx=PAD_L, pady=PAD_XS,
-                               before=self.log_toggle)
+        self._pack_progress()
         self.window.update_idletasks()
         req_w = max(self.window.winfo_reqwidth(), 700)
         req_h = self.window.winfo_reqheight()
@@ -107,6 +215,26 @@ class GeometryMixin:
         # size in case it is needed by future clamping logic.
         self._main_w, self._main_h = self._fit_window_to_workarea(
             self.window, req_w, req_h)
+        self._update_min_height()
+
+
+    # How many list rows must stay visible however short the main window is made.
+    MIN_LIST_ROWS = 2
+
+    def _update_min_height(self):
+        """The main window may not be made shorter than every row except the game
+        list, plus MIN_LIST_ROWS list rows: below that a control is squeezed out of
+        sight (seen 2026-10-20: Fetch Missing Artwork, with Details open at 520 px).
+        Capped to the work area. Re-run whenever a row appears or goes (Details,
+        the progress bar), through _refit_window_height."""
+        try:
+            self.window.update_idletasks()
+            fixed = self.column.winfo_reqheight() - self.list_canvas.winfo_reqheight()
+            need = fixed + self.MIN_LIST_ROWS * (self.ROW_THUMB_H + 6)
+            avail = max(self._get_workarea(self.window)[3] - 80, 200)
+            self.window.minsize(560, min(need, avail))
+        except Exception:
+            _debug("_update_min_height")
 
 
     def _get_workarea(self, window):
@@ -212,6 +340,7 @@ class GeometryMixin:
         overflow, the window shifts UP just enough to fit (but never above the work
         area top), and if the content is taller than the whole available area the
         height is capped to that area so the window never exceeds the screen."""
+        self._update_min_height()
         try:
             win = self.window
             win.update_idletasks()
@@ -248,6 +377,17 @@ class GeometryMixin:
         stop flag and let the worker finish the game it is on — _end_fetch then
         closes the window through _finish_close. Closing at once used to kill the
         daemon worker mid-download and leave .part files in Steam's grid folder."""
+        if self._apply_targets and not self._fetch_busy:
+            # N4: an "Apply this one" is still downloading or converting; closing
+            # now would kill it mid-way. Close when it ends (_apply_finished), or
+            # after CLOSE_FALLBACK_MS at the latest.
+            if self._closing:
+                return
+            self._closing = True
+            self._set_status("Finishing the artwork apply — the window closes when it is done…",
+                             self.theme["warn"], icon="warning")
+            self.window.after(self.CLOSE_FALLBACK_MS, self._finish_close)
+            return
         if self._fetch_busy:
             if self._closing:
                 return  # already stopping; the window closes when the run ends
@@ -279,6 +419,9 @@ class GeometryMixin:
         run = self._fetch_run
         if run:
             artwork.remove_partial_downloads(run["grid"], run["ids"])
+        # An apply still running at the fallback leaves its unfinished download.
+        for path in list(self._apply_targets):
+            artwork.remove_part_file(path)
         # We deliberately do not persist or restore the window position — the window
         # always re-centers on launch — so there is nothing to save here.
         # Stop the thumbnail decode pool so no worker survives the window. Don't wait

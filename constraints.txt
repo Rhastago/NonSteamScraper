@@ -1,0 +1,26 @@
+# Exact versions for every build and test dependency (N21): pip install ... -c constraints.txt.
+# The first block is `pip freeze` of the tested Deck venv (Python 3.13), limited to what
+# requirements-build.txt and requirements-dev.txt pull in. The second block is what only
+# Windows installs, at the versions pip resolves for win_amd64 / Python 3.13 against the first.
+# Bump a pin on purpose, test it, and commit it with the change that needs it.
+altgraph==0.17.5
+certifi==2026.5.20
+charset-normalizer==3.4.7
+idna==3.18
+iniconfig==2.3.0
+packaging==26.2
+pillow==12.2.0
+pluggy==1.6.0
+psutil==7.2.2
+pygments==2.20.0
+pyinstaller==6.20.0
+pyinstaller-hooks-contrib==2026.5
+pytest==9.1.1
+requests==2.34.2
+setuptools==82.0.1
+urllib3==2.7.0
+vdf==3.4
+# Windows only (PyInstaller and pytest need them there; pip skips them elsewhere).
+pefile==2024.8.26; sys_platform == "win32"
+pywin32-ctypes==0.2.3; sys_platform == "win32"
+colorama==0.4.6; sys_platform == "win32"

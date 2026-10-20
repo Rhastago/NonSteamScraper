@@ -4,6 +4,110 @@ All notable changes to NonSteamScraper are documented here.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.5.3] — 2026-10-20
+
+### Added
+- **Choose how many options each artwork gets: 1, 3, 5, 7 or 10.** It is the new first row of
+  Art Style Preferences, and 5 stays the default. 1 gives just the top pick: Steam's own art
+  when SteamGridDB links the game to its Steam page. Every option is now downloaded during the
+  fetch, so the results screen shows each one at once; before, options 4 and 5 only started
+  downloading when you reached them.
+- **Faster fetches: the results previews are small thumbnails.** Each option's preview used to
+  be the full-size image (measured: about 7 times bigger on average). Covers, wide covers, heroes
+  and logos now preview from SteamGridDB's thumbnail; animated art, Steam's own art and icons
+  still preview at full size. "Apply this one" and clicking a preview still use the full image.
+  Settings → Previews → **Full-size previews** brings back the old full-size previews; turning
+  it on asks first, since fetches then take much longer and use much more data.
+
+### Changed
+- **Your settings now live in one folder:** `~/.config/NonSteamScraper` on Linux and the Steam
+  Deck, `%APPDATA%\NonSteamScraper` on Windows, instead of a dozen `~/.steamart_*` files in your
+  home folder. The first launch of 1.5.3 moves them there by itself. A file it cannot move (for
+  example one on another drive) is copied and the original is kept. While an older copy of the
+  app is still running, 1.5.3 says so and does not start, so the two can't split your settings.
+  An older version started after the move finds no settings and starts as if it were new.
+
+### Fixed
+- **Undo no longer hands your own artwork to Clear All Artwork.** After Re-fetch (or
+  Search → Select) on a game that had art you made yourself, then Undo, your file came back
+  but stayed on the app's list of its own files, so a later Clear All Artwork deleted it.
+- **Undo never leaves a game with no artwork.** It used to delete the current art first and
+  then copy the old art back; if a copy failed (a full disk, a file held open on Windows) the
+  game ended up with neither, and the saved copies were gone too. Undo now puts the old art
+  back first and removes the new art only after that worked. A game it could not restore
+  keeps its current art and its saved copies, and pressing Undo again retries it.
+- **Queued icons are no longer lost when Steam's shortcut list can't be written.** If writing
+  `shortcuts.vdf` failed (a damaged file, a file held open on Windows), the queued icons were
+  thrown away while the app said they were applied. They now stay queued, the app says the
+  write failed, and it tries again. The same goes for the icons at the end of a fetch and of
+  an Undo. "Apply this one" on an icon says "Failed — retry" instead of "Applied!".
+- **An icon you apply can't be overwritten by an older queued one.** An icon queued while
+  Steam was open could land on top of a newer icon you applied after closing Steam.
+- **"Apply this one" counts as busy.** While an option is still downloading or converting,
+  Undo, Re-fetch, Ignore, Restore, Search → Select, the account switch, theme, accent and
+  Reset say "Artwork is being applied" and wait. Closing the window or pressing All Done!
+  waits for the apply to finish instead of cutting it off half-way.
+- **"Exclude" always excludes.** When every filtered search for a slot came back empty, a
+  last search with no filters at all ran, and its result (for example a white logo or NSFW
+  art you excluded) was applied. A slot can now stay empty when SteamGridDB has nothing you
+  allow; the Art Style Preferences window no longer promises otherwise.
+- **A SteamGridDB error no longer counts as "no artwork".** A rate limit, a timeout or a
+  server error left the slot empty while the log said "Artwork saved". The log now names the
+  slots SteamGridDB did not answer for, and their old art is kept.
+- **One bad record can't stop a whole fetch.** A malformed answer from SteamGridDB for one
+  game used to end the fetch there, and the icons of the games already done were never
+  written to Steam. Now only that game is skipped, and the log says so.
+- **A game with only a banner, or a half-finished download, still "needs artwork".** Any file
+  starting with the game's number counted as artwork, so such a game never came back to the
+  fetch on its own. A game now needs artwork until it has a cover, and an unfinished download
+  never counts.
+- **The results preview never shows another option's picture.** When a preview could not be
+  loaded, the window kept showing the previous option's image while the counter moved on, and
+  Apply then installed art you had not seen. It now says "preview unavailable", and a preview
+  that failed during the fetch is downloaded again when you look at it.
+- **The tooltip of the ▲/▼ sort button no longer gets stuck on screen** after you open and
+  close the Sort menu. Every tooltip now also disappears when you click its button.
+- **A damaged `shortcuts.vdf` no longer stops the app from starting.** It used to close with no
+  message; it now opens with an empty list and says it could not read Steam's shortcut list.
+- **Closing the results window during an animated conversion** no longer leaves later
+  windows (Settings, Search, the Quick Start guide) without a parent, which could make them
+  open behind the main window in Game Mode.
+- **The Search window tells "no results" apart from "no connection" and "key not accepted".**
+  It also no longer lets an older, slower search overwrite the results of what you typed
+  after it, and a search that finishes after you closed the window does nothing.
+- **The Steam Account list in Settings follows dark mode** instead of opening in light colours.
+- **Windows fit their content on any screen.** Settings, Art Style Preferences, the Quick Start
+  guide and the Search window used sizes fixed in the code, so on another screen or font size
+  their content could be cut off (Art Style Preferences hid its "10" button). They now open at
+  the size their content needs, never bigger than the screen (they scroll on a small one), and
+  can no longer be maximized into a mostly empty window.
+- **Maximizing the main window or the results keeps them readable.** The list and the results
+  cards stay in a centred column instead of stretching across a wide screen, and the extra
+  height shows more of them.
+- **The main window can't be made so short that a button disappears.** Dragged short, it used to
+  push Fetch Missing Artwork out of sight; now the list shrinks first, and the window stops at the
+  height where everything else still fits.
+- **Art Style Preferences and the Quick Start guide open fully on screen**, even when the main
+  window sits near the edge of the screen.
+- **A window that opens slowly still blocks the window behind it.** On a slow screen a dialog
+  could open without keeping you out of the main window.
+
+### Internal
+- `shortcuts.vdf` and the icon queue are guarded by one lock, so an icon write and the queue
+  flush can never interleave; a failed write is reported as a failure, never as "0 written".
+- The Undo record and the `shortcuts.vdf` backup are written through a temporary file, so a
+  crash can never leave either half-written; switching Steam account creates the account's
+  artwork folder before it switches.
+- Image downloads always close their connection.
+- Every dependency is pinned to the version the release was tested with (`constraints.txt`),
+  and Linux, Windows and CI all build with Python 3.13. The Windows test bundle now carries
+  every wheel it needs, so it installs without internet.
+- Two build options that did nothing useful were removed from both build scripts.
+- The Windows-only parts (the one-copy lock, finding Steam in the registry) have tests.
+- "Close Steam & Apply Icons" and Ignore moved out of the windows into the part of the app
+  that holds its rules.
+- The game list no longer piles up an unused scroll handler on every redraw.
+
 ## [1.5.2] — 2026-10-18
 
 A safety release: every fix below stops the app from losing or hiding your artwork.

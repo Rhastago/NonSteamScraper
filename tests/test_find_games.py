@@ -25,6 +25,7 @@ No test makes a real network call. The only network-touching function tested is
 import os
 import sys
 import json
+import shutil
 import platform
 import time
 import types
@@ -1184,9 +1185,164 @@ def test_write_shortcuts_atomic_failure_leaves_original_and_no_temp(tmp_path, mo
         raise OSError("disk full")
     monkeypatch.setattr(os, "replace", boom)
 
-    assert steam_files.set_shortcut_icons({100: "/a/i.png"}) == 0
+    # N2: a failed write is None, never 0 ("nothing matched").
+    assert steam_files.set_shortcut_icons({100: "/a/i.png"}) is None
     assert sc.read_bytes() == before
     assert sorted(os.listdir(tmp_path)) == ["backup", "shortcuts.vdf"]
+
+
+# ---------------------------------------------------------------------------
+# The icon queue and shortcuts.vdf share one lock (N2, N3, S5)
+# ---------------------------------------------------------------------------
+
+def _queue_env(tmp_path, monkeypatch, shortcuts=None):
+    """A real shortcuts.vdf (game 100) and a real per-account queue, Steam closed."""
+    sc = _setup_shortcuts(tmp_path, monkeypatch, shortcuts or {"0": {"appid": 100, "icon": ""}})
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "111")
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: False)
+    for name in ("old.png", "new.png", "other.png"):
+        _touch(tmp_path / name)
+    return sc
+
+
+def test_a_failed_flush_keeps_the_queue_and_says_so(tmp_path, monkeypatch):
+    """N2: a damaged (or, on Windows, held-open) shortcuts.vdf made the write fail,
+    the flush returned 0, and the queue was cleared anyway — the icons were lost
+    while the results window said they applied."""
+    sc = _queue_env(tmp_path, monkeypatch)
+    steam_files.save_pending_icons({100: str(tmp_path / "new.png")})
+    sc.write_bytes(b"\x00not a vdf")
+
+    assert steam_files.apply_pending_icons() is None, "a failure must not look like 0 written"
+    assert steam_files.load_pending_icons() == {100: str(tmp_path / "new.png")}
+
+
+def test_a_direct_write_drops_that_games_older_queued_icon(tmp_path, monkeypatch):
+    """N3: an icon queued while Steam ran (A), then an Apply with Steam closed (B):
+    the next poll used to flush A over B."""
+    sc = _queue_env(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""},
+                                            "1": {"appid": 200, "icon": ""}})
+    steam_files.save_pending_icons({100: str(tmp_path / "old.png"),
+                                    200: str(tmp_path / "other.png")})
+
+    assert steam_files.set_shortcut_icon(100, str(tmp_path / "new.png")) is True
+    assert steam_files.load_pending_icons() == {200: str(tmp_path / "other.png")}, \
+        "only the directly written game leaves the queue"
+    assert steam_files.apply_pending_icons() == 1
+    assert _read_shortcuts(str(sc))["0"]["icon"] == str(tmp_path / "new.png")
+
+
+def test_the_poll_cannot_flush_an_older_icon_over_a_direct_write_in_flight(tmp_path, monkeypatch):
+    """N3, the race: the poll has read the queue (old icon) when the results
+    window's Apply writes the new one. Without one lock over load -> write -> drop
+    the poll then writes the old icon over the new one."""
+    import threading
+    import time
+    sc = _queue_env(tmp_path, monkeypatch)
+    old, new = str(tmp_path / "old.png"), str(tmp_path / "new.png")
+    steam_files.save_pending_icons({100: old})
+    real_load = steam_files.load_pending_icons
+    poll_has_read = threading.Event()
+
+    def slow_load():
+        out = real_load()
+        if threading.current_thread().name == "poll":
+            poll_has_read.set()
+            time.sleep(0.3)   # the direct write happens now, unless a lock holds it back
+        return out
+    monkeypatch.setattr(steam_files, "load_pending_icons", slow_load)
+
+    poll = threading.Thread(target=steam_files.apply_pending_icons, name="poll")
+    direct = threading.Thread(target=steam_files.set_shortcut_icon, args=(100, new), name="apply")
+    poll.start()
+    assert poll_has_read.wait(2)
+    direct.start()
+    poll.join(5); direct.join(5)
+
+    assert _read_shortcuts(str(sc))["0"]["icon"] == new, "the older queued icon won"
+    assert real_load() == {}
+
+
+def test_an_icon_queued_during_a_flush_stays_queued(tmp_path, monkeypatch):
+    """The flush used to delete the whole queue file at its end, including an icon
+    another thread queued while it was writing."""
+    import threading
+    import time
+    _queue_env(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""},
+                                       "1": {"appid": 200, "icon": ""}})
+    steam_files.save_pending_icons({100: str(tmp_path / "old.png")})
+    real_write = steam_files._write_shortcuts_atomic
+    writing = threading.Event()
+
+    def slow_write(data):
+        writing.set()
+        time.sleep(0.3)
+        real_write(data)
+    monkeypatch.setattr(steam_files, "_write_shortcuts_atomic", slow_write)
+
+    poll = threading.Thread(target=steam_files.apply_pending_icons)
+    poll.start()
+    assert writing.wait(2)
+    later = threading.Thread(target=steam_files.save_pending_icons,
+                             args=({200: str(tmp_path / "other.png")},))
+    later.start()
+    poll.join(5); later.join(5)
+
+    assert steam_files.load_pending_icons() == {200: str(tmp_path / "other.png")}
+
+
+def test_two_queue_writes_at_once_keep_both_icons(tmp_path, monkeypatch):
+    """S5: save_pending_icons is read -> merge -> write; two at once each read the
+    old queue and the second write dropped the first one's icon."""
+    import threading
+    import time
+    monkeypatch.setattr(appfiles, "PENDING_ICONS_FILE", str(tmp_path / "pending"))
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "111")
+    real_write = appfiles.write_text_atomic
+    a_writing = threading.Event()
+
+    def slow_write(path, text):
+        if threading.current_thread().name == "A":
+            a_writing.set()
+            time.sleep(0.3)
+        real_write(path, text)
+    monkeypatch.setattr(appfiles, "write_text_atomic", slow_write)
+
+    a = threading.Thread(target=steam_files.save_pending_icons, args=({1: "/a.png"},), name="A")
+    b = threading.Thread(target=steam_files.save_pending_icons, args=({2: "/b.png"},), name="B")
+    a.start()
+    assert a_writing.wait(2)
+    b.start()
+    a.join(5); b.join(5)
+
+    assert steam_files.load_pending_icons() == {1: "/a.png", 2: "/b.png"}
+
+
+def test_write_or_queue_icons_queues_when_the_write_fails(tmp_path, monkeypatch):
+    """N2 at the end of a fetch / an Undo: a failed write queues the icons for the
+    poll to retry instead of losing them."""
+    sc = _queue_env(tmp_path, monkeypatch)
+    sc.write_bytes(b"\x00not a vdf")
+    assert steam_files.write_or_queue_icons({100: "/g/100_icon.png"}) == (None, True)
+    assert steam_files.load_pending_icons() == {100: "/g/100_icon.png"}
+
+
+def test_write_or_queue_icons_writes_when_closed_and_queues_when_running(tmp_path, monkeypatch):
+    sc = _queue_env(tmp_path, monkeypatch)
+    assert steam_files.write_or_queue_icons({100: "/g/a.png"}) == (1, False)
+    assert _read_shortcuts(str(sc))["0"]["icon"] == "/g/a.png"
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: True)
+    assert steam_files.write_or_queue_icons({100: "/g/b.png"}) == (0, True)
+    assert steam_files.load_pending_icons() == {100: "/g/b.png"}
+
+
+def test_install_option_icon_whose_vdf_write_fails_is_not_ok(tmp_path, monkeypatch):
+    """N2 for "Apply this one": the button must say Failed — retry, not Applied!."""
+    monkeypatch.setattr(artwork, "install_into_slot", lambda *a, **k: True)
+    monkeypatch.setattr(steam_files, "apply_icon", lambda uid, path: None)
+    assert artwork.install_option("/g/1_icon.png", "https://x/i.png", 1, is_icon=True) \
+        == (False, False)
 
 
 # ---------------------------------------------------------------------------
@@ -2689,9 +2845,126 @@ def test_restore_undo_restores_byte_identical_files(tmp_path, monkeypatch):
     # no-op and greys the button (has_restore_point drives it). Untested, an
     # implementation that skips the wipe re-restores on every press.
     assert restore.has_restore_point() is False
-    # ...and the restored file is registered again, so Clear All Artwork still
-    # covers it.
-    assert original in appfiles.load_managed_files()
+    # ...and the restored file is the USER's (it was not the app's when the
+    # snapshot was taken), so it leaves the registry the fetch put it on — else a
+    # later Clear All Artwork deletes the user's own art (N1).
+    assert original not in appfiles.load_managed_files()
+
+
+def test_restore_undo_registers_again_a_restored_file_the_app_had_written(tmp_path, monkeypatch):
+    """The other half of N1: art the app itself wrote before the fetch is still the
+    app's after Undo, so Clear All Artwork keeps covering it."""
+    p = _restore_setup(tmp_path, monkeypatch)
+    original = os.path.join(p["GRID_FOLDER"], "12345p.png")
+    with open(original, "wb") as f:
+        f.write(b"APP-ART")
+    appfiles.register_managed_file(original)
+    restore.snapshot_for_restore(12345)
+    os.remove(original)                                 # the fetch's .jpg replaced it
+    newer = os.path.join(p["GRID_FOLDER"], "12345p.jpg")
+    with open(newer, "wb") as f:
+        f.write(b"NEWER-APP-ART")
+    appfiles.register_managed_file(newer)
+    appfiles.prune_managed_files()                      # a restart: the .png line goes
+    assert original not in appfiles.load_managed_files()
+
+    restore.undo_restore_point()
+
+    with open(original, "rb") as f:
+        assert f.read() == b"APP-ART"
+    assert appfiles.load_managed_files() == {original}
+
+
+def test_undo_then_clear_all_artwork_keeps_the_users_own_file(tmp_path, monkeypatch):
+    """N1 end to end: the user's own 12345p.png, Re-fetch, a fetch writes the
+    app's 12345p.png (same name, registered), Undo puts the user's file back —
+    Clear All Artwork must then leave it alone."""
+    p = _restore_setup(tmp_path, monkeypatch)
+    mine = os.path.join(p["GRID_FOLDER"], "12345p.png")
+    with open(mine, "wb") as f:
+        f.write(b"MY-OWN-ART")
+    restore.clear_game_art(12345)                      # Re-fetch
+    with open(mine, "wb") as f:                        # the fetch's install
+        f.write(b"FETCHED")
+    appfiles.register_managed_file(mine)
+
+    assert restore.undo_restore_point()["games"] == 1
+    deleted, failed = artwork.clear_managed_artwork()
+
+    assert (deleted, failed) == (0, 0)
+    with open(mine, "rb") as f:
+        assert f.read() == b"MY-OWN-ART"
+
+
+def _two_game_restore_point(p):
+    """Games 1 and 2, each with an original cover, snapshotted, then replaced by
+    the app's newer .webp (registered)."""
+    for uid in (1, 2):
+        with open(os.path.join(p["GRID_FOLDER"], f"{uid}p.png"), "wb") as f:
+            f.write(b"OLD%d" % uid)
+        restore.snapshot_for_restore(uid)
+        os.remove(os.path.join(p["GRID_FOLDER"], f"{uid}p.png"))
+        new = os.path.join(p["GRID_FOLDER"], f"{uid}p.webp")
+        with open(new, "wb") as f:
+            f.write(b"NEW%d" % uid)
+        appfiles.register_managed_file(new)
+
+
+def test_undo_a_failed_copy_keeps_that_games_art_and_its_restore_point(tmp_path, monkeypatch):
+    """N9: Undo used to delete the current art first and wipe the store at the
+    end even when a copy back failed (disk full, a Windows lock) — the game ended
+    with neither its new art nor its old one."""
+    p = _restore_setup(tmp_path, monkeypatch)
+    _two_game_restore_point(p)
+    real_copy2 = shutil.copy2
+
+    def full_disk(src, dst, *a, **k):
+        if os.path.basename(src) == "2p.png":
+            raise OSError(28, "No space left on device")
+        return real_copy2(src, dst, *a, **k)
+    monkeypatch.setattr(shutil, "copy2", full_disk)
+
+    summary = restore.undo_restore_point()
+
+    grid = sorted(os.listdir(p["GRID_FOLDER"]))
+    assert grid == ["1p.png", "2p.webp"], "game 2 keeps its current art; no partial file"
+    assert (summary["games"], summary["failed"]) == (1, 1)
+    assert restore.has_restore_point() is True, "game 2's restore point must survive"
+    assert list(_read_manifest(p["RESTORE_FOLDER"])["entries"]) == ["2"]
+
+    monkeypatch.setattr(shutil, "copy2", real_copy2)
+    assert restore.undo_restore_point()["games"] == 1      # Undo pressed again
+    assert sorted(os.listdir(p["GRID_FOLDER"])) == ["1p.png", "2p.png"]
+    assert restore.has_restore_point() is False
+
+
+def test_undo_copies_back_before_it_deletes(tmp_path, monkeypatch):
+    """The order is the fix: every saved file of a game is back before any of that
+    game's current files is deleted."""
+    p = _restore_setup(tmp_path, monkeypatch)
+    _two_game_restore_point(p)
+    events = []
+    real_copy2, real_remove = shutil.copy2, os.remove
+    monkeypatch.setattr(shutil, "copy2", lambda s, d, *a, **k:
+                        events.append(("copy", os.path.basename(s))) or real_copy2(s, d, *a, **k))
+    monkeypatch.setattr(os, "remove", lambda path:
+                        events.append(("remove", os.path.basename(path))) or real_remove(path))
+    restore.undo_restore_point()
+    assert events.index(("copy", "1p.png")) < events.index(("remove", "1p.webp"))
+    assert events.index(("copy", "2p.png")) < events.index(("remove", "2p.webp"))
+
+
+def test_undo_queues_the_icons_when_the_vdf_write_fails(tmp_path, monkeypatch):
+    p = _restore_setup(tmp_path, monkeypatch)
+    _write_shortcuts(p["SHORTCUTS_PATH"], {"0": {"appid": 12345, "icon": "/old.png"}})
+    restore.snapshot_for_restore(12345)
+    monkeypatch.setattr(steam_env, "is_steam_running", lambda *a, **k: False)
+    monkeypatch.setattr(steam_files, "set_shortcut_icons", lambda m: None)
+    queued = []
+    monkeypatch.setattr(steam_files, "save_pending_icons", lambda m: queued.append(dict(m)))
+    summary = restore.undo_restore_point()
+    assert summary["icon_write_failed"] is True and summary["queued"] is True
+    assert queued == [{12345: "/old.png"}]
 
 
 def test_restore_undo_removes_fetched_file_with_different_extension(tmp_path, monkeypatch):
@@ -3518,3 +3791,420 @@ def test_full_reset_leaves_the_lock_file_alone(lock_file, tmp_path, monkeypatch)
         monkeypatch.setattr(appfiles, name, str(tmp_path / name))
     appfiles.full_reset()
     assert lock_file.exists(), "deleting the held lock file would let a second copy start"
+
+
+# ---------------------------------------------------------------------------
+# get_artwork: an error is not "nothing exists" (N6); Exclude is strict (N5);
+# a malformed record is skipped (N10)
+# ---------------------------------------------------------------------------
+
+def _artwork_calls(monkeypatch, answer):
+    """Patch _sgdb_get; `answer(params)` returns the response body (or raises).
+    Returns the list of params of every request get_artwork made."""
+    calls = []
+
+    def fake(url, headers=None, params=None, timeout=None, retries=2):
+        calls.append(dict(params or {}))
+        body = answer(params or {})
+        if isinstance(body, Exception):
+            raise body
+        return types.SimpleNamespace(json=lambda b=body: b)
+    monkeypatch.setattr(sgdb, "_sgdb_get", fake)
+    monkeypatch.setattr(appfiles, "load_api_key", lambda: "KEY")
+    return calls
+
+
+@pytest.mark.parametrize("body", [
+    {"success": False, "errors": ["Too many requests"]},   # a 429 that outlasted the retries
+    ValueError("<html>502 Bad Gateway</html>"),             # a body that is not JSON
+    requests.exceptions.Timeout("read timed out"),
+])
+def test_get_artwork_returns_none_when_steamgriddb_did_not_answer(monkeypatch, body):
+    _artwork_calls(monkeypatch, lambda p: body)
+    assert sgdb.get_artwork(1, "icons", prefs=dict(appfiles.DEFAULT_PREFS)) is None
+
+
+def test_get_artwork_returns_an_empty_list_when_nothing_exists(monkeypatch):
+    _artwork_calls(monkeypatch, lambda p: {"success": True, "data": []})
+    assert sgdb.get_artwork(1, "icons", prefs=dict(appfiles.DEFAULT_PREFS)) == []
+
+
+def test_get_artwork_keeps_what_one_tier_found_when_another_failed(monkeypatch):
+    prefs = dict(appfiles.DEFAULT_PREFS, nsfw="must_have")
+    _artwork_calls(monkeypatch, lambda p: ValueError("boom") if p.get("nsfw") == "true"
+                   else {"success": True, "data": [{"url": "https://x/a.png"}]})
+    assert [r["url"] for r in sgdb.get_artwork(1, "grids", prefs=prefs)] == ["https://x/a.png"]
+
+
+def test_get_artwork_never_falls_back_to_an_unfiltered_search(monkeypatch):
+    """N5: when every filtered search came back empty, an unfiltered last resort
+    ran and its result — here a logo style the user excluded — was applied."""
+    prefs = dict(appfiles.DEFAULT_PREFS, logo_white="never", nsfw="never")
+    calls = _artwork_calls(monkeypatch, lambda p: {"success": True, "data": [
+        {"url": "https://x/white.png", "style": "white"}]})
+    assert sgdb.get_artwork(1, "logos", prefs=prefs) == []
+    assert all(c.get("nsfw") == "false" for c in calls), \
+        f"every request must carry the Exclude parameters: {calls}"
+
+
+def test_get_artwork_skips_a_malformed_record(monkeypatch):
+    _artwork_calls(monkeypatch, lambda p: {"success": True, "data": [
+        {"id": 5}, "junk", {"url": "https://x/good.png"}]})
+    out = sgdb.get_artwork(1, "heroes", prefs=dict(appfiles.DEFAULT_PREFS))
+    assert [r["url"] for r in out] == ["https://x/good.png"]
+
+
+def test_steam_official_images_with_unexpected_metadata_is_empty():
+    assert sgdb.steam_official_images("10", {"library_capsule_full": "not-a-dict"}) == {}
+
+
+def test_download_all_artwork_marks_a_slot_steamgriddb_did_not_answer(tmp_path, monkeypatch):
+    """N6: the log said "Artwork saved" over a slot that silently stayed empty."""
+    _install_fetch_mocks(monkeypatch, tmp_path, {})
+    monkeypatch.setattr(sgdb, "get_steam_platform_data", lambda sgdb_id: None)
+    monkeypatch.setattr(sgdb, "get_artwork", lambda sgdb_id, art_type, prefs=None, dimensions=None:
+                        None if art_type == "icons" else [_static(f"https://x/{art_type}.png")])
+    art = artwork.download_all_artwork(1, 77, prefs=dict(appfiles.DEFAULT_PREFS), defer_icon=True)
+    assert art.slots["icons"] is None
+    assert art.unanswered == ["Icon"]
+    assert art.failed_labels() == []
+
+
+class _ClosingResp(_FakeStreamResp):
+    closed = 0
+
+    def close(self):
+        _ClosingResp.closed += 1
+
+
+@pytest.mark.parametrize("status,chunks,boom", [(404, (), False), (200, (b"abc",), False),
+                                                (200, (b"abc",), True)])
+def test_download_artwork_always_closes_its_response(tmp_path, monkeypatch, status, chunks, boom):
+    """N19: a non-200 or an error left the streamed connection open."""
+    _ClosingResp.closed = 0
+    resp = _ClosingResp(status, chunks, {"Content-Length": "3"})
+    if boom:
+        def broken(chunk_size):
+            raise requests.exceptions.ConnectionError("dropped")
+        resp.iter_content = broken
+    monkeypatch.setattr(sgdb, "http_get", lambda *a, **k: resp)
+    artwork.download_artwork("https://x/a.png", str(tmp_path / "a.png"), register=False)
+    assert _ClosingResp.closed == 1
+
+
+# ---------------------------------------------------------------------------
+# "Needs artwork" = no cover; a .part never counts (N7, ruling Q2)
+# ---------------------------------------------------------------------------
+
+def _library_with_grid(tmp_path, monkeypatch, files):
+    grid = tmp_path / "grid"
+    grid.mkdir()
+    for f in files:
+        (grid / f).write_bytes(b"x")
+    sc = tmp_path / "shortcuts.vdf"
+    _write_shortcuts(str(sc), {str(i): {"appid": uid, "AppName": f"G{uid}"}
+                               for i, uid in enumerate((1, 2, 3, 4, 5, 12345, 123456))})
+    monkeypatch.setattr(appfiles, "SKIP_FILE", str(tmp_path / "skip"))
+    monkeypatch.setattr(steam_env, "GRID_FOLDER", str(grid))
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", str(sc))
+    return {g["app_id"]: g["has_art"] for g in steam_files.get_non_steam_games()}
+
+
+def test_a_game_has_art_only_when_it_has_a_cover(tmp_path, monkeypatch):
+    has_art = _library_with_grid(tmp_path, monkeypatch, [
+        "1p.png",                  # portrait cover
+        "2.jpg",                   # wide cover only — the row shows it as the cover
+        "3_hero.png",              # a lone hero (N7: this used to count)
+        "4_logo.png", "4_icon.ico",
+        "5p.png.part",             # a crash-left download (N7: this used to count)
+        "123456p.png",             # game 123456 — never game 12345 (prefix pair)
+    ])
+    assert has_art == {1: True, 2: True, 3: False, 4: False, 5: False,
+                       12345: False, 123456: True}
+
+
+def test_row_thumbnail_never_picks_an_unfinished_download(tmp_path):
+    names = ["7p.png.part", "7.jpg"]
+    assert artwork.row_thumbnail_path(str(tmp_path), 7, names) == str(tmp_path / "7.jpg")
+    assert artwork.row_thumbnail_path(str(tmp_path), 8, ["8p.webp.part"]) is None
+
+
+def test_download_all_artwork_records_only_previews_that_downloaded(tmp_path, monkeypatch):
+    """N8: the preview download result was ignored, so a failed preview's path was
+    recorded and the results card could show a stale or missing file for it."""
+    _install_fetch_mocks(monkeypatch, tmp_path, {"grids": [
+        _static("https://x/a.png"), _static("https://x/b.png"), _static("https://x/c.png")]})
+    monkeypatch.setattr(sgdb, "get_steam_platform_data", lambda sgdb_id: None)
+
+    def flaky(url, save_path, register=True):
+        if save_path.endswith("_1.png"):
+            return False
+        with open(save_path, "wb") as f:
+            f.write(b"")
+        return True
+    monkeypatch.setattr(artwork, "download_artwork", flaky)
+    art = artwork.download_all_artwork(1, 9, prefs=dict(appfiles.DEFAULT_PREFS), defer_icon=True)
+    thumbs = art.slots["grids"]["thumb_paths"]
+    assert thumbs[1] is None and thumbs[0] and thumbs[2]
+    assert art.slots["grids"]["cache_base"] == os.path.join(appfiles.CACHE_FOLDER, "9p")
+
+
+def test_get_non_steam_games_raises_its_own_error_for_a_damaged_file(tmp_path, monkeypatch):
+    sc = tmp_path / "shortcuts.vdf"
+    sc.write_bytes(b"\x00shortcuts\x00\x00\x01broken")
+    monkeypatch.setattr(steam_env, "SHORTCUTS_PATH", str(sc))
+    with pytest.raises(steam_files.ShortcutsUnreadable):
+        steam_files.get_non_steam_games()
+
+
+# ---------------------------------------------------------------------------
+# winplace.place_over_parent (N18)
+# ---------------------------------------------------------------------------
+
+def test_place_over_parent_centres_over_the_parent_when_it_fits():
+    assert winplace.place_over_parent(100, 100, 800, 600, 0, 0, 1920, 1080, 500, 580) \
+        == (500, 580, 250, 110)
+
+
+def test_place_over_parent_pulls_the_dialog_inside_the_work_area():
+    # the main window hangs off the right and bottom edges of a 1280x800 Deck screen
+    w, h, x, y = winplace.place_over_parent(1000, 500, 700, 500, 0, 0, 1280, 800, 500, 580)
+    assert (w, h) == (500, 580)
+    assert x + w <= 1280 and y + h <= 800 and x >= 0 and y >= 0
+    # the title bar sits above the content: the content's bottom keeps 40 px of room
+    assert y + h + 40 <= 800
+
+
+def test_place_over_parent_leaves_room_for_the_title_bar_at_full_height():
+    """Walk 3: on a simulated 1280x800 screen a full-height dialog ended 28 px below
+    the screen — the position is the frame's and the title bar adds above."""
+    w, h, x, y = winplace.place_over_parent(291, 74, 700, 720, 0, 0, 1280, 800, 509, 928)
+    assert h == 720 and y + h + 40 <= 800
+
+
+def test_place_over_parent_shrinks_only_to_the_work_area():
+    w, h, x, y = winplace.place_over_parent(0, 0, 400, 300, 0, 0, 400, 300, 500, 580)
+    assert w <= 400 and h <= 300
+    assert 0 <= x and x + w <= 400 and 0 <= y and y + h <= 300
+
+
+# ---------------------------------------------------------------------------
+# N15 — the vdf backup and the Undo manifest are written atomically
+# ---------------------------------------------------------------------------
+
+def test_the_first_vdf_backup_is_never_left_truncated(tmp_path, monkeypatch):
+    """N15: the per-account backup was a plain copy; one cut short (crash, disk
+    full) was then kept for good, since a backup is made only on the first write."""
+    sc = _setup_shortcuts(tmp_path, monkeypatch, {"0": {"appid": 100, "icon": ""}})
+    monkeypatch.setattr(steam_env, "STEAM_USER_ID", "111")
+    real_copy2 = shutil.copy2
+
+    def half_copy(src, dst, *a, **k):
+        with open(dst, "wb") as f:
+            f.write(open(src, "rb").read()[:5])
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(shutil, "copy2", half_copy)
+    assert steam_files.set_shortcut_icons({100: "/a.png"}) is None
+    assert os.listdir(tmp_path / "backup") == [], "no partial backup may be left"
+    monkeypatch.setattr(shutil, "copy2", real_copy2)
+    assert steam_files.set_shortcut_icons({100: "/a.png"}) == 1
+    assert (tmp_path / "backup" / "shortcuts.vdf.111.bak").read_bytes() != b""
+
+
+def test_the_undo_manifest_goes_through_the_atomic_writer(tmp_path, monkeypatch):
+    p = _restore_setup(tmp_path, monkeypatch)
+    writes = []
+    real = appfiles.write_text_atomic
+    monkeypatch.setattr(appfiles, "write_text_atomic",
+                        lambda path, text: writes.append(path) or real(path, text))
+    restore.snapshot_for_restore(1)
+    assert writes == [os.path.join(p["RESTORE_FOLDER"], "manifest.json")]
+    assert sorted(os.listdir(p["RESTORE_FOLDER"])) == ["1", "manifest.json"], "no temp file left"
+
+
+# ---------------------------------------------------------------------------
+# The Windows-only branches (N24) — never run on this Linux suite before
+# ---------------------------------------------------------------------------
+
+def test_the_one_copy_lock_uses_msvcrt_on_windows(tmp_path, monkeypatch):
+    calls = []
+    fake = types.ModuleType("msvcrt")
+    fake.LK_NBLCK = 2
+
+    def locking(fd, mode, nbytes):
+        calls.append((mode, nbytes))
+        if len(calls) > 1:
+            raise PermissionError(13, "Permission denied")   # held by the first copy
+    fake.locking = locking
+    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(appfiles, "LOCK_FILE", str(tmp_path / "lock"))
+    try:
+        assert appfiles.acquire_instance_lock(wait=0) is True
+        assert calls == [(2, 1)], "a non-blocking lock on one byte"
+        saved, appfiles._instance_lock = appfiles._instance_lock, None
+        assert appfiles.acquire_instance_lock(wait=0) is False, "a second copy is refused"
+        appfiles._instance_lock = saved
+    finally:
+        appfiles.release_instance_lock()
+
+
+def _fake_winreg(install_paths):
+    """A winreg stand-in: OpenKey on hive i returns install_paths[i] (an
+    OSError instance is raised instead)."""
+    reg = types.ModuleType("winreg")
+    reg.HKEY_LOCAL_MACHINE = "HKLM"
+    order = []
+
+    def open_key(root, sub):
+        order.append(sub)
+        value = install_paths[len(order) - 1]
+        if isinstance(value, Exception):
+            raise value
+        return value
+    reg.OpenKey = open_key
+    reg.QueryValueEx = lambda key, name: (key, 1)
+    reg.CloseKey = lambda key: None
+    reg.order = order
+    return reg
+
+
+def test_steam_is_found_through_the_registry_on_windows(monkeypatch):
+    reg = _fake_winreg([OSError(2, "not found"), r"D:\Games\Steam"])
+    monkeypatch.setitem(sys.modules, "winreg", reg)
+    assert steam_env._windows_steam_install() == r"D:\Games\Steam"
+    assert reg.order == [r"SOFTWARE\WOW6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"]
+
+
+def test_no_registry_entry_means_no_install_path(monkeypatch):
+    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg([OSError(2, "x"), OSError(2, "x")]))
+    assert steam_env._windows_steam_install() is None
+    monkeypatch.setitem(sys.modules, "winreg", None)          # import fails off Windows
+    assert steam_env._windows_steam_install() is None
+
+
+def test_get_steam_path_on_windows_prefers_the_registry_install(tmp_path, monkeypatch):
+    install = tmp_path / "Steam"
+    (install / "userdata").mkdir(parents=True)
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    monkeypatch.setattr(steam_env, "_windows_steam_install", lambda: str(install))
+    assert steam_env.get_steam_path() == os.path.join(str(install), "userdata")
+
+
+def test_get_steam_path_on_windows_falls_back_to_program_files(tmp_path, monkeypatch):
+    pf86 = tmp_path / "pf86"
+    (pf86 / "Steam" / "userdata").mkdir(parents=True)
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    monkeypatch.setattr(steam_env, "_windows_steam_install", lambda: None)
+    monkeypatch.setattr(os.path, "expandvars",
+                        lambda s: s.replace("%PROGRAMFILES(X86)%", str(pf86))
+                                   .replace("%PROGRAMFILES%", str(tmp_path / "pf"))
+                                   .replace("\\", os.sep))
+    assert steam_env.get_steam_path() == os.path.join(str(pf86), "Steam", "userdata")
+
+
+def test_steam_running_looks_for_steam_exe_on_windows(monkeypatch):
+    procs = [types.SimpleNamespace(info={"name": "Steam.exe"})]
+    monkeypatch.setattr(steam_env, "PSUTIL_AVAILABLE", True)
+    monkeypatch.setattr(steam_env.psutil, "process_iter", lambda attrs: iter(procs))
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    assert steam_env.is_steam_running(force=True) is True
+    procs[0] = types.SimpleNamespace(info={"name": "steam"})   # a Linux name is not Steam here
+    assert steam_env.is_steam_running(force=True) is False
+
+
+# ---------------------------------------------------------------------------
+# Options per artwork (operator rulings Q10, Q11): 1 · 3 · 5 · 7 · 10, all previewed
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value,expected", [("1", 1), ("10", 10), (7, 7), ("4", 5),
+                                            ("junk", 5), (None, 5)])
+def test_option_count_accepts_only_the_offered_counts(value, expected):
+    assert appfiles.option_count({"options": value}) == expected
+    assert appfiles.option_count({}) == 5, "an older prefs file has no such key"
+
+
+@pytest.mark.parametrize("count", [1, 3, 10])
+def test_download_all_artwork_offers_and_previews_that_many_options(tmp_path, monkeypatch, count):
+    """Every option is previewed during the fetch (Q11): the results window used to
+    download options 4 and 5 only when ▶ reached them."""
+    _install_fetch_mocks(monkeypatch, tmp_path, {"grids": [
+        _static(f"https://x/g{i}.png") for i in range(12)]})
+    monkeypatch.setattr(sgdb, "get_steam_platform_data", lambda sgdb_id: None)
+    previews = []
+    real = artwork.download_artwork
+
+    def spy(url, save_path, register=True):
+        if os.path.dirname(save_path) == appfiles.CACHE_FOLDER:
+            previews.append(os.path.basename(save_path))
+        return real(url, save_path, register)
+    monkeypatch.setattr(artwork, "download_artwork", spy)
+    prefs = dict(appfiles.DEFAULT_PREFS, options=str(count))
+    art = artwork.download_all_artwork(1, 9, prefs=prefs, defer_icon=True)
+    slot = art.slots["grids"]
+    assert len(slot["option_urls"]) == count
+    assert len(slot["thumb_paths"]) == count and all(slot["thumb_paths"])
+    assert sorted(p for p in previews if p.startswith("9p_")) == \
+        sorted(f"9p_{i}.png" for i in range(count))
+
+
+def test_get_artwork_keeps_widening_until_it_has_the_chosen_count(monkeypatch):
+    prefs = dict(appfiles.DEFAULT_PREFS, nsfw="must_have")
+    six = {"success": True, "data": [{"url": f"https://x/{i}.png"} for i in range(6)]}
+    more = {"success": True, "data": [{"url": f"https://x/m{i}.png"} for i in range(6)]}
+    calls = _artwork_calls(monkeypatch, lambda p: six if p.get("nsfw") == "true" else more)
+    assert len(sgdb.get_artwork(1, "grids", prefs=dict(prefs, options="5"))) == 6
+    assert len(calls) == 1, "6 >= 5: no further search"
+    calls.clear()
+    assert len(sgdb.get_artwork(1, "grids", prefs=dict(prefs, options="10"))) == 12
+    assert len(calls) == 2, "6 < 10: the popularity fill runs"
+
+
+# ---------------------------------------------------------------------------
+# Thumbnail previews (ruling Q14), with the full-size path kept as a switch
+# ---------------------------------------------------------------------------
+
+def test_preview_url_uses_the_thumbnail_only_where_it_is_safe(monkeypatch):
+    static = {"url": "https://x/full.png", "thumb": "https://x/thumb/t.jpg", "mime": "image/png"}
+    anim = {"url": "https://x/a.webp", "thumb": "https://x/thumb/a.jpg", "mime": "image/webp"}
+    steam = {"url": "https://steam/c.jpg", "mime": "image/jpeg", "steam_official": True}
+    assert artwork.preview_url(static, "grids") == "https://x/thumb/t.jpg"
+    assert artwork.preview_url(static, "heroes") == "https://x/thumb/t.jpg"
+    assert artwork.preview_url(anim, "grids") == "https://x/a.webp", "a thumbnail would not animate"
+    assert artwork.preview_url(steam, "grids") == "https://steam/c.jpg", "Steam art has no thumbnail"
+    assert artwork.preview_url(static, "icons") == "https://x/full.png", "icon thumbnails can be 48 px"
+    assert artwork.preview_url(dict(static, thumb=""), "logos") == "https://x/full.png"
+    # an animated PNG (served as image/png) has a .webm video thumbnail — seen live
+    apng = {"url": "https://x/a7e8.png", "thumb": "https://x/thumb/a7e8.webm", "mime": "image/png"}
+    assert artwork.preview_url(apng, "grids") == "https://x/a7e8.png", "a video cannot be previewed"
+    assert artwork.preview_url(static, "grids", full=True) == "https://x/full.png", \
+        "Settings → Full-size previews"
+
+
+def test_the_fetch_previews_thumbnails_but_applies_and_offers_the_full_image(tmp_path, monkeypatch):
+    _install_fetch_mocks(monkeypatch, tmp_path, {"heroes": [
+        dict(_static(f"https://x/h{i}.png"), thumb=f"https://x/hero_thumb/h{i}.jpg")
+        for i in range(3)]})
+    monkeypatch.setattr(sgdb, "get_steam_platform_data", lambda sgdb_id: None)
+    got = []
+    real = artwork.download_artwork
+    monkeypatch.setattr(artwork, "download_artwork", lambda url, save_path, register=True:
+                        got.append((url, os.path.basename(save_path))) or
+                        real(url, save_path, register))
+    prefs = dict(appfiles.DEFAULT_PREFS, options="3")
+    slot = artwork.download_all_artwork(1, 9, prefs=prefs, defer_icon=True).slots["heroes"]
+    assert ("https://x/h0.png", "9_hero.png") in got, "Apply-on-fetch installs the full image"
+    assert sorted(g for g in got if "_hero_" in g[1]) == [
+        (f"https://x/hero_thumb/h{i}.jpg", f"9_hero_{i}.jpg") for i in range(3)]
+    assert slot["option_urls"] == [f"https://x/h{i}.png" for i in range(3)]
+    assert slot["preview_urls"] == [f"https://x/hero_thumb/h{i}.jpg" for i in range(3)]
+
+
+
+def test_full_size_previews_setting_previews_the_full_images(tmp_path, monkeypatch):
+    _install_fetch_mocks(monkeypatch, tmp_path, {"heroes": [
+        dict(_static("https://x/h0.png"), thumb="https://x/hero_thumb/h0.jpg")]})
+    monkeypatch.setattr(sgdb, "get_steam_platform_data", lambda sgdb_id: None)
+    prefs = dict(appfiles.DEFAULT_PREFS, full_previews="yes")
+    slot = artwork.download_all_artwork(1, 9, prefs=prefs, defer_icon=True).slots["heroes"]
+    assert slot["preview_urls"] == ["https://x/h0.png"]

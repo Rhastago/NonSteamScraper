@@ -111,8 +111,10 @@ class UIMixin:
         return tk.Label(parent, text=text, **kw)
 
 
-    def _make_scrollable_frame(self, parent, padx=10, pady=0):
-        """Return a (canvas, body_frame) pair inside a scrollable container."""
+    def _make_scrollable_frame(self, parent, padx=10, pady=0, max_width=None):
+        """Return a (canvas, body_frame) pair inside a scrollable container. With
+        max_width the body is never wider than that and is centred in a wider
+        canvas (the Results cards when maximized, ruling Q17)."""
         t = self.theme
         container = tk.Frame(parent, bg=t["bg"])
         container.pack(fill="both", expand=True, padx=padx, pady=pady)
@@ -121,7 +123,11 @@ class UIMixin:
         body = tk.Frame(canvas, bg=t["bg"])
         body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         win = canvas.create_window((0, 0), window=body, anchor="nw")
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
+        def fit_body(e):
+            width = min(e.width, max_width) if max_width else e.width
+            canvas.itemconfig(win, width=width)
+            canvas.coords(win, (e.width - width) // 2, 0)
+        canvas.bind("<Configure>", fit_body)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -129,11 +135,56 @@ class UIMixin:
 
 
     def _add_tooltip(self, widget, text):
-        """Show a small tooltip near the cursor when hovering over widget."""
+        """Show a small tooltip near the cursor when hovering over widget. One tip
+        at a time: show() first removes a tip already on screen. Tk can send a
+        second <Enter> with no <Leave> between (it does when a menu's grab is
+        released — closing the Sort menu next to the ▲/▼ button), and the first tip
+        used to be orphaned on screen until restart (N11). A tip shows only while the
+        real pointer is over the widget, and goes as soon as it is not, even when no
+        <Leave> arrives. A click, the widget being unmapped or destroyed also hide it. `text` may be a callable; it is read on
+        every show, so after a click that changed the meaning (▲/▼) the next hover
+        shows the new text."""
         tip = None
+
+        def hide(event=None):
+            nonlocal tip
+            if tip is not None:
+                try:
+                    tip.destroy()
+                except tk.TclError:
+                    pass
+                tip = None
+
+        def pointer_inside():
+            """Whether the real pointer is over `widget` (or the tip inside it)."""
+            try:
+                over = widget.winfo_containing(*widget.winfo_pointerxy())
+            except Exception:
+                return False
+            return over is not None and (over == widget or
+                                         str(over).startswith(str(widget) + "."))
+
+        def watch():
+            # A tip that appeared with no matching <Leave> to come — Tk sends a
+            # crossing event when another window's grab is released (closing the
+            # results window, a menu) — goes the moment the pointer is elsewhere.
+            # Seen in the 1.5.3 walk: the ▲/▼ tip stayed up with the pointer on the
+            # game list after the results window closed.
+            if tip is None:
+                return
+            if not pointer_inside():
+                hide()
+                return
+            try:
+                widget.after(300, watch)
+            except tk.TclError:
+                pass
 
         def show(event):
             nonlocal tip
+            hide()
+            if not pointer_inside():
+                return   # a crossing event while the pointer is not on the widget
             txt = text() if callable(text) else text
             tip = tk.Toplevel(widget)
             tip.wm_overrideredirect(True)
@@ -141,15 +192,14 @@ class UIMixin:
             tk.Label(tip, text=txt, font=(FONT_UI, 9),
                      bg="#ffffe0", fg="#1a1a1a", relief="solid", borderwidth=1,
                      padx=4, pady=2).pack()
-
-        def hide(event):
-            nonlocal tip
-            if tip:
-                tip.destroy()
-                tip = None
+            widget.after(300, watch)
 
         widget.bind("<Enter>", show)
         widget.bind("<Leave>", hide)
+        # add="+": keep any other binding on these events; a widget-level binding
+        # runs before the Button class binding, so a click still presses it.
+        for seq in ("<ButtonPress>", "<Unmap>", "<Destroy>"):
+            widget.bind(seq, hide, add="+")
 
 
     def relaunch_app(self):

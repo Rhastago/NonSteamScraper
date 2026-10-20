@@ -163,3 +163,19 @@ def test_importing_the_backend_touches_nothing_under_home(tmp_path):
     assert r.returncode == 0, r.stderr
     after = sorted(str(p.relative_to(home)) for p in home.rglob("*"))
     assert after == before, f"import created {sorted(set(after) - set(before))}"
+
+
+def test_a_switch_whose_grid_folder_cannot_be_made_switches_nothing(two_accounts, monkeypatch):
+    """N15: the globals were rebound BEFORE makedirs, so a makedirs that raised left
+    a half-done switch pointing at the new account."""
+    grid_a, vdf_a = _paths(two_accounts, "111")
+    real_makedirs = os.makedirs
+
+    def refuse(path, *a, **k):
+        if "222" in str(path):
+            raise PermissionError(13, "Permission denied")
+        return real_makedirs(path, *a, **k)
+    monkeypatch.setattr(os, "makedirs", refuse)
+    assert steam_env.set_active_user("222") is False
+    assert (steam_env.STEAM_USER_ID, steam_env.GRID_FOLDER, steam_env.SHORTCUTS_PATH) == \
+        ("111", grid_a, vdf_a)

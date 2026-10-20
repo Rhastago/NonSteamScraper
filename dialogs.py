@@ -13,8 +13,9 @@ from tkinter import messagebox
 from appcommon import VERSION, open_url
 from theming import FONT_UI
 import operations
+import sgdb
 from sgdb import search_sgdb_autocomplete
-from appfiles import load_prefs, save_prefs, DEFAULT_PREFS
+from appfiles import load_prefs, save_prefs, DEFAULT_PREFS, OPTION_COUNTS
 
 
 # --- Flash-free popup reveal ------------------------------------------------
@@ -130,11 +131,9 @@ def show_info(app):
 
     app._bind_wheel_to_canvas(canvas, canvas)
 
-    # Size + position in ONE geometry call (no intermediate size->position step),
-    # then reveal flash-free.
-    x = app.window.winfo_x() + (app.window.winfo_width() // 2) - 260
-    y = app.window.winfo_y() + (app.window.winfo_height() // 2) - 250
-    info.geometry(f"520x500+{x}+{y}")
+    # Size from the content, position in ONE geometry call (no intermediate
+    # size->position step), kept on screen (N18, Q16), then reveal flash-free.
+    app._fit_dialog(info, canvas, body)
     _reveal(info)
     app._open_modal(info)
 
@@ -151,6 +150,13 @@ def open_sgdb_search(app, game):
     dlg.config(bg=t["bg"])
 
     def _close_dlg(evt=None):
+        # A typing timer still pending would run its search on the closed dialog.
+        if _after_id[0]:
+            try:
+                dlg.after_cancel(_after_id[0])
+            except tk.TclError:
+                pass
+            _after_id[0] = None
         app._close_modal(dlg)
         dlg.destroy()
 
@@ -179,7 +185,9 @@ def open_sgdb_search(app, game):
     list_frame.pack(fill="both", expand=True, padx=12, pady=4)
     scrollbar = tk.Scrollbar(list_frame)
     scrollbar.pack(side="right", fill="y")
-    listbox = tk.Listbox(list_frame, font=(FONT_UI, 10),
+    # width in characters, so the window (sized from its content, Q16) scales
+    # with the font like the rest of it
+    listbox = tk.Listbox(list_frame, font=(FONT_UI, 10), width=44,
                           bg=t["entry_bg"], fg=t["fg"],
                           selectbackground=t["select_bg"],
                           selectforeground=t["fg"],
@@ -192,6 +200,9 @@ def open_sgdb_search(app, game):
 
     results = []
     _after_id = [None]
+    # Numbers every search; only the newest one may fill the list (N14: an older,
+    # slower answer could overwrite the results of the query typed after it).
+    _search_seq = [0]
 
     def _apply(evt=None):
         sel = listbox.curselection()
@@ -214,12 +225,26 @@ def open_sgdb_search(app, game):
         app.start_fetch(games=[game])
 
     def _do_search(query):
+        try:
+            if not dlg.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        _search_seq[0] += 1
+        seq = _search_seq[0]
         status_lbl.config(text="Searching…")
         dlg.update_idletasks()
 
         def worker():
-            hits = search_sgdb_autocomplete(query)
+            outcome, hits = search_sgdb_autocomplete(query)
             def update():
+                # Tk thread. The dialog may have closed, or a newer search started,
+                # while this one was out (N14).
+                try:
+                    if seq != _search_seq[0] or not dlg.winfo_exists():
+                        return
+                except tk.TclError:
+                    return
                 results.clear()
                 listbox.delete(0, "end")
                 if hits:
@@ -228,10 +253,18 @@ def open_sgdb_search(app, game):
                         meta = "  ·  ".join(x for x in [h.get("year"), h.get("type")] if x)
                         listbox.insert("end", f"{h['name']}  ({meta})" if meta else h["name"])
                     status_lbl.config(text=f"{len(hits)} result(s)")
+                elif outcome == sgdb.SEARCH_REFUSED:
+                    status_lbl.config(text="SteamGridDB did not accept your API key — "
+                                           "check it in Settings.")
+                elif outcome == sgdb.SEARCH_ERROR:
+                    status_lbl.config(text="Couldn't reach SteamGridDB — check your "
+                                           "connection and try again.")
                 else:
                     status_lbl.config(text="No results found")
+            # Marshalled through the main window, which outlives this dialog (a
+            # closed dialog's after() raises).
             try:
-                dlg.after(0, update)
+                app.window.after(0, update)
             except Exception:
                 pass
 
@@ -278,11 +311,9 @@ def open_sgdb_search(app, game):
     app._btn(btn_bar, "Select", _apply, primary=True).pack(side="left")
     app._btn(btn_bar, "Cancel", _close_dlg).pack(side="left", padx=(6, 0))
 
-    # Centre over parent (size + position in one call), then reveal flash-free.
-    app.window.update_idletasks()
-    px = app.window.winfo_x() + app.window.winfo_width() // 2 - 210
-    py = app.window.winfo_y() + app.window.winfo_height() // 2 - 180
-    dlg.geometry(f"420x360+{px}+{py}")
+    # Size from the content, centre over the main window (one call), then reveal
+    # flash-free (Q16).
+    app._fit_dialog(dlg)
     _reveal(dlg)
 
     # Kick off initial search with the game's current name
@@ -314,6 +345,8 @@ def open_art_prefs(app):
 
     def do_reset():
         for k, v in DEFAULT_PREFS.items():
+            if k == "full_previews":
+                continue   # a Settings checkbox, not an art style
             if k in vars_:
                 vars_[k].set(v)
         for fn in update_fns.values():
@@ -399,12 +432,45 @@ def open_art_prefs(app):
                  bg=t["bg"], fg=t["fg"], anchor="w").pack(fill="x", padx=5, pady=(10, 1))
         tk.Frame(body, bg=t["muted"], height=1).pack(fill="x", padx=5, pady=(0, 4))
 
+    def options_row():
+        """How many options each artwork gets (Q10): 1 · 3 · 5 · 7 · 10."""
+        var = vars_["options"]
+        row = tk.Frame(body, bg=t["bg"])
+        row.pack(fill="x", pady=2, padx=5)
+        lbl = tk.Label(row, text="Options per artwork", font=(FONT_UI, 10), bg=t["bg"],
+                       fg=t["fg"], width=18, anchor="w")
+        lbl.pack(side="left")
+        app._add_tooltip(lbl, "How many choices each artwork gets in the results screen. "
+                              "1 = just the top pick (Steam's own art when the game is on Steam).")
+        btns = {}
+        for n in OPTION_COUNTS:
+            b = tk.Button(row, text=str(n), font=(FONT_UI, 8), width=4,
+                          bg=t["button_bg"], fg=t["button_fg"],
+                          activebackground=t["select_bg"], relief="groove",
+                          command=lambda v=str(n): set_val("options", v))
+            b.pack(side="left", padx=2)
+            btns[str(n)] = b
+
+        def update():
+            for val, b in btns.items():
+                if val == var.get():
+                    b.config(bg=t["accent"], fg=t["accent_fg"], relief="sunken")
+                else:
+                    b.config(bg=t["button_bg"], fg=t["button_fg"], relief="groove")
+
+        update_fns["options"] = update
+        update()
+
+    section("Fetch")
+    options_row()
+
     # Explainer for the Prefer / Allow / Exclude model.
     tk.Label(
         body,
+        # "You won't get zero results." was dropped: it held only through an
+        # unfiltered last-resort search that returned excluded art (N5).
         text=("Prefer = try these first (results broaden automatically if scarce).  "
-              "Allow = include normally.  Exclude = never use.  "
-              "You won't get zero results."),
+              "Allow = include normally.  Exclude = never use."),
         font=(FONT_UI, 9), bg=t["bg"], fg=t["muted"],
         justify="left", anchor="w", wraplength=440,
     ).pack(fill="x", padx=5, pady=(4, 2))
@@ -438,9 +504,8 @@ def open_art_prefs(app):
 
     app._bind_wheel_to_canvas(canvas, canvas)
 
-    # Size + position in ONE geometry call, then reveal flash-free.
-    x = app.window.winfo_x() + (app.window.winfo_width() // 2) - 250
-    y = app.window.winfo_y() + (app.window.winfo_height() // 2) - 290
-    win.geometry(f"500x580+{x}+{y}")
+    # Size from the content (Q16: the typed 500 px clipped the Options row),
+    # position in ONE geometry call, kept on screen (N18), then reveal flash-free.
+    app._fit_dialog(win, canvas, body)
     _reveal(win)
     app._open_modal(win)

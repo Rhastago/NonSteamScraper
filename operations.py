@@ -31,6 +31,12 @@ def restore_from_skip(app_id):
     appfiles.remove_from_skip_list(app_id)
 
 
+def ignore(app_id):
+    """Ignore: hide a game from fetching. It joins the skip list that "not found on
+    SteamGridDB" uses, so Restore brings back either kind. Its art is untouched."""
+    appfiles.add_to_skip_list(app_id)
+
+
 def refetch(app_id):
     """Re-fetch: take the game off the skip list and clear its art so the next
     fetch downloads it again. clear_game_art snapshots first (Undo can put the art
@@ -63,6 +69,43 @@ def apply_option(save_path, url, unsigned_id, is_icon=False, animated=False,
         return False, False
 
 
+# --- Queued icons: "Close Steam & Apply Icons" -------------------------------------
+
+# close_steam_and_apply_icons outcomes.
+ICONS_APPLIED      = "applied"        # written (n may be 0: the poll got there first)
+ICONS_STEAM_STAYED = "steam_stayed"   # Steam was still running after the wait
+ICONS_NOT_WRITTEN  = "not_written"    # the shortcuts.vdf write failed; the queue stays
+
+
+def close_steam_and_apply_icons(on_step=None, wait=20.0, interval=1.5):
+    """The results window's "Close Steam & Apply Icons": stop Steam, wait until it
+    has REALLY exited (a fixed sleep cannot confirm that, and the cached
+    is_steam_running would report a stale True, hence force=True), then write the
+    queued icons. Runs on a worker thread; on_step(text) names each stage. Returns
+    (outcome, n): ICONS_APPLIED with the count written, ICONS_STEAM_STAYED, or
+    ICONS_NOT_WRITTEN (the write failed and the queue is kept for a retry)."""
+    steam_env.stop_steam()
+    if on_step:
+        on_step("Closing Steam")
+    deadline = time.monotonic() + wait
+    closed = not steam_env.is_steam_running(force=True)
+    while not closed and time.monotonic() < deadline:
+        time.sleep(interval)
+        closed = not steam_env.is_steam_running(force=True)
+    if not closed:
+        return ICONS_STEAM_STAYED, 0
+    if on_step:
+        on_step("Applying icons")
+    n = steam_files.apply_pending_icons()
+    if n is None:
+        return ICONS_NOT_WRITTEN, 0
+    # The 4 s poll may have flushed the queue first; an empty queue is success
+    # even when this call wrote 0.
+    if n > 0 or not steam_files.has_pending_icons():
+        return ICONS_APPLIED, n
+    return ICONS_NOT_WRITTEN, 0
+
+
 # --- A fetch run ---------------------------------------------------------------
 
 # run_fetch outcomes (report["outcome"]).
@@ -73,6 +116,64 @@ FETCH_RAN         = "ran"           # the run happened (to the end, or stopped)
 
 UNREACHABLE_MESSAGE = ("Couldn't reach SteamGridDB — nothing was fetched. "
                        "Check your connection and try again.")
+
+
+def _fetch_one(game, i, total, prefs, picked_ids, on_progress, on_log):
+    """One game of run_fetch: find its SteamGridDB id (the one picked in Search →
+    Select, else a search), then download its art. Returns (outcome, FetchedArt or
+    None): outcome "refused" stops the run; a network error, a genuine "not found"
+    (skip-listed — the only outcome that hides a game) and success go on. May raise:
+    run_fetch catches it and skips only this game."""
+    name, app_id = game["name"], game["app_id"]
+    if str(app_id) in picked_ids:
+        outcome, sgdb_id = sgdb.SEARCH_FOUND, picked_ids[str(app_id)]
+        on_log(f"  Using the SteamGridDB match you picked (#{sgdb_id})", None)
+    else:
+        outcome, sgdb_id = sgdb.search_game(name, app_id)
+    if outcome == sgdb.SEARCH_REFUSED:
+        return "refused", None
+    if outcome == sgdb.SEARCH_ERROR:
+        on_log("Network error — will retry on next fetch", "error")
+        return "error", None
+    if outcome != sgdb.SEARCH_FOUND:
+        # Only a genuine "no results" (SEARCH_NOT_FOUND) reaches here.
+        on_log("Not found on SteamGridDB — skipping permanently", "warning")
+        appfiles.add_to_skip_list(app_id)
+        return "not_found", None
+    start_pct, end_pct = i / total * 100, (i + 1) / total * 100
+
+    def slot_progress(label, step, total_steps):
+        pct = start_pct + (step / total_steps) * (end_pct - start_pct)
+        on_progress(pct, f"[{i+1}/{total}] {name[:32]} — {label}")
+
+    return "found", artwork.download_all_artwork(sgdb_id, app_id, prefs,
+                                                 progress_cb=slot_progress,
+                                                 defer_icon=True)
+
+
+def _log_game_outcome(name, elapsed, art, on_log):
+    """The log line for one fetched game. Never says "saved" for a slot whose
+    download failed (B5) or that SteamGridDB did not answer (N6): it names them, and
+    their previous art was kept."""
+    failed, unanswered = art.failed_labels(), art.unanswered
+    if not failed and not unanswered:
+        on_log(f"Artwork saved for {name} ({elapsed:.1f}s)", "applied")
+        return
+    parts = []
+    if failed:
+        parts.append(f"download failed for {', '.join(failed)}")
+    if unanswered:
+        parts.append(f"SteamGridDB did not answer for {', '.join(unanswered)}")
+    detail = "; ".join(parts)
+    if art.applied_paths():
+        on_log(f"Artwork saved for {name} ({elapsed:.1f}s) — {detail}; the previous "
+               "art was kept", "warning")
+    elif not unanswered:
+        on_log(f"Download failed for {name} ({elapsed:.1f}s) — "
+               f"{', '.join(failed)}; the previous art was kept", "error")
+    else:
+        on_log(f"No artwork saved for {name} ({elapsed:.1f}s) — {detail}; the "
+               "previous art was kept. Fetch again later.", "error")
 
 
 def run_fetch(games, prefs, on_progress, on_log, should_stop):
@@ -129,68 +230,47 @@ def run_fetch(games, prefs, on_progress, on_log, should_stop):
         start = time.monotonic()
         name = game["name"]
         app_id = game["app_id"]
-        short = name[:32]
-        game_start = i / total * 100
-        game_end = (i + 1) / total * 100
-
         on_log(f"\nProcessing: {name}", "game")
-        on_progress(game_start, f"[{i+1}/{total}] {short} — Searching SteamGridDB...",
+        on_progress(i / total * 100,
+                    f"[{i+1}/{total}] {name[:32]} — Searching SteamGridDB...",
                     f"Searching: {name}")
-
-        if str(app_id) in picked_ids:
-            outcome, sgdb_id = sgdb.SEARCH_FOUND, picked_ids[str(app_id)]
-            on_log(f"  Using the SteamGridDB match you picked (#{sgdb_id})", None)
-        else:
-            outcome, sgdb_id = sgdb.search_game(name, app_id)
-        if outcome == sgdb.SEARCH_REFUSED:
+        try:
+            outcome, art = _fetch_one(game, i, total, prefs, picked_ids, on_progress, on_log)
+        except Exception as e:
+            # N10: one malformed SteamGridDB record or a failed registry write used
+            # to abort the whole loop — no seal, and the icons of the games already
+            # done never reached shortcuts.vdf. Now only this game is skipped.
+            _debug("run_fetch game")
+            on_log(f"Something went wrong with {name} ({e}) — skipped; its previous "
+                   "art was kept.", "error")
+            continue
+        if outcome == "refused":
             # Safety net for a key revoked after the check: stop, hide nothing.
             on_log("SteamGridDB rejected the API key — fetch stopped. "
                    "No games were hidden.", "error")
             report["stopped"] = "Fetch stopped — SteamGridDB rejected the API key."
             break
-        if outcome == sgdb.SEARCH_ERROR:
-            on_log("Network error — will retry on next fetch", "error")
+        if art is None:
             continue
-        if outcome != sgdb.SEARCH_FOUND:
-            # Only a genuine "no results" (SEARCH_NOT_FOUND) reaches here.
-            on_log("Not found on SteamGridDB — skipping permanently", "warning")
-            appfiles.add_to_skip_list(app_id)
-            continue
-
-        def slot_progress(label, step, total_steps, _i=i, _short=short,
-                          _start=game_start, _end=game_end):
-            pct = _start + (step / total_steps) * (_end - _start)
-            on_progress(pct, f"[{_i+1}/{total}] {_short} — {label}")
-
-        results = artwork.download_all_artwork(sgdb_id, app_id, prefs,
-                                          progress_cb=slot_progress, defer_icon=True)
         elapsed = time.monotonic() - start
-        # Never say "saved" for a slot whose download failed (B5): name the failed
-        # slots, whose previous art was kept.
-        failed = results.failed_labels()
-        if not failed:
-            on_log(f"Artwork saved for {name} ({elapsed:.1f}s)", "applied")
-        elif results.applied_paths():
-            on_log(f"Artwork saved for {name} ({elapsed:.1f}s) — download failed "
-                   f"for {', '.join(failed)}; the previous art was kept", "warning")
-        else:
-            on_log(f"Download failed for {name} ({elapsed:.1f}s) — "
-                   f"{', '.join(failed)}; the previous art was kept", "error")
-        if results.icon_write:
-            uid, icon_path = results.icon_write
+        _log_game_outcome(name, elapsed, art, on_log)
+        if art.icon_write:
+            uid, icon_path = art.icon_write
             icons_to_set[uid] = icon_path
-        fetch_results.append({"name": name, "app_id": app_id, "results": results})
+        fetch_results.append({"name": name, "app_id": app_id, "results": art})
 
     # End of the run: seal every entry — the user has accepted this run's art.
     restore.seal_restore_point()
 
     if icons_to_set:
-        if steam_env.is_steam_running():
-            steam_files.save_pending_icons(icons_to_set)
+        n, queued = steam_files.write_or_queue_icons(icons_to_set)
+        if n is None:
+            on_log(f"Couldn't write {len(icons_to_set)} icon(s) to shortcuts.vdf — "
+                   "they are queued and will be retried automatically.", "warning")
+        elif queued:
             on_log(f"Steam is running — {len(icons_to_set)} icon(s) queued; "
                    "they'll apply automatically when you close Steam.", "warning")
         else:
-            n = steam_files.set_shortcut_icons(icons_to_set)
             on_log(f"Applied {n} icon(s) to shortcuts.vdf.", "applied")
 
     head = "Stopped —" if report["stopped"] else "Done!"

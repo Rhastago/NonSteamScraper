@@ -1,4 +1,4 @@
-"""The Undo restore point (~/.steamart_restore): byte copies of a game's art
+"""The Undo restore point (appfiles.RESTORE_FOLDER): byte copies of a game's art
 taken before a fetch or a Re-fetch changes it, the ordered rules that decide
 which copy wins, sealing a run, and putting it all back. Also clear_game_art,
 the ONE deletion behind Re-fetch and Search → Select. tkinter-free; every
@@ -17,7 +17,7 @@ import appfiles
 import steam_env
 import steam_files
 
-# ~/.steamart_restore/ holds ONE restore point: manifest.json plus <id>/<file>
+# RESTORE_FOLDER holds ONE restore point: manifest.json plus <id>/<file>
 # byte copies (mtime preserved via copy2) taken before a fetch or Re-fetch
 # destroys art, so Undo can put back what was there. The manifest is written
 # atomically (temp file + os.replace), the same rule as the shortcuts.vdf writer
@@ -43,14 +43,12 @@ def _load_restore_manifest():
         return {"version": 1, "grid_folder": "", "entries": {}}
 
 def _save_restore_manifest(m):
-    """Atomically write the restore manifest: temp file inside RESTORE_FOLDER,
-    then os.replace() onto position — a crash mid-write can never leave a
-    corrupt manifest that pretends copies exist which do not."""
+    """Atomically write the restore manifest through appfiles.write_text_atomic (a
+    unique temp file, fsync, os.replace — N15: a fixed temp name and no fsync before)
+    — a crash mid-write can never leave a corrupt manifest that pretends copies exist
+    which do not."""
     os.makedirs(appfiles.RESTORE_FOLDER, exist_ok=True)
-    tmp = os.path.join(appfiles.RESTORE_FOLDER, "manifest.json.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(m, f, indent=2)
-    os.replace(tmp, _restore_manifest_path())
+    appfiles.write_text_atomic(_restore_manifest_path(), json.dumps(m, indent=2))
 
 def _files_matching_id(fnames, unsigned_id):
     """The filenames whose LEADING DIGIT RUN equals str(unsigned_id). NEVER a
@@ -151,7 +149,7 @@ def clear_game_art(unsigned_id):
 def begin_restore_run():
     """Start of a fetch run: drop every SEALED entry (deleting its copies from
     disk as well as its manifest row, so the store cannot leak like the old
-    ~/.steamart_backup pile) and clear `pending` on the rest, adopting the
+    backup-folder pile) and clear `pending` on the rest, adopting the
     Re-fetches performed since the last run into this one. Never raises."""
     try:
         m = _load_restore_manifest()
@@ -197,70 +195,111 @@ def restore_point_game_count():
     Never raises."""
     return len(_load_restore_manifest().get("entries", {}))
 
+def _copy_back(src, dst):
+    """Put one saved file back: a copy next to dst, then os.replace onto it, so a
+    copy that fails half-way never leaves a truncated image in the grid folder.
+    Raises OSError."""
+    tmp = dst + ".part"
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+def _undo_entry(eid, entry, managed):
+    """Undo one game. FIRST copy every saved file back (replacing a same-named
+    current file); only when all of them are back delete the app's current files
+    for this id that the snapshot did not have (never a file this app did not write,
+    never a neighbouring game's). A failed copy stops there: the game keeps its
+    current art and the entry stays for a retry (N9: deleting first left a game with
+    neither when a copy then failed). Then the registry: a restored file the app had
+    written is registered again, one that was the user's own is taken OFF it (N1),
+    and deleted files leave it. Returns (ok, files copied back, files removed)."""
+    names = entry.get("files", [])
+    copied = 0
+    for fname in names:
+        try:
+            _copy_back(os.path.join(appfiles.RESTORE_FOLDER, eid, fname),
+                       os.path.join(steam_env.GRID_FOLDER, fname))
+            copied += 1
+        except OSError:
+            _debug("undo_restore_point copy")
+            return False, copied, 0
+    gone = []
+    try:
+        for fname in _files_matching_id(os.listdir(steam_env.GRID_FOLDER), eid):
+            cur = os.path.join(steam_env.GRID_FOLDER, fname)
+            if fname not in names and cur in managed:
+                try:
+                    os.remove(cur)
+                    gone.append(cur)
+                except OSError:
+                    _debug("undo_restore_point remove")
+    except OSError:
+        _debug("undo_restore_point listdir")
+    own = set(entry.get("managed", []))
+    try:
+        for fname in names:
+            if fname in own:
+                appfiles.register_managed_file(os.path.join(steam_env.GRID_FOLDER, fname))
+        appfiles.unregister_managed_files(
+            [os.path.join(steam_env.GRID_FOLDER, f) for f in names if f not in own] + gone)
+    except OSError:
+        _debug("undo_restore_point registry")
+    return True, copied, len(gone)
+
 def undo_restore_point():
     """Restore the art recorded in the restore point. If has_restore_point() is
     false — including the account-mismatch case — do nothing and return a zero
-    summary; never restore across accounts. Per entry: delete the current files
-    in GRID_FOLDER whose leading digit run equals this id AND that are in the
-    managed registry (never a file this app did not write, never a neighbouring
-    game's), copy the snapshot's files back and re-register the managed subset,
-    and collect {unsigned_id: icon} for every entry whose recorded icon is not
-    null. Then, once: queue the icons via save_pending_icons() when Steam is
-    running, else write them with set_shortcut_icons(). Finally wipe the store.
-    Returns {games, files, removed, queued}. Never raises."""
-    zero = {"games": 0, "files": 0, "removed": 0, "queued": False}
+    summary; never restore across accounts. Each entry is undone by _undo_entry;
+    {unsigned_id: icon} is collected for every restored entry whose recorded icon is
+    not null and written once through steam_files.write_or_queue_icons (queued while
+    Steam runs or when the write fails). Restored entries leave the store; an entry
+    whose copy failed stays, with its copies, so Undo can be pressed again — the
+    store is wiped only when nothing is left.
+    Returns {games, files, removed, queued, failed, icon_write_failed}: games and
+    files restored, files removed, whether the icons were queued, the number of
+    games kept for a retry, and whether the icon write failed. Never raises."""
+    zero = {"games": 0, "files": 0, "removed": 0, "queued": False, "failed": 0,
+            "icon_write_failed": False}
     try:
         if not has_restore_point():
             return zero
         m = _load_restore_manifest()
         managed = appfiles.load_managed_files()
         icons = {}
-        restored = 0
-        removed = 0
+        restored = removed = games = 0
+        kept = {}
         for eid, entry in m.get("entries", {}).items():
-            # 1. delete current files in the managed registry matching this id
-            try:
-                for fname in _files_matching_id(os.listdir(steam_env.GRID_FOLDER), eid):
-                    cur = os.path.join(steam_env.GRID_FOLDER, fname)
-                    if cur in managed:
-                        try:
-                            os.remove(cur)
-                            removed += 1
-                        except OSError:
-                            pass
-            except OSError:
-                _debug("undo_restore_point listdir")
-            # 2. copy the snapshot's files back; re-register the managed subset
-            for fname in entry.get("files", []):
-                dst = os.path.join(steam_env.GRID_FOLDER, fname)
-                try:
-                    shutil.copy2(os.path.join(appfiles.RESTORE_FOLDER, eid, fname), dst)
-                    restored += 1
-                except OSError:
-                    _debug("undo_restore_point copy")
-                    continue
-                if fname in entry.get("managed", []):
-                    try:
-                        appfiles.register_managed_file(dst)
-                    except OSError:
-                        _debug("undo_restore_point register")
-            # 3. collect the icon ("" restores "no icon"; None = no shortcut)
+            ok, copied, gone = _undo_entry(eid, entry, managed)
+            restored += copied
+            removed += gone
+            if not ok:
+                kept[eid] = entry
+                continue
+            games += 1
+            # the icon ("" restores "no icon"; None = no shortcut)
             icon = entry.get("icon")
             if icon is not None:
                 try:
                     icons[int(eid)] = icon
                 except (ValueError, TypeError):
                     _debug("undo_restore_point icon key")
-        queued = False
-        if icons:
-            if steam_env.is_steam_running():
-                steam_files.save_pending_icons(icons)
-                queued = True
-            else:
-                steam_files.set_shortcut_icons(icons)
-        clear_restore_point()
-        return {"games": len(m.get("entries", {})), "files": restored,
-                "removed": removed, "queued": queued}
+        written, queued = steam_files.write_or_queue_icons(icons)
+        if kept:
+            for eid in m["entries"]:
+                if eid not in kept:
+                    shutil.rmtree(os.path.join(appfiles.RESTORE_FOLDER, eid), ignore_errors=True)
+            m["entries"] = kept
+            _save_restore_manifest(m)
+        else:
+            clear_restore_point()
+        return {"games": games, "files": restored, "removed": removed, "queued": queued,
+                "failed": len(kept), "icon_write_failed": written is None}
     except Exception:
         _debug("undo_restore_point")
         return zero

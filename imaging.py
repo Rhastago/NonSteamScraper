@@ -115,6 +115,27 @@ def _play_frames(lbl, frames, delays, i=0):
         pass
 
 
+def _show_text_only(lbl, text):
+    """Tk thread: the label shows `text` and NO picture. The image is cleared, any
+    animation stopped and any decode in flight made stale — a Tk label with an image
+    shows the image, not its text, so the previous option's picture used to stay
+    under a counter that had moved on, and Apply installed art never seen (N8)."""
+    if getattr(lbl, "_anim_id", None):
+        try:
+            lbl.after_cancel(lbl._anim_id)
+        except Exception:
+            pass
+        lbl._anim_id = None
+    lbl._load_token = object()
+    lbl.config(image="", text=text, width=0, height=0)
+    lbl.image = None
+
+
+def _show_unavailable(lbl):
+    """Tk thread: no picture for this option (N8)."""
+    _show_text_only(lbl, "preview\nunavailable")
+
+
 def _update_badge(badge_label, meta):
     """Show or hide the top-left badge overlay based on image metadata."""
     parts = []
@@ -164,7 +185,7 @@ def _display_image_on_label(lbl, path, on_animated=None, cache=None, cache_key=N
         try:
             kind, image, delays = future.result()
         except Exception:
-            lbl.config(text="preview\nunavailable")
+            _show_unavailable(lbl)
             return
         if on_animated:
             on_animated(kind == "animated")
@@ -288,17 +309,21 @@ def update_view(state, img_label, counter_label):
             _display_image_on_label(img_label, state["paths"][index], on_animated,
                                     cache=cache, cache_key=index)
     else:
-        # Fetch on demand — keep the current image visible while downloading to
-        # avoid the label reverting to character-unit dimensions mid-load.
+        # Fetch on demand. The previous option's picture must not stay up while this
+        # one downloads (N8); the label is placed at the image box's full size, so
+        # clearing it does not change the layout.
         counter_label.config(text=f"{index + 1} / {len(state['option_urls'])} (loading...)")
+        _show_text_only(img_label, "loading...")
         loading = state.setdefault("_loading", set())
         if index in loading:
             return  # already downloading this option; it shows when it lands
         loading.add(index)
-        url = state["option_urls"][index]
+        # The option's preview source (a thumbnail, or the full file — artwork.preview_url),
+        # never the full image a thumbnail stands for.
+        url = state["preview_urls"][index]
         ext = url.split(".")[-1].split("?")[0]
         # The {base}_{i} cache name the fetch's own previews use — never renamed.
-        cache_path = state["paths"][0].rsplit("_", 1)[0] + f"_{index}.{ext}"
+        cache_path = f"{state['cache_base']}_{index}.{ext}"
 
         def land(future, expected=index, _on_anim=on_animated):
             # Tk thread: file the preview under ITS index (B9: appending in
@@ -312,11 +337,11 @@ def update_view(state, img_label, counter_label):
                 state["paths"][expected] = cache_path
             if state["index"] != expected:
                 return
+            counter_label.config(text=f"{expected + 1} / {len(state['option_urls'])}")
             if ok:
                 _display_image_on_label(img_label, cache_path, _on_anim)
-                counter_label.config(text=f"{expected + 1} / {len(state['option_urls'])}")
             else:
-                img_label.config(text="preview\nunavailable")
+                _show_unavailable(img_label)
 
         # The download (worker) goes through the HTTP seam with a status check (a
         # non-200 writes no file) and lands atomically (.part + os.replace).
