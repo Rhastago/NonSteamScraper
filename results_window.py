@@ -18,7 +18,150 @@ from theming import FONT_UI
 import steam_files
 import steam_env
 import operations
+import artwork
+import imaging
 from imaging import update_view
+
+
+class AnimatedPreviewLoader:
+    """One results card's on-demand download of its animated options' previews
+    (ruling Q19): too big to fetch with the run (several MB each, one 2XKO cover
+    31.7 MB), so reaching one shows a panel in the image box — how much of the
+    file has arrived ("12.4 of 31.7 MB"), a bar, and Cancel; after Cancel, Download
+    starts it again. Downloads queue two at a time across all cards
+    (imaging._ANIM_POOL). The worker only writes numbers into the job dict; the Tk
+    thread reads them every POLL_MS (no widget is touched off the Tk thread)."""
+
+    POLL_MS = 150
+
+    def __init__(self, app, img_frame):
+        t = app.theme
+        self.panel = tk.Frame(img_frame, bg=t["placeholder"])
+        self.text = tk.Label(self.panel, text="", bg=t["placeholder"], fg=t["fg"],
+                             font=(FONT_UI, 9), wraplength=260, justify="center")
+        self.text.pack(pady=(0, 4))
+        try:
+            self.bar = ttk.Progressbar(self.panel, mode="determinate", maximum=100,
+                                       length=220, style="Accent.Horizontal.TProgressbar")
+        except Exception:
+            self.bar = ttk.Progressbar(self.panel, mode="determinate", maximum=100,
+                                       length=220)
+        self.bar.pack()
+        self.button = app._btn(self.panel, "Cancel", self._press, font=(FONT_UI, 9))
+        self.button.pack(pady=(6, 0))
+        # A closed results window stops its downloads.
+        self.panel.bind("<Destroy>", lambda e: self._cancel_all(), add="+")
+        self.jobs = {}      # index -> job dict (see start)
+        self.shown = None   # the option whose panel is up
+
+    def hide(self):
+        self.shown = None
+        try:
+            self.panel.place_forget()
+        except tk.TclError:
+            pass
+
+    def start(self, index, url, cache_path, finish):
+        """Tk thread: the card now shows option `index`, whose animated preview is
+        not on disk. Starts (or keeps) its download and shows the panel. finish(ok)
+        runs on the Tk thread when the file has landed or failed — not on Cancel."""
+        if index not in self.jobs:
+            self._submit(index, url, cache_path, finish)
+        self.shown = index
+        try:
+            self.panel.place(relx=0.5, rely=0.5, anchor="center")
+            self.panel.lift()
+        except tk.TclError:
+            return
+        self._draw()
+        self.panel.after(self.POLL_MS, self._tick)
+
+    def _submit(self, index, url, cache_path, finish):
+        job = {"cancel": threading.Event(), "done": 0, "total": None, "status": "waiting",
+               "args": (url, cache_path, finish)}
+        self.jobs[index] = job
+
+        def run():   # worker thread: numbers only
+            if job["cancel"].is_set():
+                return False
+            job["status"] = "running"
+            return artwork.download_artwork(
+                url, cache_path, False, cancel=job["cancel"],
+                progress=lambda done, total: job.update(done=done, total=total))
+
+        def landed(future, _i=index):
+            try:
+                ok = future.result()
+            except Exception:
+                ok = False
+            if job["cancel"].is_set():
+                job["status"] = "cancelled"
+                if self.shown == _i:
+                    self._draw()
+                return
+            self.jobs.pop(_i, None)
+            if self.shown == _i:
+                self.hide()
+            finish(ok)
+        imaging._when_done(self.panel, imaging._ANIM_POOL.submit(run), landed)
+
+    def _press(self):
+        job = self.jobs.get(self.shown)
+        if job is None:
+            return
+        if job["status"] == "cancelled":
+            index = self.shown
+            del self.jobs[index]
+            self._submit(index, *job["args"])
+            self._draw()
+            self.panel.after(self.POLL_MS, self._tick)
+        else:
+            job["cancel"].set()
+            job["status"] = "cancelled"
+            self._draw()
+
+    def _cancel_all(self):
+        for job in self.jobs.values():
+            job["cancel"].set()
+
+    def _tick(self):
+        try:
+            if self.shown is None or not self.panel.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        job = self.jobs.get(self.shown)
+        if job is None or job["status"] == "cancelled":
+            return
+        self._draw()
+        self.panel.after(self.POLL_MS, self._tick)
+
+    def _draw(self):
+        job = self.jobs.get(self.shown)
+        if job is None:
+            return
+        mb = lambda n: f"{n / 1e6:.1f}"
+        total = job["total"]
+        try:
+            if job["status"] == "cancelled":
+                size = f" ({mb(total)} MB)" if total else ""
+                self.text.config(text=f"Download cancelled{size}.")
+                self.button.config(text="Download")
+                self.bar["value"] = 0
+                return
+            self.button.config(text="Cancel")
+            if job["status"] == "waiting":
+                self.text.config(text="Waiting to download the animated preview…")
+                self.bar["value"] = 0
+            elif total:
+                self.text.config(text=f"Downloading the animated preview\n"
+                                      f"{mb(job['done'])} of {mb(total)} MB")
+                self.bar["value"] = 100 * job["done"] / total
+            else:
+                self.text.config(text=f"Downloading the animated preview\n"
+                                      f"{mb(job['done'])} MB")
+        except tk.TclError:
+            pass
 
 
 class ResultsWindow:
@@ -597,6 +740,9 @@ class ResultsWindow:
             img_frame.pack_propagate(False)
             img_frame.grid(row=0, column=1, pady=(0, 6))
             state["img_frame"] = img_frame
+            # Animated options' previews download when reached, with a bar and
+            # Cancel (Q19).
+            state["animated_loader"] = AnimatedPreviewLoader(app, img_frame)
             img_label = tk.Label(img_frame, bg=t["placeholder"], fg=t["fg"],
                                   text="loading...", wraplength=200)
             img_label.place(x=0, y=0, relwidth=1, relheight=1)

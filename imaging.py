@@ -12,9 +12,11 @@ garbage-collected to blank.
 
 import queue
 import threading
+import tkinter as tk
 from concurrent.futures import Future
 
 import artwork
+from theming import FONT_UI
 from PIL import Image, ImageTk
 
 
@@ -53,6 +55,10 @@ class _DaemonPool:
 # Previews decode two at a time; on-demand preview downloads run two at a time.
 _DECODE_POOL = _DaemonPool(2)
 _FETCH_POOL = _DaemonPool(2)
+# Animated previews the results window downloads on demand (Q19): two at a time
+# across all cards, so a results window full of animated options cannot flood the
+# connection.
+_ANIM_POOL = _DaemonPool(2)
 
 # How often the Tk thread looks at a pending Future (ms).
 POLL_MS = 20
@@ -131,6 +137,34 @@ def _show_text_only(lbl, text):
     lbl.image = None
 
 
+# The spinner shown while an animated preview is decoded again on a revisit (Q21b):
+# a quarter turn per tick.
+_SPINNER = "◐◓◑◒"
+SPIN_MS = 120
+
+
+def _spin(lbl, text, token, i=0):
+    """Tk thread: a big turning glyph (its own label, about three times the text
+    size — ruling Q21b) above `text` on lbl until the picture is up. Stops, and
+    hides the glyph, when the label's load token changes (another option was asked
+    for, or the decode failed) or an image has been set."""
+    try:
+        sp = getattr(lbl, "_spinner", None)
+        if sp is None:
+            sp = lbl._spinner = tk.Label(lbl.master, bg=lbl.cget("bg"), fg=lbl.cget("fg"),
+                                         font=(FONT_UI, 30))
+        if getattr(lbl, "_load_token", None) is not token or str(lbl.cget("image")):
+            sp.place_forget()
+            return
+        if i == 0:
+            lbl.config(text=f"\n\n{text}")   # below the glyph
+            sp.place(relx=0.5, rely=0.36, anchor="center")
+        sp.config(text=_SPINNER[i % len(_SPINNER)])
+        lbl.after(SPIN_MS, lambda: _spin(lbl, text, token, i + 1))
+    except Exception:
+        pass   # the window went away
+
+
 def _show_unavailable(lbl):
     """Tk thread: no picture for this option (N8)."""
     _show_text_only(lbl, "preview\nunavailable")
@@ -151,7 +185,8 @@ def _update_badge(badge_label, meta):
         badge_label.place_forget()
 
 
-def _display_image_on_label(lbl, path, on_animated=None, cache=None, cache_key=None):
+def _display_image_on_label(lbl, path, on_animated=None, cache=None, cache_key=None,
+                            on_shown=None):
     """Display the image at path on lbl. Plays frame-by-frame if the image is animated.
     on_animated(bool) is called with the actual animation status detected from the file.
 
@@ -165,6 +200,8 @@ def _display_image_on_label(lbl, path, on_animated=None, cache=None, cache_key=N
     cache/cache_key: when both are given, a successfully-built STATIC PhotoImage is
     stored as cache[cache_key] so a later revisit can assign it synchronously and skip
     the off-thread decode. Animated images are never cached.
+
+    on_shown() runs on the Tk thread once the picture (or its first frame) is up.
     """
     # Cancel any in-flight animation — this runs on the UI thread (safe).
     if hasattr(lbl, "_anim_id") and lbl._anim_id:
@@ -189,6 +226,8 @@ def _display_image_on_label(lbl, path, on_animated=None, cache=None, cache_key=N
             return
         if on_animated:
             on_animated(kind == "animated")
+        if on_shown:
+            on_shown()
         if kind == "animated":
             _play_frames(lbl, image, delays)
             return
@@ -272,6 +311,28 @@ def update_view(state, img_label, counter_label):
             _meta["animated"] = is_anim
             _update_badge(_bl, _meta)
 
+    # A card's animated-preview download panel belongs to the option it was shown
+    # for: hidden on every move; the animated paths below bring it back (Q19).
+    loader = state.get("animated_loader")
+    if loader is not None:
+        loader.hide()
+    animated = bool(meta.get("animated") or meta.get("animated_preview"))
+    plain_counter = f"{index + 1} / {len(state['option_urls'])}"
+
+    def load_animated(path, cache=None, cache_key=None):
+        # An animated preview is decoded on every show (its frames are not kept,
+        # to save memory); a big one takes seconds. Say so with the turning glyph,
+        # and never leave the previous option's picture up meanwhile (Q21/Q21b).
+        counter_label.config(text=f"{plain_counter} (loading...)")
+        _show_text_only(img_label, "Loading animated preview…")
+
+        def shown(_expected=index):
+            if state["index"] == _expected:
+                counter_label.config(text=plain_counter)
+        _display_image_on_label(img_label, path, on_animated,
+                                cache=cache, cache_key=cache_key, on_shown=shown)
+        _spin(img_label, "Loading animated preview…", img_label._load_token)
+
     if index in state["paths"]:
         # Per-index decoded-image cache: revisiting an index via ◀/▶ should be
         # instant instead of re-opening + re-decoding the file off-thread every time
@@ -305,6 +366,8 @@ def update_view(state, img_label, counter_label):
             img_label.image = cached
             if badge_label:
                 _update_badge(badge_label, meta)
+        elif animated:
+            load_animated(state["paths"][index], cache=cache, cache_key=index)
         else:
             _display_image_on_label(img_label, state["paths"][index], on_animated,
                                     cache=cache, cache_key=index)
@@ -325,23 +388,38 @@ def update_view(state, img_label, counter_label):
         # The {base}_{i} cache name the fetch's own previews use — never renamed.
         cache_path = f"{state['cache_base']}_{index}.{ext}"
 
-        def land(future, expected=index, _on_anim=on_animated):
+        def finish(ok, expected=index, _on_anim=on_animated):
             # Tk thread: file the preview under ITS index (B9: appending in
             # finish order showed option 5's image under option 4).
-            try:
-                ok = future.result()
-            except Exception:
-                ok = False
             loading.discard(expected)
             if ok:
                 state["paths"][expected] = cache_path
             if state["index"] != expected:
                 return
             counter_label.config(text=f"{expected + 1} / {len(state['option_urls'])}")
-            if ok:
+            if ok and animated:
+                load_animated(cache_path)      # the first show after its download, too
+            elif ok:
                 _display_image_on_label(img_label, cache_path, _on_anim)
             else:
                 _show_unavailable(img_label)
+
+        if animated and loader is not None:
+            # A big animated file: the card shows its size, progress and Cancel
+            # (Q19); finish(ok) runs on the Tk thread when it lands. A cancelled
+            # download is not "loading" any more, so a revisit can start it again.
+            _show_text_only(img_label, "")
+            counter_label.config(text=plain_counter)   # the panel says what is happening
+            loading.discard(index)
+            loader.start(index, url, cache_path, finish)
+            return
+
+        def land(future):
+            try:
+                ok = future.result()
+            except Exception:
+                ok = False
+            finish(ok)
 
         # The download (worker) goes through the HTTP seam with a status check (a
         # non-200 writes no file) and lands atomically (.part + os.replace).

@@ -38,11 +38,17 @@ def clear_managed_artwork():
     restore.clear_restore_point()
     return deleted, len(failed)
 
-def download_artwork(url, save_path, register=True):
+class DownloadCancelled(Exception):
+    """download_artwork's `cancel` event was set (the results window's Cancel)."""
+
+def download_artwork(url, save_path, register=True, progress=None, cancel=None):
     # Download to a temp file and only swap it into place once it's complete, so a
     # dropped connection can never leave a truncated image that gets applied/registered.
     # The streamed response is always closed (N19: a non-200 or an error left its
-    # connection open).
+    # connection open). progress(done, total) — total from Content-Length, or None —
+    # is called from THIS (worker) thread after each chunk, so it must not touch a
+    # widget; cancel (a threading.Event) stops the download between chunks and
+    # removes the .part (an animated preview the user cancelled, ruling Q19).
     tmp = save_path + ".part"
     r = None
     try:
@@ -50,10 +56,19 @@ def download_artwork(url, save_path, register=True):
         if r.status_code != 200:
             print(f"    ❌ Failed ({r.status_code}): {url}"); return False
         written = 0
-        with open(tmp, "wb") as f:
-            for chunk in r.iter_content(1024):
-                f.write(chunk); written += len(chunk)
         expected = r.headers.get("Content-Length")
+        total = int(expected) if expected and expected.isdigit() else None
+        if progress:
+            progress(0, total)
+        with open(tmp, "wb") as f:
+            # 64 KiB chunks: a 30 MB animated file in 1 KiB chunks was ~30,000
+            # Python loop turns.
+            for chunk in r.iter_content(65536):
+                if cancel is not None and cancel.is_set():
+                    raise DownloadCancelled(url)
+                f.write(chunk); written += len(chunk)
+                if progress:
+                    progress(written, total)
         # A compressed response (Steam's icon CDN gzips .ico files) states the
         # COMPRESSED length while iter_content yields decoded bytes, so the byte
         # count only means something for an unencoded body. A short compressed body
@@ -71,6 +86,8 @@ def download_artwork(url, save_path, register=True):
         try:
             if os.path.exists(tmp): os.remove(tmp)
         except OSError: pass
+        if isinstance(e, DownloadCancelled):
+            print(f"    Cancelled: {os.path.basename(save_path)}"); return False
         print(f"    ❌ Network error: {e}"); return False
     finally:
         if r is not None:
@@ -225,8 +242,9 @@ def row_thumbnail_path(grid_folder, app_id, names=None):
 
 # The results window's previews (a 300x200 box) come from SteamGridDB's thumbnail
 # of each option: ~7x smaller (measured 2026-10-20 on 200 options: 0.58 MB full vs
-# 0.083 MB thumbnail on average), which matters now that every option is
-# downloaded during the fetch (Q11). Three kinds keep the full file: an ANIMATED
+# 0.083 MB thumbnail on average), which matters now that every still option is
+# downloaded during the fetch (Q11; animated ones wait for the results window,
+# Q19). Three kinds keep the full file: an ANIMATED
 # option (its thumbnail is a still image — why an earlier thumbnail attempt was
 # reverted), Steam's own art (it has no thumbnail) and icons (thumbnails as small as
 # 48 px, little to save). A thumbnail is used only when it is a still image
@@ -242,13 +260,27 @@ def row_thumbnail_path(grid_folder, app_id, names=None):
 def preview_url(img, slot, full=False):
     """The URL an option's preview is downloaded from: the full image when `full`
     (the Settings checkbox), else as described above."""
-    if full or slot == "icons" or is_animated_image(img):
+    if full or slot == "icons" or is_animated_preview(img):
         return img["url"]
     thumb = img.get("thumb")
     if isinstance(thumb, str) and \
             thumb.split("?")[0].rsplit(".", 1)[-1].lower() in ("jpg", "jpeg", "png"):
         return thumb
     return img["url"]
+
+def is_animated_preview(img):
+    """Whether an option's preview is the animated file itself: an animated mime
+    (webp/gif), or an animated PNG served as image/png — is_animated_image cannot
+    tell that one from a static PNG, but SteamGridDB gives every animated asset a
+    VIDEO thumbnail (.webm/.mp4). Such previews are big (often several MB, one
+    2XKO cover is 31.7 MB), so the fetch leaves them for the results window to
+    download when the option is reached (ruling Q19; measured: with Animated =
+    Prefer and 10 options a fetch pulled 163–243 MB per game)."""
+    if is_animated_image(img):
+        return True
+    thumb = img.get("thumb")
+    return isinstance(thumb, str) and \
+        thumb.split("?")[0].rsplit(".", 1)[-1].lower() in ("webm", "mp4")
 
 def is_animated_image(img):
     """True if an SGDB image record refers to animated artwork. SGDB serves animated
@@ -469,18 +501,23 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
             save_path = os.path.join(steam_env.GRID_FOLDER, f"{base}.png")
             bump(f"{art_label} — animated, apply to commit")
 
-        # Previews: every option, downloaded at FULL resolution (img["url"]) using
-        # the original {base}_{i} cache names — unchanged from the serial version, so
-        # animated previews still animate and app.py's on-demand cycling path (which
-        # reconstructs {base}_{i} names) stays valid. They write to DISTINCT paths, so
-        # downloading them concurrently is safe.
+        # Previews: what the results window SHOWS, never what is installed (the
+        # applied file above and "Apply this one" always use the full img["url"]).
+        # Each option's preview comes from preview_url: SteamGridDB's still thumbnail,
+        # or the full file for icons, Steam's own art and the Full-size previews
+        # setting. Animated previews are skipped here and downloaded when the results
+        # window reaches them (Q19). The {base}_{i} cache names are the ones
+        # imaging.update_view rebuilds for an on-demand preview. They write to
+        # DISTINCT paths, so downloading them concurrently is safe.
         preview_imgs = list(enumerate(options))
 
         def fetch_preview(arg, _slot=slot):
             i, img = arg
+            bump(f"Caching {art_label} preview {i+1}/{len(preview_imgs)}")
+            if is_animated_preview(img):
+                return i, None   # downloaded when the results window reaches it (Q19)
             u = preview_url(img, _slot, full); e = u.split(".")[-1].split("?")[0]
             tp = os.path.join(appfiles.CACHE_FOLDER, f"{base}_{i}.{e}")
-            bump(f"Caching {art_label} preview {i+1}/{len(preview_imgs)}")
             # Only a preview that downloaded is recorded (N8): None makes the
             # results window fetch it on demand instead of showing a stale file.
             return i, (tp if download_artwork(u, tp, register=False) else None)
@@ -488,7 +525,7 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
         if preview_imgs:
             with ThreadPoolExecutor(max_workers=sgdb.SGDB_MAX_WORKERS) as ex:
                 pairs = list(ex.map(fetch_preview, preview_imgs))
-            # Re-sort by index so thumb_paths still lines up with options 0..2.
+            # Re-sort by index so thumb_paths lines up with the options, in order.
             thumbs = [tp for _i, tp in sorted(pairs, key=lambda p: p[0])]
         else:
             thumbs = []
@@ -506,6 +543,8 @@ def download_all_artwork(sgdb_id, unsigned_id, prefs=None, progress_cb=None, def
                                        "nsfw":     bool(img.get("nsfw", False)),
                                        "humor":    bool(img.get("humor", False)),
                                        "steam":    bool(img.get("steam_official", False)),
+                                       # its preview is the (big) animated file itself
+                                       "animated_preview": is_animated_preview(img),
                                    }
                                    for img in options
                                ],

@@ -9,13 +9,21 @@ This project adheres to [Semantic Versioning](https://semver.org).
 ### Added
 - **Choose how many options each artwork gets: 1, 3, 5, 7 or 10.** It is the new first row of
   Art Style Preferences, and 5 stays the default. 1 gives just the top pick: Steam's own art
-  when SteamGridDB links the game to its Steam page. Every option is now downloaded during the
-  fetch, so the results screen shows each one at once; before, options 4 and 5 only started
-  downloading when you reached them.
+  when SteamGridDB links the game to its Steam page. Every still option is now downloaded during
+  the fetch, so the results screen shows each one at once; before, options 4 and 5 only started
+  downloading when you reached them. Animated options are the exception (next entry).
+- **Animated previews download when you reach them, with their size, a progress bar and
+  Cancel.** An animated option previews as the whole animation, which can be tens of megabytes,
+  so the fetch no longer downloads them all up front. On the results card an animated option
+  shows "Downloading the animated preview", how many MB of how many, a bar and a Cancel button;
+  after Cancel, Download starts it again. While an animation is being prepared (after its
+  download, or when you go back to one you already saw), a turning loading sign shows until it
+  plays, instead of the previous option's picture.
 - **Faster fetches: the results previews are small thumbnails.** Each option's preview used to
   be the full-size image (measured: about 7 times bigger on average). Covers, wide covers, heroes
   and logos now preview from SteamGridDB's thumbnail; animated art, Steam's own art and icons
-  still preview at full size. "Apply this one" and clicking a preview still use the full image.
+  still preview at full size (animated art when you reach it). "Apply this one" and clicking a
+  preview still use the full image.
   Settings → Previews → **Full-size previews** brings back the old full-size previews; turning
   it on asks first, since fetches then take much longer and use much more data.
 

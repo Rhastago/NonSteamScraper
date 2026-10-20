@@ -1082,8 +1082,8 @@ def preview_env(ui, tmp_path, monkeypatch):
     monkeypatch.setattr(im, "_FETCH_POOL", pool)
     shown = []
     monkeypatch.setattr(im, "_display_image_on_label",
-                        lambda lbl, path, on_anim=None, cache=None, cache_key=None:
-                        shown.append(path))
+                        lambda lbl, path, on_anim=None, cache=None, cache_key=None,
+                        on_shown=None: shown.append(path))
     bodies = {}
     monkeypatch.setattr(sgdb, "http_get", lambda url, **kw: bodies[url])
     cache = tmp_path / "cache"
@@ -2172,3 +2172,104 @@ def test_the_main_window_cannot_be_made_shorter_than_its_controls(ui):
     app._get_workarea = lambda w: (0, 0, 1280, 600)
     app._update_min_height()
     assert sizes[-1] == (560, 520), "never more than the screen allows"
+
+
+# ---------------------------------------------------------------------------
+# Round 6 — animated previews on demand (Q19/Q19b), the revisit spinner (Q21/Q21b)
+# ---------------------------------------------------------------------------
+
+def test_a_revisited_animated_preview_shows_a_turning_spinner_until_it_plays(ui, preview_env):
+    """Q21/Q21b: going back to an animated option re-decodes it; the old picture
+    stayed up with no sign of loading. Now: no picture, '(loading...)', a spinner."""
+    env = preview_env
+    env.state["option_meta"][1] = {"animated": True}
+    env.img.opts["image"] = "option-1-photo"
+    env.img._spinner = None      # a real label has no glyph yet (the stand-in answers any name)
+    _view(ui, env, 1)
+    assert env.img.opts["image"] == ""
+    assert env.counter.opts["text"] == "2 / 5 (loading...)"
+    assert env.img.opts["text"].endswith("Loading animated preview…")
+    glyph = env.img._spinner
+    assert glyph.opts["font"][1] == 30, "big glyph (Q21b)"
+    first = glyph.opts["text"]
+    env.img.pump(rounds=1)
+    assert glyph.opts["text"] != first, "the spinner turns"
+    env.img.opts["image"] = "frame-1"          # the decode put the first frame up
+    env.img.pump()
+    assert "_delayed" not in env.img.opts, "the spinner stopped by itself"
+
+
+class _FakeLoader:
+    def __init__(self):
+        self.started, self.hidden = [], 0
+
+    def start(self, index, url, cache_path, finish):
+        self.started.append((index, url, cache_path))
+        self.finish = finish
+
+    def hide(self):
+        self.hidden += 1
+
+
+def test_an_animated_option_not_on_disk_goes_to_the_cards_download_panel(ui, preview_env):
+    """Q19: animated previews are not fetched with the run; reaching one hands it to
+    the card's panel (size, bar, Cancel) instead of a silent background download."""
+    env = preview_env
+    env.state["option_meta"][4] = {"animated_preview": True}
+    env.state["preview_urls"][4] = "https://x/anim.webp"
+    loader = env.state["animated_loader"] = _FakeLoader()
+    env.img._spinner = None      # a real label has no glyph yet (the stand-in answers any name)
+    _view(ui, env, 4)
+    assert loader.started == [(4, "https://x/anim.webp", str(env.cache / "7p_4.webp"))]
+    assert env.pool.jobs == [], "not the silent on-demand pool"
+    assert env.counter.opts["text"] == "5 / 5", "the panel says what is happening"
+    (env.cache / "7p_4.webp").write_bytes(b"anim")
+    loader.finish(True)
+    assert env.state["paths"][4] == str(env.cache / "7p_4.webp")
+    # the decode after the download takes seconds too: the same spinner, never a blank box
+    assert env.shown[-1] == str(env.cache / "7p_4.webp")
+    assert env.counter.opts["text"] == "5 / 5 (loading...)"
+    assert env.img.opts["text"].endswith("Loading animated preview…")
+    assert env.img._spinner.opts["font"][1] == 30
+    _view(ui, env, 0)
+    assert loader.hidden >= 2, "the panel is hidden on every move"
+
+
+def test_the_animated_download_panel_shows_progress_cancel_and_download_again(ui, monkeypatch):
+    rw = ui.results_window
+    pool = _ManualPool()
+    monkeypatch.setattr(ui.imaging, "_ANIM_POOL", pool)
+    progress_to_send = [(4_500_000, 18_700_000)]
+
+    def fake_download(url, path, register=True, progress=None, cancel=None):
+        for done, total in progress_to_send:
+            progress(done, total)
+        return not (cancel and cancel.is_set())
+    monkeypatch.setattr(artwork, "download_artwork", fake_download)
+    app = make_settings_app(ui, monkeypatch)
+    loader = rw.AnimatedPreviewLoader(app, StandInWidget())
+    finished = []
+
+    # 1. reached: waiting, then the worker reports progress, then it lands
+    loader.start(1, "https://x/a.webp", "/cache/7p_1.webp", lambda ok: finished.append(ok))
+    assert loader.text.opts["text"] == "Waiting to download the animated preview…"
+    job = loader.jobs[1]
+    job.update(status="running", done=4_500_000, total=18_700_000)
+    loader._draw()
+    assert loader.text.opts["text"] == "Downloading the animated preview\n4.5 of 18.7 MB"
+    assert round(loader.bar.opts["value"]) == 24 and loader.button.opts["text"] == "Cancel"
+    pool.finish(0)
+    loader.panel.pump()
+    assert finished == [True] and loader.jobs == {}
+
+    # 2. Cancel: no finish(), the panel offers Download; Download starts it again
+    loader.start(2, "https://x/b.webp", "/cache/7p_2.webp", lambda ok: finished.append(ok))
+    loader.jobs[2]["total"] = 28_700_000
+    loader._press()
+    assert loader.text.opts["text"] == "Download cancelled (28.7 MB)."
+    assert loader.button.opts["text"] == "Download"
+    pool.finish(1)
+    loader.panel.pump()
+    assert finished == [True], "a cancelled download never reaches finish()"
+    loader._press()
+    assert loader.jobs[2]["status"] == "waiting" and len(pool.jobs) == 3

@@ -4208,3 +4208,57 @@ def test_full_size_previews_setting_previews_the_full_images(tmp_path, monkeypat
     prefs = dict(appfiles.DEFAULT_PREFS, full_previews="yes")
     slot = artwork.download_all_artwork(1, 9, prefs=prefs, defer_icon=True).slots["heroes"]
     assert slot["preview_urls"] == ["https://x/h0.png"]
+
+
+# ---------------------------------------------------------------------------
+# Round 6 — animated previews are not fetched with the run (Q19); download hooks
+# ---------------------------------------------------------------------------
+
+def test_is_animated_preview_also_knows_an_animated_png_by_its_video_thumbnail():
+    assert artwork.is_animated_preview({"mime": "image/webp", "url": "u"})
+    assert artwork.is_animated_preview({"mime": "image/png", "url": "a.png",
+                                        "thumb": "https://x/thumb/a.webm"})
+    assert not artwork.is_animated_preview({"mime": "image/png", "url": "s.png",
+                                            "thumb": "https://x/thumb/s.jpg"})
+
+
+def test_the_fetch_leaves_animated_previews_for_the_results_window(tmp_path, monkeypatch):
+    """Measured with Animated=Prefer and 10 options: 163-243 MB per game, nearly all
+    of it animated previews; experiment C cut it by two-thirds."""
+    _install_fetch_mocks(monkeypatch, tmp_path, {"grids": [
+        _static("https://x/s0.png"), _animated("https://x/a1.webp"),
+        dict(_static("https://x/a2.png"), thumb="https://x/thumb/a2.webm"),
+        _static("https://x/s3.png")]})
+    monkeypatch.setattr(sgdb, "get_steam_platform_data", lambda sgdb_id: None)
+    got = []
+    real = artwork.download_artwork
+    monkeypatch.setattr(artwork, "download_artwork", lambda url, save_path, register=True, **k:
+                        got.append(os.path.basename(save_path)) or real(url, save_path, register))
+    prefs = dict(appfiles.DEFAULT_PREFS, animated="ok", options="5")
+    slot = artwork.download_all_artwork(1, 9, prefs=prefs, defer_icon=True).slots["grids"]
+    assert sorted(g for g in got if g.startswith("9p_")) == ["9p_0.png", "9p_3.png"]
+    assert slot["thumb_paths"][1] is None and slot["thumb_paths"][2] is None
+    assert [m["animated_preview"] for m in slot["option_meta"]] == [False, True, True, False]
+
+
+class _ChunkResp(_FakeStreamResp):
+    def close(self):
+        pass
+
+
+def test_download_artwork_reports_progress_and_stops_on_cancel(tmp_path, monkeypatch):
+    import threading
+    chunks = (b"a" * 10, b"b" * 10, b"c" * 10)
+    monkeypatch.setattr(sgdb, "http_get", lambda *a, **k: _ChunkResp(200, chunks, {"Content-Length": "30"}))
+    seen = []
+    assert artwork.download_artwork("u", str(tmp_path / "f.webp"), False,
+                                    progress=lambda d, t: seen.append((d, t))) is True
+    assert seen == [(0, 30), (10, 30), (20, 30), (30, 30)]
+    stop = threading.Event()
+
+    def progress(done, total):
+        if done >= 10:
+            stop.set()     # the user pressed Cancel
+    assert artwork.download_artwork("u", str(tmp_path / "g.webp"), False,
+                                    progress=progress, cancel=stop) is False
+    assert sorted(os.listdir(tmp_path)) == ["f.webp"], "no partial file after a cancel"
